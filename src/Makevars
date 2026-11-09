@@ -1,0 +1,7 @@
+CXX_STD = CXX17
+PGENLIB_OBJECTS = pgenlib/pgenlib_misc.o pgenlib/pgenlib_read.o pgenlib/plink2_base.o \
+  pgenlib/plink2_bits.o pgenlib/plink2_simd.o
+OBJECTS = RcppExports.o cor_geno.o geno.o genotype_impute.o sumstat_impute.o $(PGENLIB_OBJECTS)
+PKG_CPPFLAGS = -DNO_UNALIGNED -DPGENLIB_NOPRINT -Ipgenlib
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
+PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)

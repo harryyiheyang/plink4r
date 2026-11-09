@@ -1,0 +1,14 @@
+Package: plink4r
+Type: Package
+Title: Genotype and Summary-Statistics Imputation from Eigen LD Blocks
+Version: 0.1.3
+Authors@R: person("Yihe", "Yang", email = "yxy1234@case.edu", role = c("aut", "cre"))
+Description: Reads PLINK BED / PGEN genotypes with the bundled pgenlib into a compact 2-bit + int16 store
+    (geno_open) with its cross products, appended columns and correlations, and imputes missing genotype cells
+    and missing GWAS summary statistics from blockwise eigen LD (SBayesRC or plink4r eigen.bin layout),
+    with OpenMP parallelism. Summary-statistics imputation is ported from SBayesRC.QC2.
+License: GPL (>= 3)
+Encoding: UTF-8
+Imports: data.table, arrow, Rcpp, stats
+LinkingTo: Rcpp, RcppEigen
+NeedsCompilation: yes

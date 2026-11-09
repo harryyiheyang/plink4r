@@ -1,0 +1,9 @@
+plink4r: GPL (>= 3), Copyright (c) Yihe Yang.
+
+src/pgenlib/: pgenlib from plink-ng by Christopher Chang, LGPL-3 or later.
+  License files: src/pgenlib/COPYING and src/pgenlib/COPYING.LESSER.
+
+src/simde/: SIMD Everywhere (SIMDe) by Evan Nemerson and contributors, MIT.
+  License file: src/simde/COPYING.
+
+summarystat_impute(): ported from SBayesRC.QC2.
