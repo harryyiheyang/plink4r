@@ -40,9 +40,9 @@
 #'   chromosome may appear in one file only.
 #' @param snp_info Path or data.frame with CHR, BP37 and/or BP38, REF, ALT and
 #'   optionally A1_Freq.
-#' @param blocks Block file: a header line and columns chr, start, end
-#'   (LDetect / bed style, any whitespace) or `Block Chrom StartBP EndBP`
-#'   (SBayesRC). "chr" prefixes are ignored.
+#' @param blocks Block file: always a header line (its names are not
+#'   checked), then exactly three whitespace-separated columns chr, start,
+#'   stop; any other layout is an error. "chr" prefixes are ignored.
 #' @param out_dir Output folder (created if needed).
 #' @param build 38 or 37: which BP column of `snp_info` is used; the block file
 #'   and the genotypes must be on the same build.
@@ -226,22 +226,22 @@ ld_panel_build <- function(geno, snp_info, blocks, out_dir, build = 38, sample =
   m
 }
 
-# Block file: header, then chr start end (whitespace) or Block Chrom StartBP EndBP.
+# Block file: first line is a header (names not checked), then exactly three
+# whitespace-separated columns chr start stop; anything else is an error.
 .ldb_read_blocks <- function(path) {
   x <- trimws(readLines(path))
   x <- x[nzchar(x)]
   f <- strsplit(x, "[[:space:]]+")
-  hdr <- f[[1L]]
-  body <- do.call(rbind, lapply(f[-1L], `[`, seq_along(hdr)))
-  h <- tolower(hdr)
-  if (all(c("chrom", "startbp", "endbp") %in% h)) {
-    chr <- body[, match("chrom", h)]; st <- body[, match("startbp", h)]; en <- body[, match("endbp", h)]
-  } else {
-    if (!is.na(suppressWarnings(as.numeric(hdr[2L])))) stop("Block file needs a header line: ", path, call. = FALSE)
-    chr <- body[, 1L]; st <- body[, 2L]; en <- body[, 3L]
+  nf <- lengths(f)
+  if (length(f) < 2L || any(nf != 3L)) {
+    bad <- which(nf != 3L)
+    stop("Block file must be a header line plus three whitespace-separated columns chr start stop",
+         if (length(bad)) paste0(" (line ", bad[1L], " has ", nf[bad[1L]], ")"), ": ", path, call. = FALSE)
   }
-  bl <- data.table::data.table(src = seq_along(chr), CHR = .ldb_chr(chr),
-                               start = as.numeric(st), end = as.numeric(en))
+  body <- do.call(rbind, f[-1L])
+  bl <- data.table::data.table(src = seq_len(nrow(body)), CHR = .ldb_chr(body[, 1L]),
+                               start = suppressWarnings(as.numeric(body[, 2L])),
+                               end = suppressWarnings(as.numeric(body[, 3L])))
   if (anyNA(bl$start) || anyNA(bl$end) || any(bl$end <= bl$start)) stop("Bad block coordinates in ", path, call. = FALSE)
   bl <- bl[CHR %in% .ldb_auto]
   data.table::setorder(bl, CHR, start)
