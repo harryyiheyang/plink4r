@@ -49,6 +49,14 @@ geno_dense_cpp <- function(ptr, rows, cols, threads) {
     .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, threads)
 }
 
+score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk) {
+    .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk)
+}
+
+score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows) {
+    .Call(`_plink4r_score_ld_block_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows)
+}
+
 genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows) {
     .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows)
 }
