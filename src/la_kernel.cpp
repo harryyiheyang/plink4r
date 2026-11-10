@@ -18,6 +18,9 @@
 #include <cstdio>
 #include <cstring>
 #include "la_dispatch.h"
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 namespace {
 
@@ -213,10 +216,51 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
   return method;
 }
 
+// sum_l col[l] * (het_l + 2 hom_l): bit b of byte q of het / hom is row 8q + b. Per ISA copy: 16 lanes under
+// AVX-512 (two bytes as a lane mask), 8 under AVX2 (one byte expanded to lane masks), else scalar.
+float plane_dot(const float* col, const unsigned char* het, const unsigned char* hom, int nbyte) {
+#if defined(__AVX512F__)
+  __m512 acc = _mm512_setzero_ps();
+  for (int q = 0; q < nbyte / 2; ++q) {
+    unsigned short h16, o16;
+    std::memcpy(&h16, het + 2 * q, 2); std::memcpy(&o16, hom + 2 * q, 2);
+    const __mmask16 h = h16, o = o16;
+    if ((h | o) == 0) continue;
+    const __m512 c = _mm512_loadu_ps(col + 16 * q);
+    acc = _mm512_mask_add_ps(acc, h, acc, c);
+    acc = _mm512_mask_add_ps(acc, o, acc, _mm512_add_ps(c, c));
+  }
+  return _mm512_reduce_add_ps(acc);
+#elif defined(__AVX2__)
+  const __m256i bits = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+  __m256 acc = _mm256_setzero_ps();
+  for (int q = 0; q < nbyte; ++q) {
+    const unsigned char h = het[q], o = hom[q];
+    if ((h | o) == 0) continue;
+    const __m256 c = _mm256_loadu_ps(col + 8 * q);
+    const __m256i hm = _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(h), bits), bits);
+    const __m256i om = _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(o), bits), bits);
+    acc = _mm256_add_ps(acc, _mm256_and_ps(c, _mm256_castsi256_ps(hm)));
+    acc = _mm256_add_ps(acc, _mm256_and_ps(_mm256_add_ps(c, c), _mm256_castsi256_ps(om)));
+  }
+  __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+  s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
+  return _mm_cvtss_f32(s);
+#else
+  float acc = 0;
+  for (int q = 0; q < nbyte; ++q) {
+    const unsigned char h = het[q], o = hom[q];
+    if ((h | o) == 0) continue;
+    for (int b = 0; b < 8; ++b) acc += col[8 * q + b] * static_cast<float>(((h >> b) & 1) + 2 * ((o >> b) & 1));
+  }
+  return acc;
+#endif
+}
+
 }  // namespace
 
 #define PLINK4R_LA_TABLE PLINK4R_CAT(plink4r_la_, PLINK4R_LA_ISA)
 #define PLINK4R_STR2(x) #x
 #define PLINK4R_STR(x) PLINK4R_STR2(x)
 extern const plink4r::LaFns PLINK4R_LA_TABLE;
-const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, PLINK4R_STR(PLINK4R_LA_ISA)};
+const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, PLINK4R_STR(PLINK4R_LA_ISA)};

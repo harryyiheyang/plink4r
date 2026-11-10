@@ -19,7 +19,7 @@
 //   with a_lj = C_lj / sd_l (sd signed) and A_j = -sum_l a_lj mu_l,
 //   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l het_i} a_lj + 2 sum_{l homalt_i} a_lj.
 //   People are processed in blocks; inside a block the loop runs over SNP columns j (column a_.j / C_.j hot in
-//   cache) and over the people missing j, using 1-bit planes (het / homalt) and an 8-bit lookup table, so C is
+//   cache) and over the people missing j, using 1-bit planes (het / homalt; la_kernel.cpp plane_dot), so C is
 //   streamed from memory once per person block instead of once per (person, missing SNP). C_MM is gathered
 //   from the same hot column.
 //
@@ -38,12 +38,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <sys/resource.h>
 #include <cstdlib>
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
-#define PLINK4R_X86_DISPATCH 1
-#include <immintrin.h>
-#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -61,11 +56,6 @@ using Eigen::VectorXf;
 inline double secs(std::chrono::steady_clock::time_point a) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
 }
-inline double cpu_secs() {  // process user + system CPU time
-  rusage u;
-  getrusage(RUSAGE_SELF, &u);
-  return u.ru_utime.tv_sec + u.ru_stime.tv_sec + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
-}
 inline int tid() {
 #ifdef _OPENMP
   return omp_get_thread_num();
@@ -82,114 +72,14 @@ inline int team() {
   return 1;
 #endif
 }
-// sum_l col[l] * (het_l + 2 hom_l) over the bit-planes of one person (m padded to a multiple of 16 with zeros).
-// Three versions (AVX-512, AVX2, portable); plane_dot_impl() picks the best one the CPU supports at run time,
-// so a default build (no -march flags) still uses AVX-512 / AVX2. PLINK4R_SIMD=avx512|avx2|scalar overrides.
-inline float plane_dot_scalar(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
-  float acc = 0;
-  for (int q = 0; q < nbyte; ++q) {
-    const uint8_t h = het[q], o = hom[q];
-    if ((h | o) == 0) continue;
-    for (int b = 0; b < 8; ++b) acc += col[8 * q + b] * static_cast<float>(((h >> b) & 1) + 2 * ((o >> b) & 1));
-  }
-  return acc;
-}
-inline float plane_dot_words_scalar(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
-  float acc = 0;
-  for (int t = 0; t < nwl; ++t) {
-    const int q = wl[t];
-    acc += plane_dot_scalar(col + 16 * q, het + 2 * q, hom + 2 * q, 2);
-  }
-  return acc;
-}
-#if defined(PLINK4R_X86_DISPATCH)
-__attribute__((target("avx512f"))) inline float plane_dot_avx512(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
-  __m512 acc = _mm512_setzero_ps();
-  const uint16_t* h16 = reinterpret_cast<const uint16_t*>(het);
-  const uint16_t* o16 = reinterpret_cast<const uint16_t*>(hom);
-  for (int q = 0; q < nbyte / 2; ++q) {
-    const __mmask16 h = h16[q], o = o16[q];
-    if ((h | o) == 0) continue;
-    const __m512 c = _mm512_loadu_ps(col + 16 * q);
-    acc = _mm512_mask_add_ps(acc, h, acc, c);
-    acc = _mm512_mask_add_ps(acc, o, acc, _mm512_add_ps(c, c));
-  }
-  return _mm512_reduce_add_ps(acc);
-}
-__attribute__((target("avx512f"))) inline float plane_dot_words_avx512(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
-  __m512 acc = _mm512_setzero_ps();
-  const uint16_t* h16 = reinterpret_cast<const uint16_t*>(het);
-  const uint16_t* o16 = reinterpret_cast<const uint16_t*>(hom);
-  for (int t = 0; t < nwl; ++t) {
-    const int q = wl[t];
-    const __mmask16 h = h16[q], o = o16[q];
-    if ((h | o) == 0) continue;
-    const __m512 c = _mm512_loadu_ps(col + 16 * q);
-    acc = _mm512_mask_add_ps(acc, h, acc, c);
-    acc = _mm512_mask_add_ps(acc, o, acc, _mm512_add_ps(c, c));
-  }
-  return _mm512_reduce_add_ps(acc);
-}
-struct Lut8 {  // byte -> 8 lane masks
-  alignas(32) uint32_t v[256][8];
-  Lut8() { for (int x = 0; x < 256; ++x) for (int b = 0; b < 8; ++b) v[x][b] = ((x >> b) & 1) ? 0xFFFFFFFFu : 0u; }
-};
-inline const Lut8& lut8() { static const Lut8 L; return L; }
-__attribute__((target("avx2"))) inline float plane_dot_avx2(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
-  const Lut8& L = lut8();
-  __m256 acc = _mm256_setzero_ps();
-  for (int q = 0; q < nbyte; ++q) {
-    const uint8_t h = het[q], o = hom[q];
-    if ((h | o) == 0) continue;
-    const __m256 c = _mm256_loadu_ps(col + 8 * q);
-    acc = _mm256_add_ps(acc, _mm256_and_ps(c, _mm256_load_ps(reinterpret_cast<const float*>(L.v[h]))));
-    acc = _mm256_add_ps(acc, _mm256_and_ps(_mm256_add_ps(c, c), _mm256_load_ps(reinterpret_cast<const float*>(L.v[o]))));
-  }
-  __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-  s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
-  return _mm_cvtss_f32(s);
-}
-__attribute__((target("avx2"))) inline float plane_dot_words_avx2(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
-  float acc = 0;
-  for (int t = 0; t < nwl; ++t) {
-    const int q = wl[t];
-    acc += plane_dot_avx2(col + 16 * q, het + 2 * q, hom + 2 * q, 2);
-  }
-  return acc;
-}
-#endif
-
-using PlaneDotFn = float (*)(const float*, const uint8_t*, const uint8_t*, int);
-using PlaneDotWordsFn = float (*)(const float*, const uint8_t*, const uint8_t*, const int*, int);
-struct PlaneDot {
-  PlaneDotFn dot;
-  PlaneDotWordsFn words;
-  const char* isa;
-};
-inline PlaneDot pick_plane_dot() {
-  const char* env = std::getenv("PLINK4R_SIMD");
-  const std::string want = env ? env : "";
-#if defined(PLINK4R_X86_DISPATCH)
-  __builtin_cpu_init();
-  const bool a512 = __builtin_cpu_supports("avx512f"), a2 = __builtin_cpu_supports("avx2");
-  if (a512 && (want.empty() || want == "avx512")) return {plane_dot_avx512, plane_dot_words_avx512, "avx512"};
-  if (a2 && (want.empty() || want == "avx512" || want == "avx2")) return {plane_dot_avx2, plane_dot_words_avx2, "avx2"};
-#endif
-  return {plane_dot_scalar, plane_dot_words_scalar, "scalar"};
-}
-// The choice is made once per process; PLINK4R_SIMD is read the first time.
-inline const PlaneDot& plane_dot_impl() { static const PlaneDot d = pick_plane_dot(); return d; }
 }  // namespace ik
 
 // ---- LD of one block: C, the scaled columns a_lj and A_j, the anchor mean / sd per row.
 struct ImputeLD {
-  int m = 0, k = 0, mp = 0, nw = 0;
-  bool restrict_nbr = false;
+  int m = 0, k = 0, mp = 0;
   std::vector<int> vi;                  // 0-based PGEN variant per working row
   std::vector<float> mu, sd, isd, Aj;   // 2p, s sqrt(2p(1-p)) (signed), 1/sd, A_j
   Eigen::MatrixXf C, Aw;
-  std::vector<std::vector<int>> words;  // 16-SNP words scanned per column (neighbour restriction only)
-  double kept_mean = 0, words_frac = 0;
   double t_eig = 0, t_C = 0;
 };
 
@@ -197,7 +87,7 @@ struct ImputeLD {
 // increasing); vi, af, sign: per working row (PGEN variant, PGEN-ALT frequency in (0,1), +1 / -1).
 inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& rows, const std::vector<int>& vi,
                                 const std::vector<double>& af, const std::vector<int>& sign, double delta,
-                                double nbr_frac, int nbr_max, int T, double t_eig = 0) {
+                                int T, double t_eig = 0) {
   using Eigen::MatrixXf;
   using Eigen::VectorXf;
   auto t0 = std::chrono::steady_clock::now();
@@ -238,15 +128,6 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   MatrixXf& Aw = L.Aw;
   Aw = MatrixXf::Zero(mp, m);  // a_lj, padded rows are 0
   L.Aj.assign(m, 0.0f);
-  // Optional neighbour restriction of the rhs (C_MM stays exact): per SNP j keep the rows l with the largest
-  // C_lj^2 until they cover nbr_frac of sum_l C_lj^2 (the rhs error variance from dropping l is ~ C_lj^2),
-  // capped at nbr_max; other a_lj are set to 0, and only the 16-SNP words holding a kept row are scanned.
-  const bool restrict_nbr = (nbr_frac > 0 && nbr_frac < 1) || nbr_max > 0;
-  L.restrict_nbr = restrict_nbr;
-  const int nw = mp / 16;
-  L.nw = nw;
-  L.words.assign(restrict_nbr ? m : 0, std::vector<int>());
-  std::vector<int> kept(m, m);
   const std::vector<float>& isd = L.isd;
   const std::vector<float>& mu = L.mu;
 #ifdef _OPENMP
@@ -255,28 +136,9 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   for (int j = 0; j < m; ++j) {
     float s = 0;
     for (int l = 0; l < m; ++l) { const float v = C(l, j) * isd[l]; Aw(l, j) = v; }
-    if (restrict_nbr) {
-      std::vector<int> idx(m);
-      for (int l = 0; l < m; ++l) idx[l] = l;
-      std::sort(idx.begin(), idx.end(), [&](int x, int y) { return std::fabs(C(x, j)) > std::fabs(C(y, j)); });
-      double tot = 0;
-      for (int l = 0; l < m; ++l) tot += static_cast<double>(C(l, j)) * C(l, j);
-      const double target = (nbr_frac > 0 && nbr_frac < 1) ? nbr_frac * tot : tot;
-      int K = 0;
-      double cum = 0;
-      while (K < m && (nbr_max <= 0 || K < nbr_max) && cum < target) { cum += static_cast<double>(C(idx[K], j)) * C(idx[K], j); ++K; }
-      kept[j] = K;
-      std::vector<char> on(m, 0), won(nw, 0);
-      for (int q = 0; q < K; ++q) { on[idx[q]] = 1; won[idx[q] >> 4] = 1; }
-      for (int l = 0; l < m; ++l) if (!on[l]) Aw(l, j) = 0.0f;
-      for (int q = 0; q < nw; ++q) if (won[q]) L.words[j].push_back(q);
-    }
     for (int l = 0; l < m; ++l) s += Aw(l, j) * mu[l];
     L.Aj[j] = -s;
   }
-  double kept_mean = 0, words_frac = 0;
-  for (int j = 0; j < m; ++j) { kept_mean += kept[j]; words_frac += restrict_nbr ? static_cast<double>(L.words[j].size()) / nw : 1.0; }
-  L.kept_mean = kept_mean / m; L.words_frac = words_frac / m;
   L.t_C = ik::secs(t0);
   return L;
 }
@@ -297,6 +159,7 @@ inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>&
   B.GS.assign(static_cast<std::size_t>(m) * sb, 0);
   B.sum_obs.assign(m, 0.0);
   std::vector<int> bad(T, -1);
+  const bool ident = identity_samples(sidx.data(), ns, static_cast<int>(pf.samples()));
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(T)
 #endif
@@ -304,14 +167,10 @@ inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>&
     const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), ik::tid());
     if (!gv) { bad[ik::tid()] = j; continue; }
     uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
-    double so = 0;
-    for (int s = 0; s < ns; ++s) {
-      const int r = sidx[s];
-      const unsigned c = (gv[r >> 2] >> (2 * (r & 3))) & 3u;
-      dst[s >> 2] |= static_cast<uint8_t>(c << (2 * (s & 3)));
-      if (c != 3u) so += c;
-    }
-    B.sum_obs[j] = so;
+    compact_genovec(gv, sidx.data(), ns, ident, dst);
+    long long miss = 0, alt = 0;
+    count_genovec(dst, sb, &miss, &alt);
+    B.sum_obs[j] = static_cast<double>(alt);
   }
   for (int t = 0; t < T; ++t)
     if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
@@ -324,13 +183,12 @@ struct PersonPlanes {
   int ns = 0, nbyte = 0;
   std::vector<uint8_t> het, hom;          // ns x nbyte
   std::vector<std::vector<int>> Mi;       // missing rows per person, ascending
-  double t_planes = 0, u_planes = 0;
+  double t_planes = 0;
 };
 
 // Consumes B.GS (released on return).
 inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
   auto t0 = std::chrono::steady_clock::now();
-  const double c0 = ik::cpu_secs();
   PersonPlanes P;
   const int m = L.m, ns = B.ns, sb = B.sb;
   const int nbyte = L.mp / 8;
@@ -367,7 +225,6 @@ inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
   }
   std::vector<uint8_t>().swap(B.GS);
   P.t_planes = ik::secs(t0);
-  P.u_planes = (ik::cpu_secs() - c0) / (P.t_planes * T);
   return P;
 }
 
@@ -377,7 +234,7 @@ struct Stage1Result {
   std::vector<std::vector<float>> og;
   long long persons_solved = 0;
   int n_blocks = 0;
-  double t_lists = 0, t_rhs = 0, t_chol = 0, cpu_rhs = 0, cpu_chol = 0, t_solve = 0;
+  double t_lists = 0, t_rhs = 0, t_chol = 0, t_solve = 0;
 };
 
 inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, double delta, int nb_people,
@@ -392,7 +249,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   const std::vector<float>& mu = L.mu;
   const std::vector<float>& sd = L.sd;
   const std::vector<std::vector<int>>& MiA = P.Mi;
-  const ik::PlaneDot& PD = ik::plane_dot_impl();
+  const auto plane_dot = la().plane_dot;
   // person blocks: fixed size, or as large as the memory budget for S_i, rhs and the SNP lists allows
   std::vector<int> bstart{0};
   {
@@ -413,7 +270,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   std::vector<int> moff, jcnt(m + 1), jlist_i, jlist_a;
   std::vector<long long> soff;
   std::vector<float> rhs, S;
-  double c0 = 0;
   for (int bk = 0; bk < nblk; ++bk) {
     const int b0 = bstart[bk], nb = bstart[bk + 1] - b0;
     auto tb = std::chrono::steady_clock::now();
@@ -462,7 +318,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     rhs.resize(moff[nb]);                          // fully overwritten below
     S.resize(static_cast<std::size_t>(soff[nb]));  // every column of every S_i is written below
     R.t_lists += ik::secs(tb); tb = std::chrono::steady_clock::now();
-    c0 = ik::cpu_secs();
 
     // rhs and C_MM, column by column
 #ifdef _OPENMP
@@ -479,8 +334,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         const int q = static_cast<int>(M.size());
         const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
         const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
-        float r = L.Aj[j] + (L.restrict_nbr ? PD.words(aj, hi, oi_, L.words[j].data(), static_cast<int>(L.words[j].size()))
-                                            : PD.dot(aj, hi, oi_, nbyte));
+        float r = L.Aj[j] + plane_dot(aj, hi, oi_, nbyte);
         float* Sc = &S[static_cast<std::size_t>(soff[i]) + static_cast<std::size_t>(a) * q];  // column a of S_i
         for (int bq = 0; bq < q; ++bq) {
           const int l = M[bq];
@@ -492,7 +346,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
       }
     }
     R.t_rhs += ik::secs(tb); tb = std::chrono::steady_clock::now();
-    R.cpu_rhs += ik::cpu_secs() - c0; c0 = ik::cpu_secs();
 
     // per-person solve
 #ifdef _OPENMP
@@ -526,7 +379,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
       }
     }
     R.t_chol += ik::secs(tb);
-    R.cpu_chol += ik::cpu_secs() - c0;
     for (int i = 0; i < nb; ++i) if (!Mi[i].empty()) ++R.persons_solved;
   }
   R.t_solve = ik::secs(t_start);

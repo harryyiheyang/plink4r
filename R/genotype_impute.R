@@ -23,7 +23,7 @@
 #' @param thresh eigenvalue variance kept; <= 0 keeps every stored pair.
 #' @param nb_people people per batch (NULL = largest batch whose S_i, rhs and SNP lists fit in `mem_gb`).
 #' @param mem_gb memory budget of the people batches; 0 takes it from [plink4r_resources()].
-#' @param nbr_frac,nbr_max rhs restriction by C_lj^2 (loses accuracy, NULL = off).
+#' @param nbr_frac,nbr_max deprecated and ignored (the neighbour restriction of the rhs was removed).
 #' @param af optional anchor frequencies of the PGEN ALT allele, named by PGEN ID; they replace AF_PanUKB.
 #' @return list(fill = data.table(IID, snp, g1, g), snp = per-SNP n_miss / c / shift, info, time); `snp` is
 #'   the PGEN ID and g the ALT dosage.
@@ -31,6 +31,8 @@
 genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
                             mem_gb = 2, nbr_frac = NULL, nbr_max = NULL, af = NULL) {
+  if (!is.null(nbr_frac) || !is.null(nbr_max))
+    warning("nbr_frac and nbr_max are deprecated and ignored: every row enters the imputation", call. = FALSE)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
   pvar <- .read_pvar5(pfile)
@@ -69,9 +71,7 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
     out <- genotype_impute_cpp(normalizePath(paste0(pfile, ".pgen")), length(iid), pvar$allele_ct, as.integer(w$vi),
                                as.integer(si), normalizePath(ef), p_alt, as.integer(w$sign), thresh, delta,
                                anchor_min_miss, kr, as.integer(threads),
-                               if (is.null(nb_people)) 0L else as.integer(nb_people), mem_gb,
-                               if (is.null(nbr_frac)) 0 else nbr_frac, if (is.null(nbr_max)) 0L else as.integer(nbr_max),
-                               as.integer(w$ld_index))
+                               if (is.null(nb_people)) 0L else as.integer(nb_people), mem_gb, as.integer(w$ld_index))
     f <- data.table::as.data.table(out$fill)
     f[, `:=`(IID = iid[si[i] + 1L], snp = snp[j])]
     s <- data.table::as.data.table(out$snp)

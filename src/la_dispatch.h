@@ -1,6 +1,6 @@
-// Run-time choice of the dense linear-algebra kernels in la_kernel.cpp (compiled for generic, AVX2+FMA and
-// AVX-512 by src/Makevars). la() returns the best table the CPU supports; PLINK4R_SIMD=avx512|avx2|scalar
-// caps the choice (the same variable as the LD plane-dot kernel).
+// Run-time choice of the SIMD kernels in la_kernel.cpp (dense linear algebra and the LD plane dot; compiled for
+// generic, AVX2+FMA and AVX-512 by src/Makevars). la() returns the best table the CPU supports, chosen once per
+// process; PLINK4R_SIMD=avx512|avx2|scalar caps the choice. This is the package's only SIMD dispatch.
 #ifndef PLINK4R_LA_DISPATCH_H
 #define PLINK4R_LA_DISPATCH_H
 
@@ -15,6 +15,8 @@ struct LaFns {
   void (*sgemm_nn)(const float* A, int M, int K, int lda, const float* B, int N, int ldb, float* Out, int ldo);
   int (*sumstat_block)(const float* U, int m, int k, const float* lambda, const int* typed, int nt, const float* z,
                        const int* miss, int nm, float delta, float* zout, float* r2out, char* err);
+  // sum_l col[l] * (het_l + 2 hom_l) over one person's bit-planes (nbyte even: rows padded to 16 with zeros)
+  float (*plane_dot)(const float* col, const unsigned char* het, const unsigned char* hom, int nbyte);
   const char* isa;
 };
 

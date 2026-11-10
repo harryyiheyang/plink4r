@@ -57,8 +57,7 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   const bool gemm = q >= 2;
   const std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  bool ident = ns == n_raw;
-  for (int s = 0; ident && s < ns; ++s) ident = si[s] == s;
+  const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
   const ByteTables& BT = byte_tables();
   const plink4r::LaFns& LA = plink4r::la();
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
@@ -78,8 +77,6 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   std::vector<int> ctab(static_cast<std::size_t>(V) * 4);
   std::vector<double> L1;  // lookup path: per chunk variant, 256 x 4 values (q = 1)
   if (!gemm) L1.resize(static_cast<std::size_t>(V) * 256 * 4);
-  // padding bits of the last byte are code 0 (observed, ALT 0) after compaction, so they add nothing below
-  int tail_pad = static_cast<int>(sb * 4 - ns);
   for (int c0 = 0; c0 < p; c0 += V) {
     const int nv = std::min(V, p - c0);
 #ifdef _OPENMP
@@ -89,22 +86,9 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
       const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[c0 + v]), plink4r::ik::tid());
       if (!gv) { bad[plink4r::ik::tid()] = c0 + v; continue; }
       unsigned char* dst = &buf[static_cast<std::size_t>(v) * sb];
-      if (ident) {
-        std::memcpy(dst, gv, sb);
-        if (tail_pad) dst[sb - 1] &= static_cast<unsigned char>(0xFFu >> (2 * tail_pad));  // file padding -> code 0
-      } else {
-        std::memset(dst, 0, sb);
-        for (int s = 0; s < ns; ++s) {
-          const int r = si[s];
-          dst[s >> 2] |= static_cast<unsigned char>(((gv[r >> 2] >> (2 * (r & 3))) & 3u) << (2 * (s & 3)));
-        }
-      }
+      plink4r::compact_genovec(gv, si.data(), ns, ident, dst);
       long long miss = 0, alt = 0;
-      for (std::size_t y = 0; y < sb; ++y) {
-        const unsigned byte = dst[y];
-        miss += __builtin_popcount(BT.miss[byte]);
-        alt += static_cast<long long>(BT.x[byte][0] + BT.x[byte][1] + BT.x[byte][2] + BT.x[byte][3]);
-      }
+      plink4r::count_genovec(dst, sb, &miss, &alt);
       nobs[c0 + v] = static_cast<double>(ns - miss); sumv[c0 + v] = static_cast<double>(alt);
     }
     for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop("PGEN read failed at variant %d", bad[t] + 1);
@@ -263,7 +247,7 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
   const std::vector<double> afv(af.begin(), af.end());
   std::vector<char> keep(m, 0);
   for (int j = 0; j < m; ++j) for (int t = 0; t < q; ++t) if (B(j, t) != 0) { keep[j] = 1; break; }
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, 0, 0, T);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, T);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
@@ -282,9 +266,6 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
                             Rcpp::_["persons_solved"] = static_cast<double>(R.persons_solved));
 }
 
-// Instruction sets selected at run time: the LD plane-dot kernel and the dense linear algebra.
+// Instruction set of the SIMD kernels picked at run time (avx512, avx2 or generic; PLINK4R_SIMD caps it).
 // [[Rcpp::export]]
-Rcpp::CharacterVector simd_isa_cpp() {
-  return Rcpp::CharacterVector::create(Rcpp::_["plane_dot"] = plink4r::ik::plane_dot_impl().isa,
-                                       Rcpp::_["linalg"] = plink4r::la().isa);
-}
+std::string simd_isa_cpp() { return plink4r::la().isa; }

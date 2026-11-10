@@ -20,11 +20,19 @@
 #include <string>
 #include <utility>
 #include "geno_kernel.h"
-#include "pgen_file.h"
+#include "pgen_reader.h"
 #include "resources.h"
 #include "la_dispatch.h"
 
 namespace {
+
+using plink4r::PgenFile;
+// PGEN genovec codes as ALT dosage for the geno object: 0 hom REF, 1 het, 2 two non-REF alleles, 3 missing.
+// This matches the BED table of geno (A1 dosage, as BEDMatrix), since plink2 imports BED with A1 as ALT.
+const NibbleTable& pgen_table() {
+  static const NibbleTable t({0, 1, 2, -1});
+  return t;
+}
 
 constexpr std::size_t kGroup = 64;          // variants per read group
 constexpr std::size_t kDBlock = 8;          // mask words per prefix count (512 rows)
@@ -273,8 +281,8 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
                  const FillSpec* fs = nullptr) {
   const std::size_t n = g.n, p = g.p, sel_stride = (n + 3) / 4, W = g.G.words;
   g.dosage = true;
-  const NibbleTable& table = PgenFile::table();
-  const std::uint16_t kMiss = PgenFile::kDosageMissing;
+  const NibbleTable& table = pgen_table();
+  const std::uint16_t kMiss = PgenFile::kMissing;
   std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
@@ -473,7 +481,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
                         Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
   threads = resolve_threads(threads);
   const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
-  PgenFile file(path, static_cast<std::size_t>(n_total), allele_ct, threads);
+  PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
   if (file.dosage()) {
@@ -486,7 +494,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
     return g;
   }
   init_geno(*g, rows.size(), variants.size(), mean);
-  const NibbleTable& table = PgenFile::table();
+  const NibbleTable& table = pgen_table();
   const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
   std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
   std::vector<u64> missbuf(static_cast<std::size_t>(threads) * W);

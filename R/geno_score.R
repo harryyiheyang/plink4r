@@ -45,7 +45,7 @@
 #' @return list(sum = n x q scores (plink2 `<name>_SUM`), avg = sum / allele_ct (`<name>_AVG`),
 #'   allele_ct (`ALLELE_CT`), sample, variants = data.table(ID, A1, flip (A1 is REF), fill ("mean",
 #'   "anchor", "ld", "none"), n_miss, p (A1 frequency used)), skipped = data.table(ID, A1, reason),
-#'   ld_blocks, simd (instruction set picked at run time for the LD kernel: avx512, avx2 or scalar;
+#'   ld_blocks, simd (instruction set picked at run time for the SIMD kernels: avx512, avx2 or generic;
 #'   environment variable PLINK4R_SIMD caps it), time).
 #' @export
 geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols = NULL, freq_col = "A1Freq",

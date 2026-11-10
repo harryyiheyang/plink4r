@@ -15,7 +15,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                                const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
                                double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
-                               int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows) {
+                               int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
   namespace ik = plink4r::ik;
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
@@ -33,7 +33,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
   std::vector<char> kr(m);
   for (int j = 0; j < m; ++j) kr[j] = keep_row[j] ? 1 : 0;
 
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, nbr_frac, nbr_max, T, t_read);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, T, t_read);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
@@ -68,11 +68,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                              Rcpp::_["shift"] = Rcpp::wrap(A.shift)),
     Rcpp::_["info"] = Rcpp::List::create(Rcpp::_["m"] = m, Rcpp::_["k"] = L.k, Rcpp::_["n"] = ns, Rcpp::_["delta"] = delta,
                                          Rcpp::_["persons_solved"] = static_cast<double>(R.persons_solved), Rcpp::_["threads"] = T,
-                                         Rcpp::_["n_blocks"] = nblk, Rcpp::_["people_per_block"] = static_cast<double>(ns) / nblk,
-                                         Rcpp::_["cpu_util_planes"] = P.u_planes,
-                                         Rcpp::_["nbr_kept_mean"] = L.kept_mean, Rcpp::_["nbr_words_frac"] = L.words_frac,
-                                         Rcpp::_["cpu_util_rhs"] = R.t_rhs > 0 ? R.cpu_rhs / (R.t_rhs * T) : NA_REAL,
-                                         Rcpp::_["cpu_util_cholesky"] = R.t_chol > 0 ? R.cpu_chol / (R.t_chol * T) : NA_REAL),
+                                         Rcpp::_["n_blocks"] = nblk, Rcpp::_["people_per_block"] = static_cast<double>(ns) / nblk),
     Rcpp::_["time"] = Rcpp::NumericVector::create(Rcpp::_["read_eigen"] = L.t_eig, Rcpp::_["build_C"] = L.t_C,
                                                   Rcpp::_["read_geno"] = B.t_geno, Rcpp::_["planes"] = P.t_planes, Rcpp::_["lists"] = R.t_lists,
                                                   Rcpp::_["rhs_CMM"] = R.t_rhs, Rcpp::_["cholesky"] = R.t_chol,

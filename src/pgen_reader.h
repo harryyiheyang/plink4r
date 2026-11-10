@@ -1,5 +1,7 @@
-// Hardcall PGEN reader on the bundled pgenlib (read side), one PgenReader per thread.
-// Adapted from SuSiE4I src/pgen_file.h (dosage path removed).
+// PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
+// (read) and, for files whose header flags dosages, 1/16384 fixed-point ALT dosages (read_dosage).
+// The one PgenFile of the package (geno objects, imputation, scoring, correlations).
+// compact_genovec / count_genovec: the sample subset of a genovec, and its observed calls and ALT sum.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
 
@@ -7,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include "pgenlib/pgenlib_read.h"
 
@@ -58,7 +61,7 @@ public:
     uintptr_t pgfi_cachelines;
     if (plink2::PgfiInitPhase1(path.c_str(), nullptr, UINT32_MAX, UINT32_MAX, &header_ctrl,
                                &info, &pgfi_cachelines, err) != plink2::kPglRetSuccess)
-      Rcpp::stop("Could not open PGEN " + path + ": " + std::string(err));
+      fail(err);
     if (info.raw_sample_ct != n) Rcpp::stop("PGEN sample count does not match .psam: " + path);
     const std::size_t m = info.raw_variant_ct;
     if (allele_ct.size() != m) Rcpp::stop("PGEN variant count does not match .pvar: " + path);
@@ -83,7 +86,7 @@ public:
     uintptr_t pgr_cachelines;
     if (plink2::PgfiInitPhase2(header_ctrl, 1, 0, 0, 0, info.raw_variant_ct, &max_vrec_width,
                                &info, header_.alloc, &pgr_cachelines, err) != plink2::kPglRetSuccess)
-      Rcpp::stop("Could not open PGEN " + path + ": " + std::string(err));
+      fail(err);
     genovec_bytes_ = plink2::NypCtToVecCt(n) * plink2::kBytesPerVec;
     dosage_ = (info.gflags & plink2::kfPgenGlobalDosagePresent) != 0;
     const uintptr_t present_bytes = ((n + 7) / 8 / plink2::kBytesPerVec + 2) * plink2::kBytesPerVec;
@@ -140,12 +143,54 @@ public:
   }
 
 private:
+  [[noreturn]] void fail(const char* err) const {
+    std::string msg(err);
+    if (msg.compare(0, 7, "Error: ") == 0) msg.erase(0, 7);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
+    Rcpp::stop("Could not open PGEN file " + path_ + (msg.empty() ? "" : ": " + msg));
+  }
   bool dosage_ = false;
   std::string path_;
   uintptr_t genovec_bytes_ = 0;
   PgenHeader header_;
   std::vector<std::unique_ptr<ThreadReader>> readers_;
 };
+
+// Genovec of the samples sidx[0..ns-1] (0-based .psam rows, output order) into dst ((ns + 3) / 4 bytes): codes
+// 0/1/2/3 as in the file; the bits past the last sample are code 0, so they add nothing to counts or products.
+// identity: sidx is 0..ns-1 over all n_raw samples, a plain copy.
+inline void compact_genovec(const unsigned char* gv, const int* sidx, int ns, bool identity, unsigned char* dst) {
+  const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;
+  if (identity) {
+    std::memcpy(dst, gv, sb);
+    const int pad = static_cast<int>(sb * 4 - ns);
+    if (pad) dst[sb - 1] &= static_cast<unsigned char>(0xFFu >> (2 * pad));
+    return;
+  }
+  std::memset(dst, 0, sb);
+  for (int s = 0; s < ns; ++s) {
+    const int r = sidx[s];
+    dst[s >> 2] |= static_cast<unsigned char>(((gv[r >> 2] >> (2 * (r & 3))) & 3u) << (2 * (s & 3)));
+  }
+}
+
+// True when sidx is 0..n_raw-1 (every sample, file order): compact_genovec is then a copy.
+inline bool identity_samples(const int* sidx, int ns, int n_raw) {
+  if (ns != n_raw) return false;
+  for (int s = 0; s < ns; ++s) if (sidx[s] != s) return false;
+  return true;
+}
+
+// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
+inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
+  struct Tab { unsigned char miss[256], alt[256];
+    Tab() { for (int b = 0; b < 256; ++b) { miss[b] = alt[b] = 0;
+      for (int k = 0; k < 4; ++k) { const int c = (b >> (2 * k)) & 3; if (c == 3) ++miss[b]; else alt[b] += c; } } } };
+  static const Tab T;
+  long long m = 0, a = 0;
+  for (std::size_t y = 0; y < sb; ++y) { m += T.miss[g[y]]; a += T.alt[g[y]]; }
+  *miss = m; *alt = a;
+}
 
 }  // namespace plink4r
 #endif
