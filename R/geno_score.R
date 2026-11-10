@@ -75,10 +75,8 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   # ---- variants
   pvar <- .read_pvar5(pfile)
   act <- pvar$allele_ct
-  psam <- data.table::fread(paste0(pfile, ".psam"), colClasses = "character")
-  iid <- psam[[intersect(c("#IID", "IID"), names(psam))[1L]]]
-  si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam", call. = FALSE)
+  iid <- .psam_iid(pfile)
+  si <- .sample_rows(sample, iid)
   n <- length(si)
   pgen <- normalizePath(paste0(pfile, ".pgen"))
 

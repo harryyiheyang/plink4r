@@ -40,20 +40,6 @@
   r
 }
 
-# CHROM POS ID REF ALT of a .pvar (or .pvar.zst), with row (1-based) and allele_ct.
-.read_pvar5 <- function(pfile) {
-  pf <- paste0(pfile, ".pvar")
-  pvar <- if (file.exists(pf)) data.table::fread(pf, skip = "#CHROM", select = 1:5, colClasses = "character") else
-    if (file.exists(paste0(pf, ".zst")))
-      data.table::fread(cmd = paste("zstdcat", shQuote(paste0(pf, ".zst")), "| grep -v '^##'"), select = 1:5,
-                        colClasses = "character") else stop("no .pvar or .pvar.zst for ", pfile, call. = FALSE)
-  data.table::setnames(pvar, c("CHROM", "POS", "ID", "REF", "ALT"))
-  pvar[, `:=`(row = .I, CHROM = sub("^chr", "", CHROM, ignore.case = TRUE), POS = as.integer(POS),
-              REF = toupper(REF), ALT = toupper(ALT))]
-  pvar[, allele_ct := 2L + lengths(regmatches(ALT, gregexpr(",", ALT, fixed = TRUE)))]
-  pvar
-}
-
 # Adds vi (0-based PGEN variant) and sign (+1 / -1) to the panel rows found in the PGEN; others are dropped.
 # 1. by ID: kept when the panel has no ref/alt columns (sign +1), else the alleles decide the sign;
 # 2. the rest by chr + position + allele pair. The position column is the panel's only build column (bp37 or

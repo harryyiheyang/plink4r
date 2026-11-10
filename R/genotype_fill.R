@@ -54,10 +54,8 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   dropped <- data.table::data.table(k = setdiff(q$k, m$k), reason = "not in pvar (CHR/BP/alleles)")
   data.table::setorder(m, k)
 
-  psam <- data.table::fread(paste0(pfile, ".psam"), colClasses = "character")
-  iid <- psam[[intersect(c("IID", "#IID"), names(psam))[1]]]
-  si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam")
+  iid <- .psam_iid(pfile)
+  si <- .sample_rows(sample, iid)
   n <- length(si)
   pg <- normalizePath(paste0(pfile, ".pgen"))
   st <- pgen_stats_cpp(pg, length(iid), act, as.integer(m$row - 1L), as.integer(si - 1L), as.integer(P$threads))

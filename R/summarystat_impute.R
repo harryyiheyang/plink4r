@@ -43,16 +43,12 @@ sumstat_impute <- function(tidy, ref = NULL, ld_dir, thresh = 0.995, delta = 0.1
   log <- data.table::as.data.table(attr(res, "block_log"))
   message("imputation: ", format(round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 2)), " s (",
           log$isa[1], ")")
-  for (a in which(run)) {
-    i <- match(a, which(run))
-    m <- log$m[i]
-    miss <- setdiff(0:(m - 1L), typed[[a]])
-    zi <- res[[i]]$z; qi <- res[[i]]$r2
-    br <- bl$rows[[a]]
-    w <- match(miss, r$ld_index[br])
-    rows <- br[w[!is.na(w)]]
-    data.table::set(r, rows, "Z", zi[!is.na(w)])
-    data.table::set(r, rows, "r2", pmin(qi[!is.na(w)], 1 - 1e-6))
+  for (i in seq_along(res)) {  # res[[i]]: z and r2 of every eigen row of block blocks[run][i]
+    br <- bl$rows[[which(run)[i]]]
+    br <- br[!is.finite(r$Z[br])]
+    li <- r$ld_index[br] + 1L
+    data.table::set(r, br, "Z", res[[i]]$z[li])
+    data.table::set(r, br, "r2", pmin(res[[i]]$r2[li], 1 - 1e-6))
   }
   r[is.na(r2), `:=`(Z = 0, r2 = 0)]
   r[is.na(N), N := N_med]

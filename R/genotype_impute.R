@@ -36,10 +36,8 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
   pvar <- .read_pvar5(pfile)
-  psam <- data.table::fread(paste0(pfile, ".psam"))
-  iid <- as.character(psam[[intersect(c("IID", "#IID"), names(psam))[1]]])
-  si <- if (is.null(sample)) seq_along(iid) - 1L else match(as.character(sample), iid) - 1L
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam")
+  iid <- .psam_iid(pfile)
+  si <- .sample_rows(sample, iid) - 1L
   if (is.null(snps)) {
     if (is.null(block)) stop("give `block` or `snps`")
     al <- .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)

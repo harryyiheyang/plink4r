@@ -116,8 +116,15 @@ Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blo
   }
   for (int i = 0; i < nb; ++i)
     if (!err[i].empty()) Rcpp::stop("block %d: %s", bv[i], err[i].c_str());
+  // per block, length m by eigen row: typed rows keep their z with r2 = 1, the others get the imputed z and r2
   Rcpp::List out(nb);
-  for (int i = 0; i < nb; ++i) out[i] = Rcpp::List::create(Rcpp::_["z"] = Rcpp::wrap(res[i]), Rcpp::_["r2"] = Rcpp::wrap(rq[i]));
+  for (int i = 0; i < nb; ++i) {
+    Rcpp::NumericVector zf(mm[i]), qf(mm[i]);
+    for (std::size_t j = 0; j < tv[i].size(); ++j) { zf[tv[i][j]] = zv[i][j]; qf[tv[i][j]] = 1; }
+    const std::vector<int> miss = missing_indices(mm[i], tv[i]);
+    for (std::size_t j = 0; j < miss.size(); ++j) { zf[miss[j]] = res[i][j]; qf[miss[j]] = rq[i][j]; }
+    out[i] = Rcpp::List::create(Rcpp::_["z"] = zf, Rcpp::_["r2"] = qf);
+  }
   Rcpp::IntegerVector ntyped(nb);
   for (int i = 0; i < nb; ++i) ntyped[i] = static_cast<int>(tv[i].size());
   out.attr("block_log") = Rcpp::DataFrame::create(Rcpp::_["block"] = bv, Rcpp::_["m"] = mm, Rcpp::_["k"] = kk,
