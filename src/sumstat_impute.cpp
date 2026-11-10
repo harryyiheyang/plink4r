@@ -56,8 +56,8 @@ const char* method_name(int code) {
 }  // namespace
 
 // typed_index: list of 0-based strictly increasing eigen-row indices per block; z: matching z-scores.
-// Returns, per block, list(z, r2) for the missing rows (all rows not in typed_index, increasing): z the imputed
-// z-score and r2 = R_jO (R_OO + delta I)^{-1} R_Oj / R_jj its imputation quality; attr block_log.
+// Returns, per block, list(z, r2) of length m by eigen row: typed rows keep their z with r2 = 1; every other row
+// gets the imputed z and r2 = R_jO (R_OO + delta I)^{-1} R_Oj / R_jj, its imputation quality; attr block_log.
 // Blocks run longest first (cost from the eigen.bin headers), OpenMP over blocks; the dense algebra uses the
 // instruction set chosen at run time (la_dispatch.h).
 // [[Rcpp::export]]
