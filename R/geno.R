@@ -48,6 +48,14 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
+#' @param fill Externally supplied fills (used by [genotype_fill()]).
+#' @param af Optional anchor frequency of the counted allele (bim column 5 for
+#'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
+#'   `impute`. With a finite `af`, every missing call of that variant takes
+#'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
+#'   (stored as round(c) in the planes and the rest in D), so the filled
+#'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
+#'   (default) leaves the behaviour unchanged.
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
 #'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
 #'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
@@ -59,7 +67,7 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL) {
+                      scale = TRUE, threads = 4L, fill = NULL, af = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
   if (is.null(bedfile) == is.null(pgenfile)) {
@@ -90,12 +98,19 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
   fs <- .geno_fill_spec(fill, length(vidx), iid[sidx])
+  if (is.null(af)) {
+    af <- numeric(0)
+  } else {
+    af <- as.numeric(af)
+    if (length(af) != length(vidx)) stop("af needs one value per selected variant.", call. = FALSE)
+    if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
+  }
   ptr <- if (!is.null(bedfile)) {
     geno_open_bed_cpp(bed, length(iid), length(snp), vidx - 1L, sidx - 1L,
-                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g)
+                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
   } else {
     geno_open_pgen_cpp(files$pgen, length(iid), allele_ct,
-                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g)
+                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
   }
   info <- geno_info_cpp(ptr)
   structure(list(ptr = ptr, n = length(sidx), p = length(vidx),
@@ -407,7 +422,9 @@ geno_cor <- function(A, B = NULL, threads = A$threads) {
 #' the same order). Missing calls take the variant's lower median; a PGEN with
 #' dosages is read as dosages. Moved here from CppMatrix (same arguments); the
 #' genotypes are held by [geno_open()] and the products are those of
-#' [geno_cor()].
+#' [geno_cor()]. These are thin wrappers: `bed_cor(A)` is
+#' `cor_bed(A, impute = "median")$R` (and likewise for `pgen_cor`); use
+#' [cor_pgen()] / [cor_bed()] to select variants or samples or to anchor the fill.
 #'
 #' @param A,B BED paths or prefixes (`bed_cor`), PGEN paths or prefixes
 #'   (`pgen_cor`).
@@ -426,11 +443,15 @@ pgen_cor <- function(A, B = NULL, threads = 4L) {
 
 .geno_file_cor <- function(A, B, threads, arg) {
   threads <- .threads(threads)
+  if (is.null(B)) {
+    file <- stats::setNames(list(A), arg)
+    return(.cor_file(file, NULL, NULL, NULL, "median", threads, max_cells = 1e8)$R)
+  }
   open1 <- function(f) do.call(geno_open, stats::setNames(list(f, "median", FALSE, as.integer(threads)),
                                                           c(arg, "impute", "scale", "threads")))
   XA <- open1(A)
-  XB <- if (is.null(B)) NULL else open1(B)
-  if (as.numeric(XA$p) * (if (is.null(XB)) XA$p else XB$p) > 1e8) {
+  XB <- open1(B)
+  if (as.numeric(XA$p) * XB$p > 1e8) {
     stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)
   }
   geno_cor(XA, XB, threads)
