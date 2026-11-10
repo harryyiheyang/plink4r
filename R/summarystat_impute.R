@@ -7,21 +7,19 @@
 #'
 #' Imputation quality: `r2` is 1 for a typed SNP and, for an imputed SNP,
 #' r2 = R_jO (R_OO + delta I)^{-1} R_Oj / R_jj in [0, 1) (the share of the SNP's LD variance explained by the
-#' typed SNPs; 0 in a block without typed SNPs, where Z = 0). Only rows of `tidy` with `r2 == 1` (or without an
+#' typed SNPs; 0 in a block without typed SNPs, where Z = 0). The imputed Z is the conditional mean
+#' E[z_j | z_O], whose null variance is r2: it is already shrunk like sqrt(r2) * N(0, 1), so Z needs no
+#' further adjustment. Only rows of `tidy` with `r2 == 1` (or without an
 #' `r2` column) are used as typed, so re-running on an imputed file re-imputes its imputed rows from the typed ones.
 #' @param tidy output of [summarystat_tidy()] (data.table or file).
 #' @param ref reference parquet / data.frame (ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index).
 #' @param ld_dir directory with block<N>.eigen.bin (SBayesRC or plink4r layout).
 #' @param thresh eigenvalue variance kept (SBayesRC default 0.995); <= 0 keeps every stored pair.
 #' @param delta diagonal added to R (SBayesRC: 0.1).
-#' @param z_adjust `"none"` (default: imputed Z is the conditional mean E[z_j | z_O]) or `"info"`
-#'   (imputed Z divided by sqrt(r2), so that it is N(0, 1) under the null; P follows Z).
 #' @param output optional output path (.parquet or text).
 #' @return data.table over all `ref` SNPs: ID, chr, bp37, bp38, A1, A2, freq, Z, BETA, SE, P, N, r2.
 #' @export
-sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, z_adjust = c("none", "info"),
-                           output = NULL) {
-  z_adjust <- match.arg(z_adjust)
+sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, output = NULL) {
   x <- .read_table(tidy)
   if (!"r2" %in% names(x)) x[, r2 := 1]
   n_prev <- sum(is.finite(x$Z) & !(x$r2 >= 1))
@@ -54,7 +52,6 @@ sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threa
     data.table::set(r, rows, "r2", pmin(qi[!is.na(w)], 1 - 1e-6))
   }
   r[is.na(r2), `:=`(Z = 0, r2 = 0)]
-  if (z_adjust == "info") r[r2 < 1, Z := data.table::fifelse(r2 > 0, Z / sqrt(r2), 0)]
   r[is.na(N), N := N_med]
   r[is.na(freq), freq := AF_PanUKB]
   r[, `:=`(BETA = Z / sqrt(N + Z^2), SE = 1 / sqrt(N + Z^2), P = 2 * stats::pnorm(-abs(Z)))]
