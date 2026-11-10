@@ -1,10 +1,13 @@
 // Read-only detection of the CPU and memory this process may use (plink4r_resources() in R).
 //
-// threads: SLURM_CPUS_PER_TASK, else SLURM_CPUS_ON_NODE, else the CPU affinity mask when it is narrower than
-// the machine (a cgroup / taskset limit), else 4. The total core count of a node is never used: on a shared
-// login or compute node it belongs to everyone. A SLURM count is capped by the affinity mask.
+// Common setups only, by design:
+// threads: the scheduler's allocation (SLURM_CPUS_PER_TASK, SLURM_CPUS_ON_NODE; PBS/Torque NCPUS, PBS_NP;
+// LSF LSB_DJOB_NUMPROC; SGE NSLOTS), capped by the affinity mask; with no scheduler, the affinity mask when it
+// is narrower than the machine (a cgroup / taskset limit), else 4. The total core count of a node is never
+// used: on a shared login node or workstation it belongs to everyone. Windows / macOS: 4.
 // mem_gb: half of the smallest of the SLURM allocation (SLURM_MEM_PER_NODE, or SLURM_MEM_PER_CPU x threads),
-// the cgroup limit (v2 memory.max, v1 memory.limit_in_bytes) and MemAvailable; 2 GB when none is known.
+// the cgroup limit (v2 memory.max, v1 memory.limit_in_bytes) and MemAvailable; with neither a scheduler
+// allocation nor a cgroup limit (a shared machine) at most 16 GB; 2 GB when nothing is known.
 // Nothing here writes an environment variable or any global thread setting.
 #ifndef PLINK4R_RESOURCES_H
 #define PLINK4R_RESOURCES_H
@@ -126,9 +129,11 @@ inline Resources detect_resources(int threads = 0, double mem_gb = 0) {
   } else {
     bool narrower = false;
     const int aff = affinity_cpus(&narrower);
-    long s = env_long("SLURM_CPUS_PER_TASK");
-    std::string from = "SLURM_CPUS_PER_TASK";
-    if (s < 0) { s = env_long("SLURM_CPUS_ON_NODE"); from = "SLURM_CPUS_ON_NODE"; }
+    static const char* const sched[] = {"SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "NCPUS", "PBS_NP",
+                                        "LSB_DJOB_NUMPROC", "NSLOTS"};
+    long s = -1;
+    std::string from;
+    for (const char* v : sched) { s = env_long(v); if (s > 0) { from = v; break; } }
     if (s > 0) {
       r.threads = static_cast<int>(aff > 0 ? std::min<long>(s, aff) : s); r.threads_from = from;
     } else if (aff > 0 && narrower) {
@@ -143,9 +148,12 @@ inline Resources detect_resources(int threads = 0, double mem_gb = 0) {
     const double node = env_mb("SLURM_MEM_PER_NODE");
     if (node > 0) take(node, "SLURM_MEM_PER_NODE");
     else { const double cpu = env_mb("SLURM_MEM_PER_CPU"); if (cpu > 0) take(cpu * r.threads, "SLURM_MEM_PER_CPU"); }
-    take(cgroup_mb(), "cgroup");
+    const double cg = cgroup_mb();
+    take(cg, "cgroup");
+    const bool limited = best > 0;  // a scheduler allocation or a cgroup limit
     take(meminfo_mb(), "MemAvailable");
     if (best > 0) r.mem_gb = best / 2048.0;  // half, in GB
+    if (!limited && r.mem_gb > 16) { r.mem_gb = 16; r.mem_from = "MemAvailable (capped at 16 GB on a shared machine)"; }
   }
   return r;
 }

@@ -49,6 +49,18 @@ geno_dense_cpp <- function(ptr, rows, cols, threads) {
     .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, threads)
 }
 
+geno_std_cpp <- function(K, u, v, s, da, db, threads) {
+    .Call(`_plink4r_geno_std_cpp`, K, u, v, s, da, db, threads)
+}
+
+dense_xtx_cpp <- function(A, threads) {
+    .Call(`_plink4r_dense_xtx_cpp`, A, threads)
+}
+
+geno_xtwx_cpp <- function(ptr, w, center, div, threads) {
+    .Call(`_plink4r_geno_xtwx_cpp`, ptr, w, center, div, threads)
+}
+
 resources_cpp <- function(threads, mem_gb) {
     .Call(`_plink4r_resources_cpp`, threads, mem_gb)
 }

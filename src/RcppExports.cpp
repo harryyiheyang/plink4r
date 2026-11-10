@@ -191,6 +191,50 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// geno_std_cpp
+Rcpp::NumericMatrix geno_std_cpp(const Rcpp::NumericMatrix& K, const Rcpp::NumericVector& u, const Rcpp::NumericVector& v, double s, const Rcpp::NumericVector& da, const Rcpp::NumericVector& db, int threads);
+RcppExport SEXP _plink4r_geno_std_cpp(SEXP KSEXP, SEXP uSEXP, SEXP vSEXP, SEXP sSEXP, SEXP daSEXP, SEXP dbSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type K(KSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type u(uSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type v(vSEXP);
+    Rcpp::traits::input_parameter< double >::type s(sSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type da(daSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type db(dbSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_std_cpp(K, u, v, s, da, db, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// dense_xtx_cpp
+Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads);
+RcppExport SEXP _plink4r_dense_xtx_cpp(SEXP ASEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type A(ASEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(dense_xtx_cpp(A, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// geno_xtwx_cpp
+Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center, const Rcpp::NumericVector& div, int threads);
+RcppExport SEXP _plink4r_geno_xtwx_cpp(SEXP ptrSEXP, SEXP wSEXP, SEXP centerSEXP, SEXP divSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type w(wSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type center(centerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type div(divSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_xtwx_cpp(ptr, w, center, div, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // resources_cpp
 Rcpp::List resources_cpp(int threads, double mem_gb);
 RcppExport SEXP _plink4r_resources_cpp(SEXP threadsSEXP, SEXP mem_gbSEXP) {
@@ -317,6 +361,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_cross_cpp", (DL_FUNC) &_plink4r_geno_cross_cpp, 3},
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 4},
+    {"_plink4r_geno_std_cpp", (DL_FUNC) &_plink4r_geno_std_cpp, 7},
+    {"_plink4r_dense_xtx_cpp", (DL_FUNC) &_plink4r_dense_xtx_cpp, 2},
+    {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
     {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
     {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 15},

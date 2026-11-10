@@ -60,7 +60,7 @@ sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threa
   message(sum(out$r2 >= 1), " typed, ", sum(out$r2 > 0 & out$r2 < 1), " imputed (median r2 ",
           format(stats::median(out$r2[out$r2 > 0 & out$r2 < 1]), digits = 3), "), ",
           sum(out$r2 == 0), " with r2 = 0 (incl. blocks without typed SNPs)")
-  log[, threads := threads]
+  nthr <- threads; log[, threads := nthr]
   attr(out, "block_log") <- log
   if (!is.null(output)) {
     if (grepl("\\.parquet$", output)) arrow::write_parquet(out, output) else data.table::fwrite(out, output, sep = "\t")

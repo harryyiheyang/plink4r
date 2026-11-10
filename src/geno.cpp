@@ -18,9 +18,11 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <utility>
 #include "geno_kernel.h"
 #include "pgen_file.h"
 #include "resources.h"
+#include "la_dispatch.h"
 
 namespace {
 
@@ -717,6 +719,160 @@ Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows,
         const double d = d_at(dc, static_cast<std::size_t>(rows[r]));
         if (d != 0.0) col[r] += d;
       }
+  }
+  return out;
+}
+
+// Standardized products in C++ (no BLAS from R): out = (K - s u v') / (da db'), elementwise; an empty
+// da or db is 1. geno_crossprod / geno_cor give their centered, scaled forms through this.
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_std_cpp(const Rcpp::NumericMatrix& K, const Rcpp::NumericVector& u,
+                                 const Rcpp::NumericVector& v, double s, const Rcpp::NumericVector& da,
+                                 const Rcpp::NumericVector& db, int threads) {
+  threads = resolve_threads(threads);
+  const std::size_t r = K.nrow(), c = K.ncol();
+  if (static_cast<std::size_t>(u.size()) != r || static_cast<std::size_t>(v.size()) != c) Rcpp::stop("u, v do not match K.");
+  const bool ha = da.size() > 0, hb = db.size() > 0;
+  if ((ha && static_cast<std::size_t>(da.size()) != r) || (hb && static_cast<std::size_t>(db.size()) != c)) Rcpp::stop("da, db do not match K.");
+  Rcpp::NumericMatrix out(r, c);
+  const double* k = K.begin();
+  double* o = out.begin();
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(c); ++jj) {
+    const std::size_t j = static_cast<std::size_t>(jj);
+    const double vj = s * v[j], bj = hb ? db[j] : 1.0;
+    for (std::size_t i = 0; i < r; ++i) o[i + j * r] = (k[i + j * r] - u[i] * vj) / ((ha ? da[i] : 1.0) * bj);
+  }
+  return out;
+}
+
+// A'A of a dense n x k matrix (double, columns pairs shared out by OpenMP).
+// [[Rcpp::export]]
+Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads) {
+  threads = resolve_threads(threads);
+  const std::size_t n = A.nrow(), k = A.ncol();
+  Rcpp::NumericMatrix out(k, k);
+  const double* a = A.begin();
+  double* o = out.begin();
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
+  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(k); ++jj) {
+    const std::size_t j = static_cast<std::size_t>(jj);
+    for (std::size_t i = j; i < k; ++i) {
+      double acc = 0.0;
+      for (std::size_t r = 0; r < n; ++r) acc += a[r + i * n] * a[r + j * n];
+      o[i + j * k] = acc; o[j + i * k] = acc;
+    }
+  }
+  return out;
+}
+
+namespace {
+
+// Rows r0..r0+R-1 of stored column j (H + D) as floats: dst[r * stride], times w[r0 + r] when w is given.
+void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, const double* w, float* dst,
+                 std::size_t stride) {
+  for (std::size_t r = 0; r < R; ++r) dst[r * stride] = 0.0f;
+  const u64* lo = g.G.lo(j);
+  const u64* hi = g.G.hi(j);
+  const std::size_t w0 = r0 / 64, w1 = (r0 + R + 63) / 64;
+  for (std::size_t x = w0; x < w1; ++x) {
+    for (u64 bits = lo[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 1.0f;
+    }
+    for (u64 bits = hi[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 2.0f;
+    }
+  }
+  const DCol& dc = g.D[j];
+  if (!dc.mask.empty()) {
+    std::size_t e = d_rank(dc, w0);
+    for (std::size_t x = w0; x < w1 && x < dc.mask.size(); ++x)
+      for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) {
+        const std::size_t i = 64 * x + __builtin_ctzll(bits);
+        const double d = dc.q[e++] * dc.unit;
+        if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] += static_cast<float>(d);
+      }
+  }
+  if (w)
+    for (std::size_t r = 0; r < R; ++r) dst[r * stride] = static_cast<float>(dst[r * stride] * w[r0 + r]);
+}
+
+}  // namespace
+
+// X'WX of the stored matrix, W = diag(w), any real w. Output tiles of 256 x 256 (lower triangle) are shared
+// out by OpenMP within each block of 4096 samples; a tile decodes only its two groups of 256 columns for that
+// block into float (w folded into one side), multiplies them with the run-time-dispatched serial sgemm, and
+// accumulates in double; ~8 MB per thread whatever n and p. With center (and div) given, returns the
+// product of the standardized matrix: (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w.
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center,
+                                  const Rcpp::NumericVector& div, int threads) {
+  Rcpp::XPtr<Geno> g(ptr);
+  threads = resolve_threads(threads);
+  const std::size_t n = g->n, p = g->p;
+  if (static_cast<std::size_t>(w.size()) != n) Rcpp::stop("w must have one value per sample.");
+  for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(w[i])) Rcpp::stop("w must be finite.");
+  const plink4r::LaFns& LA = plink4r::la();
+  constexpr std::size_t TB = 256, RB = 4096;
+  const std::size_t nt = (p + TB - 1) / TB;
+  std::vector<std::pair<std::size_t, std::size_t>> tiles;
+  for (std::size_t b = 0; b < nt; ++b) for (std::size_t a = b; a < nt; ++a) tiles.emplace_back(a, b);
+  Rcpp::NumericMatrix out(p, p);
+  double* o = out.begin();
+  const double* wp = w.begin();
+  #pragma omp parallel num_threads(threads)
+  {
+    std::vector<float> At(TB * RB), B(RB * TB), P(TB * TB);
+    for (std::size_t r0 = 0; r0 < n; r0 += RB) {
+      const std::size_t R = std::min(RB, n - r0);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
+        const std::size_t a0 = tiles[tt].first * TB, b0 = tiles[tt].second * TB;
+        const std::size_t na = std::min(TB, p - a0), nb = std::min(TB, p - b0);
+        for (std::size_t c = 0; c < na; ++c) decode_rows(*g, a0 + c, r0, R, wp, &At[c], TB);    // A' : na x R, ld TB
+        for (std::size_t c = 0; c < nb; ++c) decode_rows(*g, b0 + c, r0, R, nullptr, &B[c * RB], 1);  // B : R x nb, ld RB
+        LA.sgemm_nn(At.data(), static_cast<int>(na), static_cast<int>(R), static_cast<int>(TB), B.data(),
+                    static_cast<int>(nb), static_cast<int>(RB), P.data(), static_cast<int>(TB));
+        for (std::size_t y = 0; y < nb; ++y)
+          for (std::size_t x = 0; x < na; ++x) o[(a0 + x) + (b0 + y) * p] += P[x + y * TB];
+      }  // implicit barrier: the next sample block starts after every tile of this one
+    }
+  }
+  for (std::size_t b = 0; b < p; ++b)  // mirror the lower triangle
+    for (std::size_t a = b + 1; a < p; ++a) o[b + a * p] = o[a + b * p];
+  if (center.size() > 0) {
+    if (static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
+    const bool hd = div.size() > 0;
+    std::vector<double> sw(p, 0.0);
+    double wsum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) wsum += wp[i];
+    #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+    for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(p); ++jj) {  // s = X'w in double
+      const std::size_t j = static_cast<std::size_t>(jj);
+      double acc = 0.0;
+      const u64* lo = g->G.lo(j);
+      const u64* hi = g->G.hi(j);
+      for (std::size_t x = 0; x < g->G.words; ++x) {
+        for (u64 bits = lo[x]; bits; bits &= bits - 1) acc += wp[64 * x + __builtin_ctzll(bits)];
+        for (u64 bits = hi[x]; bits; bits &= bits - 1) acc += 2.0 * wp[64 * x + __builtin_ctzll(bits)];
+      }
+      const DCol& dc = g->D[j];
+      std::size_t e = 0;
+      for (std::size_t x = 0; x < dc.mask.size(); ++x)
+        for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) acc += dc.q[e++] * dc.unit * wp[64 * x + __builtin_ctzll(bits)];
+      sw[j] = acc;
+    }
+    #pragma omp parallel for num_threads(threads) schedule(static)
+    for (std::ptrdiff_t bb = 0; bb < static_cast<std::ptrdiff_t>(p); ++bb) {
+      const std::size_t b = static_cast<std::size_t>(bb);
+      for (std::size_t a = 0; a < p; ++a) {
+        double v = o[a + b * p] - center[a] * sw[b] - sw[a] * center[b] + wsum * center[a] * center[b];
+        if (hd) v /= div[a] * div[b];
+        o[a + b * p] = v;
+      }
+    }
   }
   return out;
 }
