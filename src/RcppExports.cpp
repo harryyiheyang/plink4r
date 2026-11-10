@@ -192,8 +192,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // score_stream_cpp
-Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab, Rcpp::IntegerVector ct_tab, int q, int threads, int chunk);
-RcppExport SEXP _plink4r_score_stream_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP tabSEXP, SEXP ct_tabSEXP, SEXP qSEXP, SEXP threadsSEXP, SEXP chunkSEXP) {
+Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab, Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm);
+RcppExport SEXP _plink4r_score_stream_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP tabSEXP, SEXP ct_tabSEXP, SEXP qSEXP, SEXP threadsSEXP, SEXP chunkSEXP, SEXP gemmSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -207,7 +207,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type q(qSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     Rcpp::traits::input_parameter< int >::type chunk(chunkSEXP);
-    rcpp_result_gen = Rcpp::wrap(score_stream_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk));
+    Rcpp::traits::input_parameter< int >::type gemm(gemmSEXP);
+    rcpp_result_gen = Rcpp::wrap(score_stream_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -294,7 +295,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_cross_cpp", (DL_FUNC) &_plink4r_geno_cross_cpp, 3},
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 4},
-    {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 10},
+    {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
     {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 15},
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 17},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},

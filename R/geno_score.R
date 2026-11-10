@@ -145,9 +145,26 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   tab[, 4L, ] <- t(Wa * ifelse(fill == "none", 0, ifelse(in_ld, c0 - off, d_fill - off)))
   ct <- matrix(2L, 4L, m)
   ct[4L, fill == "none"] <- 0L
-  res <- score_stream_cpp(pgen, length(iid), act, as.integer(idx[ok] - 1L), as.integer(si - 1L),
-                          as.numeric(tab), as.integer(ct), q, threads, as.integer(P$chunk))
-  S <- res$score
+  gemm <- switch(P$gemm, auto = if (q >= P$gemm_min_q) 1L else 0L, lookup = 0L, double = 1L, float = 2L,
+                 stop("para$gemm must be auto, lookup, double or float", call. = FALSE))
+  # One progress bar: a step per chromosome of the stream (scheme 3 / plink / none), then per LD block.
+  chr <- pvar$CHROM[idx[ok]]
+  chrs <- unique(chr)
+  ld_blocks_todo <- if (any(in_ld)) {
+    rid <- match(ids[ok][in_ld], ref$ID); sort(unique(ref$block[rid]))
+  } else integer(0)
+  pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(chrs) + length(ld_blocks_todo), style = 3) else NULL
+  step <- 0L
+  tick <- function() { step <<- step + 1L; if (!is.null(pb)) utils::setTxtProgressBar(pb, step) }
+  S <- matrix(0, n, q); allele_ct <- integer(n)
+  for (cc in chrs) {
+    sel <- which(chr == cc)
+    res <- score_stream_cpp(pgen, length(iid), act, as.integer(idx[ok][sel] - 1L), as.integer(si - 1L),
+                            as.numeric(tab[, , sel, drop = FALSE]), as.integer(ct[, sel, drop = FALSE]), q, threads,
+                            as.integer(P$chunk), gemm)
+    S <- S + res$score; allele_ct <- allele_ct + res$allele_ct
+    tick()
+  }
   t_stream <- proc.time()[["elapsed"]] - t0
 
   # ---- LD panel variants: S += (s a w) g over their filled cells, one block at a time
@@ -179,14 +196,15 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
                                 afb, P$thresh, P$delta, P$anchor_min_miss, Bb, threads,
                                 if (is.null(P$nb_people)) 0L else as.integer(P$nb_people), P$mem_gb, integer(0))
       S <- S + out$score
+      tick()
       ld_info[[b]] <- data.table::data.table(block = blocks[b], m = mb, scored = sum(rowSums(Bb != 0) > 0),
                                              cells = out$cells, persons_solved = out$persons_solved,
                                              sec = proc.time()[["elapsed"]] - tb)
     }
     ld_info <- data.table::rbindlist(ld_info)
   }
+  if (!is.null(pb)) close(pb)
   dimnames(S) <- list(iid[si], score_cols)
-  allele_ct <- res$allele_ct
   list(sum = S, avg = S / allele_ct, allele_ct = allele_ct, sample = iid[si],
        variants = data.table::data.table(ID = ids[ok], A1 = wa1[ok], flip = fl, fill = fill, n_miss = n_miss, p = p1),
        skipped = data.table::data.table(ID = ids[!is.na(skip)], A1 = wa1[!is.na(skip)], reason = skip[!is.na(skip)]),
@@ -196,10 +214,12 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 
 #' Defaults of [geno_score()]
 #'
-#' chunk 512 variants read per streaming step; for the LD path (as [genotype_impute()]): thresh 0 = all
+#' chunk 512 variants read per streaming step; gemm "auto" (dense product per chunk when the number of
+#' traits is at least gemm_min_q, else per-variant lookup), "lookup", "double" or "float" (single-precision
+#' product, about twice as fast, relative error ~1e-7); progress: one bar over chromosomes then LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
 #' stored eigenpairs, delta 0.01 ridge of stage 1, anchor_min_miss 0.01 (stage 2 at or above this missing
 #' rate), nb_people NULL (people per batch from mem_gb), mem_gb 2.
 #' @export
 geno_score_para <- function() {
-  list(chunk = 512L, thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2)
+  list(chunk = 512L, gemm = "auto", gemm_min_q = 10L, progress = interactive(), thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2)
 }

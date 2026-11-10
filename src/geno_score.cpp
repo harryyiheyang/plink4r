@@ -20,7 +20,7 @@
 // [[Rcpp::export]]
 Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
                             Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab,
-                            Rcpp::IntegerVector ct_tab, int q, int threads, int chunk) {
+                            Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm) {
   const int T = std::max(1, threads);
   const int p = var_idx.size(), ns = sample_idx.size();
   if (tab.size() != static_cast<R_xlen_t>(4) * q * p || ct_tab.size() != static_cast<R_xlen_t>(4) * p)
@@ -36,8 +36,13 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   std::vector<double> S(static_cast<std::size_t>(ns) * q, 0.0);  // row-major: sample, trait
   std::vector<int> ct(ns, 0);
   std::vector<int> bad(T, -1);
-  const int sblk = 2048;
+  // gemm: codes 0/1/2 add base + x * slope (affine in the ALT count x), so a chunk is scored as one dense
+  // product X (samples x variants, x with missing = 0) * Slope (variants x traits), in float (gemm = 2) or
+  // double (gemm = 1), plus the missing-cell corrections tab[3] - tab[0] and the constant sum of base.
+  const int sblk = gemm ? 1024 : 2048;
   const int nsb = (ns + sblk - 1) / sblk;
+  std::vector<double> base_sum(q, 0.0);
+  if (gemm) for (int j = 0; j < p; ++j) for (int t = 0; t < q; ++t) base_sum[t] += tb[static_cast<std::size_t>(j) * 4 * q + t];
   for (int c0 = 0; c0 < p; c0 += V) {
     const int nv = std::min(V, p - c0);
 #ifdef _OPENMP
@@ -49,6 +54,46 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
       std::memcpy(&buf[static_cast<std::size_t>(v) * rb], gv, rb);
     }
     for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop("PGEN read failed at variant %d", bad[t] + 1);
+    if (gemm) {
+      Eigen::MatrixXd SlopeD(nv, q), MissD(nv, q);
+      for (int v = 0; v < nv; ++v) {
+        const double* tv = tb + static_cast<std::size_t>(c0 + v) * 4 * q;
+        for (int t = 0; t < q; ++t) { SlopeD(v, t) = tv[q + t] - tv[t]; MissD(v, t) = tv[3 * q + t] - tv[t]; }
+      }
+      const Eigen::MatrixXf SlopeF = SlopeD.cast<float>();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
+#endif
+      for (int b = 0; b < nsb; ++b) {
+        const int s0 = b * sblk, s1 = std::min(ns, s0 + sblk), nr = s1 - s0;
+        Eigen::MatrixXd XD;
+        Eigen::MatrixXf XF;
+        if (gemm == 2) XF.resize(nr, nv); else XD.resize(nr, nv);
+        std::vector<int> mi, mv;
+        for (int v = 0; v < nv; ++v) {
+          const unsigned char* g = &buf[static_cast<std::size_t>(v) * rb];
+          const int* cv = ctb + static_cast<std::size_t>(c0 + v) * 4;
+          for (int s = s0; s < s1; ++s) {
+            const int r = si[s];
+            const unsigned c = (g[r >> 2] >> (2 * (r & 3))) & 3u;
+            const unsigned x = c == 3u ? 0u : c;
+            if (gemm == 2) XF(s - s0, v) = static_cast<float>(x); else XD(s - s0, v) = static_cast<double>(x);
+            ct[s] += cv[c];
+            if (c == 3u) { mi.push_back(s); mv.push_back(v); }
+          }
+        }
+        Eigen::MatrixXd P = gemm == 2 ? Eigen::MatrixXd((XF * SlopeF).cast<double>()) : Eigen::MatrixXd(XD * SlopeD);
+        for (int s = s0; s < s1; ++s) {
+          double* Ss = &S[static_cast<std::size_t>(s) * q];
+          for (int t = 0; t < q; ++t) Ss[t] += P(s - s0, t);
+        }
+        for (std::size_t e = 0; e < mi.size(); ++e) {
+          double* Ss = &S[static_cast<std::size_t>(mi[e]) * q];
+          for (int t = 0; t < q; ++t) Ss[t] += MissD(mv[e], t);
+        }
+      }
+      continue;
+    }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1) num_threads(T)
 #endif
@@ -78,6 +123,7 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
       }
     }
   }
+  if (gemm) for (int s = 0; s < ns; ++s) for (int t = 0; t < q; ++t) S[static_cast<std::size_t>(s) * q + t] += base_sum[t];
   Rcpp::NumericMatrix out(ns, q);
   for (int s = 0; s < ns; ++s) for (int t = 0; t < q; ++t) out(s, t) = S[static_cast<std::size_t>(s) * q + t];
   return Rcpp::List::create(Rcpp::_["score"] = out, Rcpp::_["allele_ct"] = Rcpp::wrap(ct));
