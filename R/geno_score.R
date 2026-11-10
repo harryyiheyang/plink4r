@@ -145,8 +145,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   tab[, 4L, ] <- t(Wa * ifelse(fill == "none", 0, ifelse(in_ld, c0 - off, d_fill - off)))
   ct <- matrix(2L, 4L, m)
   ct[4L, fill == "none"] <- 0L
-  gemm <- switch(P$gemm, auto = if (q >= P$gemm_min_q) 1L else 0L, lookup = 0L, double = 1L, float = 2L,
-                 stop("para$gemm must be auto, lookup, double or float", call. = FALSE))
+  gemm <- if (q >= 2L) 2L else 0L  # one trait: lookup table; several: float32 product per chunk
   # One progress bar: a step per chromosome of the stream (scheme 3 / plink / none), then per LD block.
   chr <- pvar$CHROM[idx[ok]]
   chrs <- unique(chr)
@@ -214,12 +213,10 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 
 #' Defaults of [geno_score()]
 #'
-#' chunk 512 variants read per streaming step; gemm "auto" (dense product per chunk when the number of
-#' traits is at least gemm_min_q, else per-variant lookup), "lookup", "double" or "float" (single-precision
-#' product, about twice as fast, relative error ~1e-7); progress: one bar over chromosomes then LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
+#' chunk 512 variants read per streaming step; progress: one bar over chromosomes then LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
 #' stored eigenpairs, delta 0.01 ridge of stage 1, anchor_min_miss 0.01 (stage 2 at or above this missing
 #' rate), nb_people NULL (people per batch from mem_gb), mem_gb 2.
 #' @export
 geno_score_para <- function() {
-  list(chunk = 512L, gemm = "auto", gemm_min_q = 10L, progress = interactive(), thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2)
+  list(chunk = 512L, progress = interactive(), thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2)
 }
