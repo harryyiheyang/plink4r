@@ -49,6 +49,10 @@ geno_dense_cpp <- function(ptr, rows, cols, threads) {
     .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, threads)
 }
 
+resources_cpp <- function(threads, mem_gb) {
+    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
+}
+
 score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm) {
     .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm)
 }

@@ -39,7 +39,7 @@
 #' @param sample IIDs to score (`NULL` = all .psam rows), in the row order wanted.
 #' @param dup_ids `"error"` or `"skip"`.
 #' @param para named list overriding [geno_score_para()].
-#' @param threads OpenMP threads.
+#' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return list(sum = n x q scores (plink2 `<name>_SUM`), avg = sum / allele_ct (`<name>_AVG`),
 #'   allele_ct (`ALLELE_CT`), sample, variants = data.table(ID, A1, flip (A1 is REF), fill ("mean",
 #'   "anchor", "ld", "none"), n_miss, p (A1 frequency used)), skipped = data.table(ID, A1, reason),
@@ -55,7 +55,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   bad <- setdiff(names(para), names(P))
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "), call. = FALSE)
   P[names(para)] <- para
-  threads <- as.integer(threads)
+  threads <- .threads(threads); P$mem_gb <- .mem_gb(P$mem_gb, threads)
   w <- data.table::as.data.table(weights)
   if (!all(c(id_col, a1_col) %in% names(w))) stop("weights lacks ", id_col, " or ", a1_col, ".", call. = FALSE)
   if (is.null(score_cols))
@@ -208,7 +208,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   list(sum = S, avg = S / allele_ct, allele_ct = allele_ct, sample = iid[si],
        variants = data.table::data.table(ID = ids[ok], A1 = wa1[ok], flip = fl, fill = fill, n_miss = n_miss, p = p1),
        skipped = data.table::data.table(ID = ids[!is.na(skip)], A1 = wa1[!is.na(skip)], reason = skip[!is.na(skip)]),
-       ld_blocks = ld_info, simd = simd_isa_cpp(),
+       ld_blocks = ld_info, simd = simd_isa_cpp(), resources = c(threads = threads, mem_gb = P$mem_gb),
        time = c(stream = t_stream, total = proc.time()[["elapsed"]] - t0))
 }
 

@@ -10,11 +10,13 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <utility>
 #include <vector>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 #include "pgen_reader.h"
+#include "resources.h"
 
 using Eigen::MatrixXd;
 using Eigen::MatrixXf;
@@ -55,7 +57,10 @@ Rcpp::List cor_from_G(const std::vector<std::uint16_t>& G, int ns, int p, const 
   }
   MatrixXd XtX = MatrixXd::Zero(p, p);
   const int CH = 16384;
-  Eigen::setNbThreads(T);
+  // X'X by 256-column tiles (lower triangle) shared out by OpenMP; each tile product is a serial Eigen call.
+  const int TB = 256, nt = (p + TB - 1) / TB;
+  std::vector<std::pair<int, int>> tiles;
+  for (int b = 0; b < nt; ++b) for (int a2 = b; a2 < nt; ++a2) tiles.emplace_back(a2, b);
   MatrixXf Z(CH, p);
   for (int a = 0; a < ns; a += CH) {
     const int nb = std::min(CH, ns - a);
@@ -68,9 +73,21 @@ Rcpp::List cor_from_G(const std::vector<std::uint16_t>& G, int ns, int p, const 
       const float f = static_cast<float>(fill[j] - mu[j]), m0 = static_cast<float>(mu[j]);
       for (int i = 0; i < nb; ++i) Z(i, j) = g[i] == plink4r::PgenFile::kMissing ? f : static_cast<float>(g[i] * unit) - m0;
     }
-    XtX.noalias() += (Z.transpose() * Z).cast<double>();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
+#endif
+    for (int t = 0; t < static_cast<int>(tiles.size()); ++t) {
+      const int r0 = tiles[t].first * TB, c0 = tiles[t].second * TB;
+      const int nr = std::min(TB, p - r0), nc = std::min(TB, p - c0);
+      const MatrixXf P = Z.middleCols(r0, nr).transpose() * Z.middleCols(c0, nc);
+      XtX.block(r0, c0, nr, nc) += P.cast<double>();
+    }
   }
-  Eigen::setNbThreads(1);
+  for (int b = 0; b < nt; ++b)  // mirror the strictly upper tiles
+    for (int a2 = b + 1; a2 < nt; ++a2) {
+      const int r0 = a2 * TB, c0 = b * TB, nr = std::min(TB, p - r0), nc = std::min(TB, p - c0);
+      XtX.block(c0, r0, nc, nr) = XtX.block(r0, c0, nr, nc).transpose();
+    }
   Rcpp::NumericMatrix R(p, p);
   for (int l = 0; l < p; ++l)
     for (int j = 0; j < p; ++j) {
@@ -87,7 +104,7 @@ Rcpp::List cor_from_G(const std::vector<std::uint16_t>& G, int ns, int p, const 
 // [[Rcpp::export]]
 Rcpp::List cor_pgen_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx,
                         Rcpp::IntegerVector sample_idx, Rcpp::NumericVector af, int threads) {
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const auto t0 = std::chrono::steady_clock::now();
   const int p = var_idx.size(), ns = sample_idx.size();
   std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
@@ -123,7 +140,7 @@ Rcpp::List cor_pgen_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector 
 // [[Rcpp::export]]
 Rcpp::List cor_bed_cpp(const std::string& bed, int n_raw, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                        Rcpp::NumericVector af, int threads) {
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const auto t0 = std::chrono::steady_clock::now();
   const int p = var_idx.size(), ns = sample_idx.size();
   const std::size_t bpv = (static_cast<std::size_t>(n_raw) + 3) / 4;
@@ -161,7 +178,7 @@ Rcpp::List cor_bed_cpp(const std::string& bed, int n_raw, Rcpp::IntegerVector va
 // [[Rcpp::export]]
 Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx,
                           Rcpp::IntegerVector sample_idx, int threads) {
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const int p = var_idx.size(), ns = sample_idx.size();
   std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
   std::vector<int> act(allele_ct.begin(), allele_ct.end());

@@ -191,6 +191,18 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// resources_cpp
+Rcpp::List resources_cpp(int threads, double mem_gb);
+RcppExport SEXP _plink4r_resources_cpp(SEXP threadsSEXP, SEXP mem_gbSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
+    rcpp_result_gen = Rcpp::wrap(resources_cpp(threads, mem_gb));
+    return rcpp_result_gen;
+END_RCPP
+}
 // score_stream_cpp
 Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab, Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm);
 RcppExport SEXP _plink4r_score_stream_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP tabSEXP, SEXP ct_tabSEXP, SEXP qSEXP, SEXP threadsSEXP, SEXP chunkSEXP, SEXP gemmSEXP) {
@@ -305,6 +317,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_cross_cpp", (DL_FUNC) &_plink4r_geno_cross_cpp, 3},
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 4},
+    {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
     {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
     {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 15},
     {"_plink4r_simd_isa_cpp", (DL_FUNC) &_plink4r_simd_isa_cpp, 0},

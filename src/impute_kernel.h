@@ -45,6 +45,7 @@
 #include "eigen_bin.h"
 #include "pgen_reader.h"
 #include "la_dispatch.h"
+#include "resources.h"
 
 namespace plink4r {
 namespace ik {
@@ -65,6 +66,15 @@ inline int tid() {
   return omp_get_thread_num();
 #else
   return 0;
+#endif
+}
+
+// Size of the current team (read-only; may be below num_threads(T) when the runtime limits threads).
+inline int team() {
+#ifdef _OPENMP
+  return omp_get_num_threads();
+#else
+  return 1;
 #endif
 }
 // sum_l col[l] * (het_l + 2 hom_l) over the bit-planes of one person (m padded to a multiple of 16 with zeros).
@@ -217,7 +227,6 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
                      C.data(), T, err) != 0)
       throw std::runtime_error(err);
   }
-  Eigen::setNbThreads(1);
   MatrixXf& Aw = L.Aw;
   Aw = MatrixXf::Zero(mp, m);  // a_lj, padded rows are 0
   L.Aj.assign(m, 0.0f);
@@ -421,8 +430,8 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
 #pragma omp parallel num_threads(T)
 #endif
       {
-        const int th = ik::tid();
-        const int i0 = static_cast<int>(static_cast<long long>(nb) * th / T), i1 = static_cast<int>(static_cast<long long>(nb) * (th + 1) / T);
+        const int th = ik::tid(), nt = ik::team();  // split by the team actually granted, not by T
+        const int i0 = static_cast<int>(static_cast<long long>(nb) * th / nt), i1 = static_cast<int>(static_cast<long long>(nb) * (th + 1) / nt);
         int* c = &tcnt[static_cast<std::size_t>(th) * m];
         for (int i = i0; i < i1; ++i) for (int l : Mi[i]) ++c[l];
 #ifdef _OPENMP

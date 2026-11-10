@@ -30,6 +30,7 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   bad <- setdiff(names(para), names(P))
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "))
   P[names(para)] <- para
+  P$threads <- .threads(P$threads); P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
   snp <- data.table::copy(data.table::as.data.table(snp))
   bpcol <- if (!is.null(P$build)) paste0("BP", P$build) else intersect(c("BP37", "BP38"), names(snp))
   if (length(bpcol) != 1L) stop("`snp` needs exactly one of BP37 / BP38, or set para$build")

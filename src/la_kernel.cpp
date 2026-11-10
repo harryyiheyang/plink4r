@@ -29,6 +29,17 @@ using MapCV = Eigen::Map<const VecF>;
 
 void set_err(char* err, const char* msg) { if (err) std::snprintf(err, 256, "%s", msg); }
 
+// Column slices of an m-column output, shared out by OpenMP over `threads`; every slice is a serial Eigen
+// call (the package is built with EIGEN_DONT_PARALLELIZE, so Eigen never starts threads of its own).
+template <class F>
+void by_columns(int m, int threads, F f) {
+  const int W = 64, ns = (m + W - 1) / W;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+#endif
+  for (int s = 0; s < ns; ++s) f(s * W, (s + 1) * W < m ? W : m - s * W);
+}
+
 // C (m x m, or rows x rows for a window) of the LD imputation, as impute_kernel.h documents.
 int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, const int* rows, int nrows,
             float* Cout, int threads, char* err) {
@@ -36,24 +47,31 @@ int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, 
   MapCV lam(lambda, k);
   const bool window = nrows > 0;
   const int m = window ? nrows : ld_m;
+  const int T = threads > 0 ? threads : 1;
   MapM C(Cout, m, m);
   VecF w(k);
   for (int j = 0; j < k; ++j) w[j] = lam[j] / (lam[j] + static_cast<float>(delta));
-  Eigen::setNbThreads(threads);
   if (!window) {
-    MatF UW = Uf * w.asDiagonal();
-    C.noalias() = UW * Uf.transpose();
+    const MatF UW = Uf * w.asDiagonal();
+    by_columns(m, T, [&](int c0, int nc) { C.middleCols(c0, nc).noalias() = UW * Uf.middleRows(c0, nc).transpose(); });
   } else {
     MatF Uw(m, k);
     for (int r = 0; r < m; ++r) Uw.row(r) = Uf.row(rows[r]);
-    MatF Rw = (Uw * lam.asDiagonal()) * Uw.transpose();
+    const MatF UL = Uw * lam.asDiagonal();
+    MatF Rw(m, m);
+    by_columns(m, T, [&](int c0, int nc) { Rw.middleCols(c0, nc).noalias() = UL * Uw.middleRows(c0, nc).transpose(); });
     Rw.diagonal().array() += static_cast<float>(delta);
     Eigen::LLT<MatF> llt(Rw);
-    if (llt.info() != Eigen::Success) { Eigen::setNbThreads(1); set_err(err, "Cholesky of R_WW + delta I failed"); return 1; }
-    C = -static_cast<float>(delta) * llt.solve(MatF::Identity(m, m));
-    C.diagonal().array() += 1.0f;
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky of R_WW + delta I failed"); return 1; }
+    // C = I - delta (R_WW + delta I)^{-1}, solved slice by slice against columns of I
+    by_columns(m, T, [&](int c0, int nc) {
+      MatF E = MatF::Zero(m, nc);
+      for (int c = 0; c < nc; ++c) E(c0 + c, c) = 1.0f;
+      llt.solveInPlace(E);
+      C.middleCols(c0, nc) = -static_cast<float>(delta) * E;
+      for (int c = 0; c < nc; ++c) C(c0 + c, c0 + c) += 1.0f;
+    });
   }
-  Eigen::setNbThreads(1);
   return 0;
 }
 

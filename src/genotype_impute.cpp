@@ -16,7 +16,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
                                int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows) {
   namespace ik = plink4r::ik;
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
 
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);

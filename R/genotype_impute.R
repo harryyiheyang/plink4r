@@ -22,6 +22,7 @@
 genotype_impute <- function(pfile, ref, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
                             mem_gb = 2, nbr_frac = NULL, nbr_max = NULL) {
+  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   r <- if (is.data.frame(ref)) data.table::as.data.table(ref) else
     data.table::as.data.table(arrow::read_parquet(ref, col_select = c("ID", "block", "ld_index", "AF_PanUKB")))
   pvar <- .read_pvar(pfile)
@@ -65,7 +66,7 @@ genotype_impute <- function(pfile, ref, ld_dir, block = NULL, snps = NULL, flank
     s <- data.table::as.data.table(out$snp)
     s[, snp := snp[j]]
     list(fill = f[, .(IID, snp, g1, g)], snp = s[!is.na(snp) & n_miss > 0, .(snp, n_miss, c_raw, c, mean_stage1, shift)],
-         info = c(list(block = blk, window = length(rows)), out$info), time = out$time)
+         info = c(list(block = blk, window = length(rows), threads = threads, mem_gb = mem_gb), out$info), time = out$time)
   })
   if (length(res) == 1L) return(res[[1]])
   list(fill = data.table::rbindlist(lapply(res, `[[`, "fill")), snp = data.table::rbindlist(lapply(res, `[[`, "snp")),

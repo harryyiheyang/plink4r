@@ -43,7 +43,7 @@ const ByteTables& byte_tables() { static const ByteTables T; return T; }
 Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
                             Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab,
                             Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm) {
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const int p = var_idx.size(), ns = sample_idx.size();
   if (tab.size() != static_cast<R_xlen_t>(4) * q * p || ct_tab.size() != static_cast<R_xlen_t>(4) * p)
     Rcpp::stop("score tables do not match the variants");
@@ -186,7 +186,7 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
                               const std::string& eigen_file, Rcpp::NumericVector af, double thresh, double delta,
                               double anchor_min_miss, Rcpp::NumericMatrix B, int threads, int nb_people,
                               double mem_gb, Rcpp::IntegerVector rows) {
-  const int T = std::max(1, threads);
+  const int T = plink4r::resolve_threads(threads);
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
   const std::vector<int> rw(rows.begin(), rows.end());
   const int m = rw.empty() ? eb.m : static_cast<int>(rw.size());

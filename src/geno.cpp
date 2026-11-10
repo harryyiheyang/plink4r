@@ -20,6 +20,7 @@
 #include <string>
 #include "geno_kernel.h"
 #include "pgen_file.h"
+#include "resources.h"
 
 namespace {
 
@@ -130,7 +131,7 @@ inline int omp_threads() {
 
 inline int resolve_threads(int threads) {
 #ifdef _OPENMP
-  return threads <= 0 ? omp_get_max_threads() : threads;
+  return plink4r::resolve_threads(threads);
 #else
   return 1;
 #endif
@@ -718,4 +719,12 @@ Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows,
       }
   }
   return out;
+}
+
+// Read-only: the threads and memory budget a call with threads = 0 / mem_gb = 0 would use.
+// [[Rcpp::export]]
+Rcpp::List resources_cpp(int threads, double mem_gb) {
+  const plink4r::Resources r = plink4r::detect_resources(threads, mem_gb);
+  return Rcpp::List::create(Rcpp::Named("threads") = r.threads, Rcpp::Named("mem_gb") = r.mem_gb,
+                            Rcpp::Named("threads_from") = r.threads_from, Rcpp::Named("mem_from") = r.mem_from);
 }

@@ -15,6 +15,7 @@
 #endif
 #include "eigen_bin.h"
 #include "la_dispatch.h"
+#include "resources.h"
 
 using plink4r::EigenBlock;
 
@@ -62,6 +63,7 @@ const char* method_name(int code) {
 // [[Rcpp::export]]
 Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z,
                               double thresh, double delta, int threads) {
+  const int T = plink4r::resolve_threads(threads);
   const int nb = blocks.size();
   if (typed_index.size() != nb || z.size() != nb) Rcpp::stop("blocks, typed_index and z differ in length");
   std::vector<int> bv(nb);
@@ -87,7 +89,7 @@ Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blo
   std::vector<int> mm(nb), kk(nb);
   std::vector<double> sec(nb);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) num_threads(std::max(1, threads))
+#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
 #endif
   for (int o = 0; o < nb; ++o) {
     const int i = order[o];

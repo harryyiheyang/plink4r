@@ -47,7 +47,7 @@
 #'   Hardcall input only.
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
 #'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
 #'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
@@ -61,7 +61,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
                       scale = TRUE, threads = 4L, fill = NULL) {
   impute <- match.arg(impute)
-  threads <- as.integer(threads)
+  threads <- .threads(threads)
   if (is.null(bedfile) == is.null(pgenfile)) {
     stop("Give exactly one of bedfile and pgenfile.", call. = FALSE)
   }
@@ -121,7 +121,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 #'
 #' @param X A `geno` object.
 #' @param M Numeric matrix (or vector) with one row per sample.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `geno` object with `p + ncol(M)` columns; `appended` gives the
 #'   positions of all appended columns and `a1`, `a2` are `NA` there.
 #' @export
@@ -132,7 +132,7 @@ geno_append <- function(X, M, threads = X$threads) {
   if (any(!is.finite(M))) stop("Appended columns must be finite.", call. = FALSE)
   if (is.null(colnames(M))) colnames(M) <- paste0("A", X$p + seq_len(ncol(M)))
   if (anyDuplicated(c(X$snp, colnames(M)))) stop("Appended column names must differ from the column names of X.", call. = FALSE)
-  threads <- as.integer(threads)
+  threads <- .threads(threads)
   ptr <- geno_append_cpp(X$ptr, M, threads)
   info <- geno_info_cpp(ptr)
   p0 <- X$p; k <- ncol(M); p <- p0 + k
@@ -275,7 +275,7 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param M Optional dense matrix (or vector) with one row per sample.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A p by p matrix when `M` is `NULL`, otherwise a p by `ncol(M)` matrix.
 #' @export
 geno_crossprod <- function(X, M = NULL, threads = X$threads) {
@@ -303,7 +303,7 @@ geno_crossprod <- function(X, M = NULL, threads = X$threads) {
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param B Dense matrix with one row per variant, or a numeric vector.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return An n by `ncol(B)` matrix, or a numeric vector when `B` is a vector.
 #' @export
 geno_multiply <- function(X, B, threads = X$threads) {
@@ -371,7 +371,7 @@ geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L) {
 #' give `NA`.
 #'
 #' @param A,B `geno` objects.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `ncol(A)` by `ncol(B)` matrix (B = A when `NULL`).
 #' @export
 geno_cor <- function(A, B = NULL, threads = A$threads) {
@@ -414,7 +414,7 @@ geno_cor <- function(A, B = NULL, threads = A$threads) {
 #'
 #' @param A,B BED paths or prefixes (`bed_cor`), PGEN paths or prefixes
 #'   (`pgen_cor`).
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A correlation matrix with variant IDs as dimnames.
 #' @export
 bed_cor <- function(A, B = NULL, threads = 4L) {
@@ -428,10 +428,7 @@ pgen_cor <- function(A, B = NULL, threads = 4L) {
 }
 
 .geno_file_cor <- function(A, B, threads, arg) {
-  if (!is.numeric(threads) || length(threads) != 1L || !is.finite(threads) ||
-      threads < 1 || threads != round(threads)) {
-    stop("threads must be a single positive integer.", call. = FALSE)
-  }
+  threads <- .threads(threads)
   open1 <- function(f) do.call(geno_open, stats::setNames(list(f, "median", FALSE, as.integer(threads)),
                                                           c(arg, "impute", "scale", "threads")))
   XA <- open1(A)

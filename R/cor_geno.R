@@ -15,6 +15,7 @@
 #' @return list(R = p x p matrix with dimnames, mean, sd, n_miss, fill, n, dosage, time)
 #' @export
 cor_pgen <- function(pfile, snps, sample = NULL, af = NULL, threads = 4L) {
+  threads <- .threads(threads)
   pvar <- .read_pvar(pfile)
   psam <- data.table::fread(paste0(pfile, ".psam"))
   iid <- as.character(psam[[intersect(c("IID", "#IID"), names(psam))[1]]])
@@ -32,6 +33,7 @@ cor_pgen <- function(pfile, snps, sample = NULL, af = NULL, threads = 4L) {
 #' LD correlation matrix from a PLINK1 .bed (counts A1; missing as in [cor_pgen()])
 #' @export
 cor_bed <- function(bfile, snps, sample = NULL, af = NULL, threads = 4L) {
+  threads <- .threads(threads)
   bim <- data.table::fread(paste0(bfile, ".bim"), header = FALSE, select = 2L)[[1]]
   fam <- as.character(data.table::fread(paste0(bfile, ".fam"), header = FALSE, select = 2L)[[1]])
   vi <- match(snps, bim)
