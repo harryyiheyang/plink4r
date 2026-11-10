@@ -269,8 +269,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // score_ld_block_cpp
-Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, const std::string& eigen_file, Rcpp::NumericVector af, double thresh, double delta, double anchor_min_miss, Rcpp::NumericMatrix B, int threads, int nb_people, double mem_gb, Rcpp::IntegerVector rows);
-RcppExport SEXP _plink4r_score_ld_block_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP BSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP rowsSEXP) {
+Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta, double anchor_min_miss, Rcpp::NumericMatrix B, int threads, int nb_people, double mem_gb, Rcpp::IntegerVector rows);
+RcppExport SEXP _plink4r_score_ld_block_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP signSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP BSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP rowsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -281,6 +281,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
     Rcpp::traits::input_parameter< const std::string& >::type eigen_file(eigen_fileSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type af(afSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sign(signSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
     Rcpp::traits::input_parameter< double >::type anchor_min_miss(anchor_min_missSEXP);
@@ -289,7 +290,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type nb_people(nb_peopleSEXP);
     Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type rows(rowsSEXP);
-    rcpp_result_gen = Rcpp::wrap(score_ld_block_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows));
+    rcpp_result_gen = Rcpp::wrap(score_ld_block_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -304,8 +305,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // genotype_impute_cpp
-Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, const std::string& eigen_file, Rcpp::NumericVector af, double thresh, double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows);
-RcppExport SEXP _plink4r_genotype_impute_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP keep_rowSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP nbr_fracSEXP, SEXP nbr_maxSEXP, SEXP rowsSEXP) {
+Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows);
+RcppExport SEXP _plink4r_genotype_impute_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP signSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP keep_rowSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP nbr_fracSEXP, SEXP nbr_maxSEXP, SEXP rowsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -316,6 +317,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
     Rcpp::traits::input_parameter< const std::string& >::type eigen_file(eigen_fileSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type af(afSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sign(signSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
     Rcpp::traits::input_parameter< double >::type anchor_min_miss(anchor_min_missSEXP);
@@ -326,7 +328,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type nbr_frac(nbr_fracSEXP);
     Rcpp::traits::input_parameter< int >::type nbr_max(nbr_maxSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type rows(rowsSEXP);
-    rcpp_result_gen = Rcpp::wrap(genotype_impute_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows));
+    rcpp_result_gen = Rcpp::wrap(genotype_impute_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -366,9 +368,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
     {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
-    {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 15},
+    {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 16},
     {"_plink4r_simd_isa_cpp", (DL_FUNC) &_plink4r_simd_isa_cpp, 0},
-    {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 17},
+    {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 18},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
 };

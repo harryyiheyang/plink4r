@@ -7,12 +7,13 @@
 #include <vector>
 #include "impute_kernel.h"
 
-// var_idx: 0-based PGEN variant per eigen row (-1 = not in PGEN: missing for everyone, not returned).
+// Working rows (the panel rows of the block / window that are in the PGEN, increasing): rows = 0-based eigen
+// row, var_idx = 0-based PGEN variant, af = PGEN-ALT frequency, sign = +1 (PGEN ALT = panel alt) or -1.
 // sample_idx: 0-based PSAM rows to impute (anchor counts use these samples only).
 // [[Rcpp::export]]
 Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
                                Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
-                               const std::string& eigen_file, Rcpp::NumericVector af, double thresh,
+                               const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
                                double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
                                int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows) {
   namespace ik = plink4r::ik;
@@ -22,14 +23,17 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
   const double t_read = ik::secs(t_all);
   const std::vector<int> rw(rows.begin(), rows.end());
-  const int m = rw.empty() ? eb.m : static_cast<int>(rw.size());
-  if (var_idx.size() != m || af.size() != m || keep_row.size() != m) Rcpp::stop("var_idx/af/keep_row length != eigen m");
+  const int m = static_cast<int>(rw.size());
+  if (var_idx.size() != m || af.size() != m || sign.size() != m || keep_row.size() != m)
+    Rcpp::stop("rows / var_idx / af / sign / keep_row differ in length");
+  for (int r : rw) if (r < 0 || r >= eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
+  const std::vector<int> sg(sign.begin(), sign.end());
   const std::vector<int> vi(var_idx.begin(), var_idx.end());
   const std::vector<double> afv(af.begin(), af.end());
   std::vector<char> kr(m);
   for (int j = 0; j < m; ++j) kr[j] = keep_row[j] ? 1 : 0;
 
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, delta, nbr_frac, nbr_max, T, t_read);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, nbr_frac, nbr_max, T, t_read);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);

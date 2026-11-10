@@ -33,8 +33,10 @@
 #' @param freq_col Column of `weights` with the A1 frequency used as anchor (plink2 `--read-freq`); ignored
 #'   when absent; `NA` entries fall back to the observed frequency.
 #' @param impute `"anchor"` or `"none"`.
-#' @param ld `NULL`, or `list(dir = folder of block<N>.eigen.bin, ref = data.frame or parquet path with ID,
-#'   block, ld_index (0-based eigen row), AF_PanUKB)` as for [genotype_impute()]; panel IDs must equal .pvar IDs.
+#' @param ld `NULL`, or `list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
+#'   table in place of that parquet)` as for
+#'   [genotype_impute()]: the panel is aligned to the .pvar by ID and alleles, else by chromosome, position and
+#'   allele pair, in either orientation; only panel SNPs present in the .pvar enter the imputation.
 #' @param transform `"none"`, `"center"` or `"standardize"`.
 #' @param sample IIDs to score (`NULL` = all .psam rows), in the row order wanted.
 #' @param dup_ids `"error"` or `"skip"`.
@@ -56,6 +58,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "), call. = FALSE)
   P[names(para)] <- para
   threads <- .threads(threads); P$mem_gb <- .mem_gb(P$mem_gb, threads)
+  if (!is.null(ld)) .check_delta(P$delta)
   w <- data.table::as.data.table(weights)
   if (!all(c(id_col, a1_col) %in% names(w))) stop("weights lacks ", id_col, " or ", a1_col, ".", call. = FALSE)
   if (is.null(score_cols))
@@ -70,12 +73,8 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   pfreq[!(pfreq >= 0 & pfreq <= 1)] <- NA_real_
 
   # ---- variants
-  pf <- paste0(pfile, ".pvar")
-  pvar <- if (file.exists(pf)) data.table::fread(pf, skip = "#CHROM", select = 1:5, colClasses = "character") else
-    data.table::fread(cmd = paste("zstdcat", shQuote(paste0(pf, ".zst")), "| grep -v '^##'"), select = 1:5,
-                      colClasses = "character")
-  data.table::setnames(pvar, c("CHROM", "POS", "ID", "REF", "ALT"))
-  act <- as.integer(2L + lengths(regmatches(pvar$ALT, gregexpr(",", pvar$ALT, fixed = TRUE))))
+  pvar <- .read_pvar5(pfile)
+  act <- pvar$allele_ct
   psam <- data.table::fread(paste0(pfile, ".psam"), colClasses = "character")
   iid <- psam[[intersect(c("#IID", "IID"), names(psam))[1L]]]
   si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
@@ -124,10 +123,10 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   }
   in_ld <- rep(FALSE, m)
   if (!is.null(ld) && impute == "anchor") {
-    ref <- if (is.data.frame(ld$ref)) data.table::as.data.table(data.table::copy(ld$ref)) else
-      data.table::as.data.table(arrow::read_parquet(ld$ref, col_select = c("ID", "block", "ld_index", "AF_PanUKB")))
-    k <- match(ids[ok], ref$ID)
-    anc <- ifelse(is.finite(p_alt_anchor), p_alt_anchor, ref$AF_PanUKB[k])
+    al <- .ld_align(.ld_panel(ld$ref, ld$dir), pvar)  # panel rows in the PGEN, with vi and sign
+    al[, `:=`(arow = .I, anchor = ifelse(sign > 0, AF_PanUKB, 1 - AF_PanUKB))]  # anchor: PGEN-ALT frequency
+    k <- match(idx[ok] - 1L, al$vi)
+    anc <- ifelse(is.finite(p_alt_anchor), p_alt_anchor, al$anchor[k])
     in_ld <- !is.na(k) & is.finite(anc) & anc > 0 & anc < 1 & n_miss > 0
     fill[in_ld] <- "ld"
   }
@@ -150,9 +149,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   # One progress bar: a step per chromosome of the stream (scheme 3 / plink / none), then per LD block.
   chr <- pvar$CHROM[idx[ok]]
   chrs <- unique(chr)
-  ld_blocks_todo <- if (any(in_ld)) {
-    rid <- match(ids[ok][in_ld], ref$ID); sort(unique(ref$block[rid]))
-  } else integer(0)
+  ld_blocks_todo <- if (any(in_ld)) sort(unique(al$block[k[in_ld]])) else integer(0)
   pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(chrs) + length(ld_blocks_todo), style = 3) else NULL
   step <- 0L
   tick <- function() { step <<- step + 1L; if (!is.null(pb)) utils::setTxtProgressBar(pb, step) }
@@ -170,34 +167,26 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   # ---- LD panel variants: S += (s a w) g over their filled cells, one block at a time
   ld_info <- NULL
   if (any(in_ld)) {
-    ref[, row := .I]
-    ref[, vi := match(ID, pvar$ID) - 1L]
-    ref[is.na(vi), vi := -1L]
-    kk <- match(ids[ok][in_ld], ref$ID)
-    ref[, anchor := AF_PanUKB]
-    ref[kk, anchor := p_alt_anchor[in_ld]]
-    ref[!is.finite(anchor), anchor := AF_PanUKB]
-    ref[!(anchor > 0 & anchor < 1), vi := -1L]
-    Bw <- matrix(0, nrow(ref), q)
+    kk <- k[in_ld]
+    ua <- is.finite(p_alt_anchor[in_ld])
+    al$anchor[kk[ua]] <- p_alt_anchor[in_ld][ua]
+    Bw <- matrix(0, nrow(al), q)
     Bw[kk, ] <- Wa[in_ld, , drop = FALSE] * s[in_ld]
-    blocks <- sort(unique(ref$block[kk]))
+    blocks <- ld_blocks_todo
     ld_info <- vector("list", length(blocks))
     for (b in seq_along(blocks)) {
       tb <- proc.time()[["elapsed"]]
-      rb <- ref[block == blocks[b]]
+      wr <- .ld_rows(al, blocks[b])
+      wr <- wr[anchor > 0 & anchor < 1]
       ef <- file.path(ld$dir, paste0("block", blocks[b], ".eigen.bin"))
-      con <- file(ef, "rb"); mb <- readBin(con, "integer", 1L, size = 4L); close(con)
-      vib <- rep(-1L, mb); afb <- rep(0.5, mb); Bb <- matrix(0, mb, q)
-      e <- rb$ld_index + 1L
-      vib[e] <- rb$vi
-      afb[e] <- ifelse(rb$vi >= 0, rb$anchor, 0.5)
-      Bb[e, ] <- Bw[rb$row, , drop = FALSE]
-      out <- score_ld_block_cpp(pgen, length(iid), act, as.integer(vib), as.integer(si - 1L), normalizePath(ef),
-                                afb, P$thresh, P$delta, P$anchor_min_miss, Bb, threads,
-                                if (is.null(P$nb_people)) 0L else as.integer(P$nb_people), P$mem_gb, integer(0))
+      Bb <- Bw[wr$arow, , drop = FALSE]
+      out <- score_ld_block_cpp(pgen, length(iid), act, as.integer(wr$vi), as.integer(si - 1L), normalizePath(ef),
+                                wr$anchor, as.integer(wr$sign), P$thresh, P$delta, P$anchor_min_miss, Bb, threads,
+                                if (is.null(P$nb_people)) 0L else as.integer(P$nb_people), P$mem_gb,
+                                as.integer(wr$ld_index))
       S <- S + out$score
       tick()
-      ld_info[[b]] <- data.table::data.table(block = blocks[b], m = mb, scored = sum(rowSums(Bb != 0) > 0),
+      ld_info[[b]] <- data.table::data.table(block = blocks[b], m = nrow(wr), scored = sum(rowSums(Bb != 0) > 0),
                                              cells = out$cells, persons_solved = out$persons_solved,
                                              sec = proc.time()[["elapsed"]] - tb)
     }

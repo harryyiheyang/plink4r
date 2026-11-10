@@ -177,26 +177,29 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   return Rcpp::List::create(Rcpp::_["score"] = out, Rcpp::_["allele_ct"] = Rcpp::wrap(ct));
 }
 
-// One LD block (whole block, or the eigen rows `rows`): returns the n x q matrix sum_j B[j, t] * g_ij over the
-// filled cells (g = final ALT dosage of a missing call). var_idx / af per working row as in genotype_impute_cpp;
-// rows of B that are all zero are imputed (they condition the others) but add nothing.
+// One LD block over its working rows (panel rows in the PGEN; rows / var_idx / af / sign as in
+// genotype_impute_cpp): returns the n x q matrix sum_j B[j, t] * g_ij over the filled cells (g = final ALT
+// dosage of a missing call). Rows of B that are all zero are imputed (they condition the others) but add nothing.
 // [[Rcpp::export]]
 Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
-                              const std::string& eigen_file, Rcpp::NumericVector af, double thresh, double delta,
+                              const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                               double anchor_min_miss, Rcpp::NumericMatrix B, int threads, int nb_people,
                               double mem_gb, Rcpp::IntegerVector rows) {
   const int T = plink4r::resolve_threads(threads);
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
   const std::vector<int> rw(rows.begin(), rows.end());
-  const int m = rw.empty() ? eb.m : static_cast<int>(rw.size());
-  if (var_idx.size() != m || af.size() != m || B.nrow() != m) Rcpp::stop("var_idx/af/B rows != eigen m");
+  const int m = static_cast<int>(rw.size());
+  if (var_idx.size() != m || af.size() != m || sign.size() != m || B.nrow() != m)
+    Rcpp::stop("rows / var_idx / af / sign / B rows differ in length");
+  for (int r : rw) if (r < 0 || r >= eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
+  const std::vector<int> sg(sign.begin(), sign.end());
   const int q = B.ncol();
   const std::vector<int> vi(var_idx.begin(), var_idx.end());
   const std::vector<double> afv(af.begin(), af.end());
   std::vector<char> keep(m, 0);
   for (int j = 0; j < m; ++j) for (int t = 0; t < q; ++t) if (B(j, t) != 0) { keep[j] = 1; break; }
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, delta, 0, 0, T);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, 0, 0, T);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);

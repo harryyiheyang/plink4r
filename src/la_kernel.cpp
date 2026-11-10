@@ -40,30 +40,65 @@ void by_columns(int m, int threads, F f) {
   for (int s = 0; s < ns; ++s) f(s * W, (s + 1) * W < m ? W : m - s * W);
 }
 
-// C (m x m, or rows x rows for a window) of the LD imputation, as impute_kernel.h documents.
+// C_S = I - delta (R_SS + delta I)^{-1} over the working rows S (rows[0..nrows-1]), R = U diag(lam) U'.
+// S = the whole block: U diag(lam / (lam + delta)) U' as before. Otherwise two exact routes, the cheaper one by
+// min(|S|, k):
+//   k <= |S| (Woodbury): C_S = U_S G U_S', G = (delta Lam^{-1} + U_S'U_S)^{-1} (k x k, double Cholesky
+//     G = L^{-T} L^{-1}); V = U_S L^{-T}; C_S = V V' (lower triangle, then mirrored). With every row and an
+//     orthonormal U this is U diag(lam / (lam + delta)) U'. delta must be > 0.
+//   |S| < k (direct): Cholesky of R_SS + delta I (|S| x |S|), then C = I - delta (R_SS + delta I)^{-1}.
+// Products are split into column slices shared out by OpenMP; each slice is a serial Eigen call.
 int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, const int* rows, int nrows,
             float* Cout, int threads, char* err) {
+  using MatD = Eigen::MatrixXd;
   MapCM Uf(U, ld_m, k);
   MapCV lam(lambda, k);
-  const bool window = nrows > 0;
-  const int m = window ? nrows : ld_m;
+  const int m = nrows;
   const int T = threads > 0 ? threads : 1;
+  if (m <= 0) { set_err(err, "no working rows"); return 1; }
+  if (!(delta > 0)) { set_err(err, "delta must be > 0"); return 1; }
   MapM C(Cout, m, m);
-  VecF w(k);
-  for (int j = 0; j < k; ++j) w[j] = lam[j] / (lam[j] + static_cast<float>(delta));
-  if (!window) {
+  bool whole = m == ld_m;
+  for (int r = 0; whole && r < m; ++r) whole = rows[r] == r;
+  if (whole) {
+    // every row of the block: C = U diag(lam / (lam + delta)) U' (exact for orthonormal U; for an int16 panel
+    // the fill moves by ~1e-3, two orders below the imputation RMSE), the cheapest form
+    VecF w(k);
+    for (int j = 0; j < k; ++j) w[j] = lam[j] / (lam[j] + static_cast<float>(delta));
     const MatF UW = Uf * w.asDiagonal();
     by_columns(m, T, [&](int c0, int nc) { C.middleCols(c0, nc).noalias() = UW * Uf.middleRows(c0, nc).transpose(); });
+    return 0;
+  }
+  MatF US(m, k);
+  for (int r = 0; r < m; ++r) US.row(r) = Uf.row(rows[r]);
+  if (k <= m) {
+    // G0 = U_S'U_S (k x k) in double: I - C has entries of order delta / lam_max, so C needs more than float
+    // accuracy in G (a float U_S'U_S moved the fill by ~1e-4).
+    const MatD USd = US.cast<double>();
+    MatD G0(k, k);
+    by_columns(k, T, [&](int c0, int nc) { G0.middleCols(c0, nc).noalias() = USd.transpose() * USd.middleCols(c0, nc); });
+    MatF V(m, k);
+    for (int j = 0; j < k; ++j) { const double l = lam[j]; G0(j, j) += delta / (l > 1e-30 ? l : 1e-30); }
+    Eigen::LLT<MatD> llt(G0);
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky of delta / lam + U_S'U_S failed"); return 1; }
+    // V' = L^{-1} U_S', column slices of U_S' (= row slices of U_S)
+    by_columns(m, T, [&](int r0, int nr) {
+      MatD Y = USd.middleRows(r0, nr).transpose();
+      llt.matrixL().solveInPlace(Y);
+      V.middleRows(r0, nr) = Y.transpose().cast<float>();
+    });
+    by_columns(m, T, [&](int c0, int nc) {
+      C.block(c0, c0, m - c0, nc).noalias() = V.bottomRows(m - c0) * V.middleRows(c0, nc).transpose();
+    });
+    for (int c = 0; c < m; ++c)
+      for (int r = c + 1; r < m; ++r) C(c, r) = C(r, c);
   } else {
-    MatF Uw(m, k);
-    for (int r = 0; r < m; ++r) Uw.row(r) = Uf.row(rows[r]);
-    const MatF UL = Uw * lam.asDiagonal();
+    const MatF UL = US * lam.asDiagonal();
     MatF Rw(m, m);
-    by_columns(m, T, [&](int c0, int nc) { Rw.middleCols(c0, nc).noalias() = UL * Uw.middleRows(c0, nc).transpose(); });
+    by_columns(m, T, [&](int c0, int nc) { Rw.middleCols(c0, nc).noalias() = UL * US.middleRows(c0, nc).transpose(); });
     Rw.diagonal().array() += static_cast<float>(delta);
     Eigen::LLT<MatF> llt(Rw);
-    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky of R_WW + delta I failed"); return 1; }
-    // C = I - delta (R_WW + delta I)^{-1}, solved slice by slice against columns of I
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky of R_SS + delta I failed"); return 1; }
     by_columns(m, T, [&](int c0, int nc) {
       MatF E = MatF::Zero(m, nc);
       for (int c = 0; c < nc; ++c) E(c0 + c, c) = 1.0f;

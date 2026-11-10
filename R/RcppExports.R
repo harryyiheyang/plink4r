@@ -69,16 +69,16 @@ score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, c
     .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm)
 }
 
-score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_score_ld_block_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows)
+score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows) {
+    .Call(`_plink4r_score_ld_block_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows)
 }
 
 simd_isa_cpp <- function() {
     .Call(`_plink4r_simd_isa_cpp`)
 }
 
-genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows) {
-    .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows)
+genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows) {
+    .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, nbr_frac, nbr_max, rows)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {

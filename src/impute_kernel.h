@@ -2,16 +2,21 @@
 // R entry points share it: genotype_impute_cpp (returns every filled cell) and the LD path of geno_score
 // (adds w * filled cell into scores without keeping the cells).
 //
+// Working rows S: the panel rows of the block (or window) that are also in the PGEN (the intersection; rows
+// absent from the PGEN are not carried). Each has a PGEN variant, the ALT frequency p in PGEN orientation and a
+// sign s = +1 when PGEN ALT is the panel alt, -1 when REF/ALT are swapped (the panel is not assumed to share the
+// PGEN's orientation).
 // Stage 1 (per person i):
-//   z~ = (g - 2p)/sqrt(2p(1-p)) with anchor AF p, 0 at missing;  C = U W U',  W = lam/(lam+delta)
+//   z~ = (g - 2p) / (s sqrt(2p(1-p))) in panel orientation, 0 at missing;  C_S = I - delta (R_SS + delta I)^{-1}
+//   (la_kernel.cpp: Woodbury U_S G U_S' or direct, whichever of k and |S| is smaller)
 //   z_M = (I - C_MM)^{-1} C_{M,.} z~            ( = R_MO (R_OO + delta I)^{-1} z_O )
-//   delta = 0: generalized inverse of (I - C_MM) (eigenvalues <= 1e-6 * max dropped)
+//   delta must be > 0 (at delta = 0, C = I - delta (R + delta I)^{-1} degenerates).
 // Stage 2 (per SNP j with missing rate >= anchor_min_miss; < 0 = never): shift the missing cells so that
 //   sum_obs g + sum_miss g_hat = 2 n p_j, clip [0,2]. Below the cutoff stage 1 is kept: the anchor error is
 //   amplified by 2/missing-rate.
 //
 // Layout for speed (exact, same result as the per-person dot product):
-//   with a_lj = C_lj / sd_l and A_j = -sum_l a_lj mu_l (absent rows: a = 0),
+//   with a_lj = C_lj / sd_l (sd signed) and A_j = -sum_l a_lj mu_l,
 //   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l het_i} a_lj + 2 sum_{l homalt_i} a_lj.
 //   People are processed in blocks; inside a block the loop runs over SNP columns j (column a_.j / C_.j hot in
 //   cache) and over the people missing j, using 1-bit planes (het / homalt) and an 8-bit lookup table, so C is
@@ -180,38 +185,42 @@ inline const PlaneDot& plane_dot_impl() { static const PlaneDot d = pick_plane_d
 struct ImputeLD {
   int m = 0, k = 0, mp = 0, nw = 0;
   bool window = false, restrict_nbr = false;
-  std::vector<int> vi;                  // 0-based PGEN variant per row, -1 = absent
-  std::vector<float> mu, sd, isd, Aj;
+  std::vector<int> vi;                  // 0-based PGEN variant per working row
+  std::vector<float> mu, sd, isd, Aj;   // 2p, s sqrt(2p(1-p)) (signed), 1/sd, A_j
   Eigen::MatrixXf C, Aw;
   std::vector<std::vector<int>> words;  // 16-SNP words scanned per column (neighbour restriction only)
   double kept_mean = 0, words_frac = 0;
   double t_eig = 0, t_C = 0;
 };
 
-// ld: the eigen block; rows: eigen rows of a window (empty = whole block; needs delta > 0);
-// vi, af: per working row (af in (0,1) wherever vi >= 0).
+// ld: the eigen block; rows: 0-based eigen rows of the working set S (panel rows present in the PGEN,
+// increasing); vi, af, sign: per working row (PGEN variant, PGEN-ALT frequency in (0,1), +1 / -1).
 inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& rows, const std::vector<int>& vi,
-                                const std::vector<double>& af, double delta, double nbr_frac, int nbr_max, int T,
-                                double t_eig = 0) {
+                                const std::vector<double>& af, const std::vector<int>& sign, double delta,
+                                double nbr_frac, int nbr_max, int T, double t_eig = 0) {
   using Eigen::MatrixXf;
   using Eigen::VectorXf;
   auto t0 = std::chrono::steady_clock::now();
   ImputeLD L;
   L.t_eig = t_eig;
-  L.window = !rows.empty();
-  const int m = L.window ? static_cast<int>(rows.size()) : ld.m, k = ld.k;
+  const int m = static_cast<int>(rows.size()), k = ld.k;
+  if (m == 0) throw std::runtime_error("no working rows (no panel SNP of the block is in the PGEN)");
+  if (!(delta > 0)) throw std::runtime_error("delta must be > 0");
+  L.window = m < ld.m;
   L.m = m; L.k = k;
-  if (L.window && !(delta > 0)) throw std::runtime_error("a window (rows) needs delta > 0");
-  if (static_cast<int>(vi.size()) != m || static_cast<int>(af.size()) != m) throw std::runtime_error("var_idx/af/keep_row length != eigen m");
+  if (static_cast<int>(vi.size()) != m || static_cast<int>(af.size()) != m || static_cast<int>(sign.size()) != m)
+    throw std::runtime_error("rows / var_idx / af / sign differ in length");
   L.vi = vi;
   L.mu.assign(m, 0.0f); L.sd.assign(m, 1.0f); L.isd.assign(m, 0.0f);
   for (int j = 0; j < m; ++j) {
-    if (vi[j] < 0) continue;
+    if (vi[j] < 0) throw std::runtime_error("negative var_idx at working row " + std::to_string(j + 1));
+    if (sign[j] != 1 && sign[j] != -1) throw std::runtime_error("sign must be +1 or -1");
+    if (j > 0 && rows[j] <= rows[j - 1]) throw std::runtime_error("rows must be increasing");
     const double p = af[j];
     if (!(p > 0 && p < 1))
-      throw std::runtime_error("af must be in (0,1) for every SNP present in the PGEN (eigen row " + std::to_string(j + 1) + ")");
+      throw std::runtime_error("af must be in (0,1) for every working row (row " + std::to_string(j + 1) + ")");
     L.mu[j] = static_cast<float>(2 * p);
-    L.sd[j] = static_cast<float>(std::sqrt(2 * p * (1 - p)));
+    L.sd[j] = static_cast<float>(sign[j] * std::sqrt(2 * p * (1 - p)));
     L.isd[j] = 1.0f / L.sd[j];
   }
   L.t_eig += ik::secs(t0); t0 = std::chrono::steady_clock::now();
@@ -276,7 +285,7 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
 // ---- genotypes of one block: SNP-major genovecs of the selected samples (codes 0/1/2 ALT count, 3 missing)
 struct BlockGenotypes {
   int m = 0, ns = 0, sb = 0;
-  std::vector<uint8_t> GS;       // m x sb bytes; absent rows stay all-missing
+  std::vector<uint8_t> GS;       // m x sb bytes
   std::vector<double> sum_obs;   // observed ALT count per row
   double t_geno = 0;
 };
@@ -286,18 +295,16 @@ inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>&
   BlockGenotypes B;
   const int m = static_cast<int>(vi.size()), ns = static_cast<int>(sidx.size()), sb = (ns + 3) / 4;
   B.m = m; B.ns = ns; B.sb = sb;
-  B.GS.assign(static_cast<std::size_t>(m) * sb, 0xFF);
+  B.GS.assign(static_cast<std::size_t>(m) * sb, 0);
   B.sum_obs.assign(m, 0.0);
   std::vector<int> bad(T, -1);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(T)
 #endif
   for (int j = 0; j < m; ++j) {
-    if (vi[j] < 0) continue;
     const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), ik::tid());
     if (!gv) { bad[ik::tid()] = j; continue; }
     uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
-    std::memset(dst, 0, sb);
     double so = 0;
     for (int s = 0; s < ns; ++s) {
       const int r = sidx[s];
@@ -385,7 +392,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   const MatrixXf& Aw = L.Aw;
   const std::vector<float>& mu = L.mu;
   const std::vector<float>& sd = L.sd;
-  const std::vector<int>& vi = L.vi;
   const std::vector<std::vector<int>>& MiA = P.Mi;
   const ik::PlaneDot& PD = ik::plane_dot_impl();
   // person blocks: fixed size, or as large as the memory budget for S_i, rhs and the SNP lists allows
@@ -505,26 +511,16 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         Eigen::Map<MatrixXf> Si(&S[static_cast<std::size_t>(soff[i])], q, q);
         Eigen::Map<VectorXf> ri(&rhs[moff[i]], q);
         VectorXf zm;
-        if (delta > 0) {
-          Eigen::LLT<Eigen::Ref<MatrixXf>> llt(Si);
-          if (llt.info() == Eigen::Success) zm = llt.solve(ri);
-          else {
-            MatrixXf Sf(q, q);  // LLT overwrote the lower triangle and diagonal; rebuild from the strict upper one
-            for (int x = 0; x < q; ++x)
-              for (int y = 0; y < q; ++y) Sf(y, x) = y < x ? Si(y, x) : (y > x ? Si(x, y) : 1.0f - C(M[x], M[x]));
-            zm = Sf.ldlt().solve(ri);
-          }
-        } else {
-          Eigen::SelfAdjointEigenSolver<MatrixXf> es(Si);
-          const VectorXf ev = es.eigenvalues();
-          const float cut = 1e-6f * ev.maxCoeff();
-          VectorXf y = es.eigenvectors().transpose() * ri;
-          for (int x = 0; x < q; ++x) y[x] = ev[x] > cut ? y[x] / ev[x] : 0.0f;
-          zm = es.eigenvectors() * y;
+        Eigen::LLT<Eigen::Ref<MatrixXf>> llt(Si);
+        if (llt.info() == Eigen::Success) zm = llt.solve(ri);
+        else {
+          MatrixXf Sf(q, q);  // LLT overwrote the lower triangle and diagonal; rebuild from the strict upper one
+          for (int x = 0; x < q; ++x)
+            for (int y = 0; y < q; ++y) Sf(y, x) = y < x ? Si(y, x) : (y > x ? Si(x, y) : 1.0f - C(M[x], M[x]));
+          zm = Sf.ldlt().solve(ri);
         }
         for (int x = 0; x < q; ++x) {
           const int j = M[x];
-          if (vi[j] < 0) continue;
           R.oi[th].push_back(b0 + i); R.oj[th].push_back(j);
           R.og[th].push_back(std::min(2.0f, std::max(0.0f, mu[j] + sd[j] * zm[x])));
         }
@@ -538,7 +534,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   return R;
 }
 
-// ---- stage 2: anchor per SNP. NaN marks rows without filled cells (absent or nothing missing).
+// ---- stage 2: anchor per SNP. NaN marks rows without filled cells (nothing missing).
 struct Stage2Result {
   std::vector<double> sum1, cnt1, craw, cc, shift, mean1;
   double t_anchor = 0;
@@ -555,7 +551,7 @@ inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<int>&
     for (std::size_t r = 0; r < R.og[t].size(); ++r) { A.sum1[R.oj[t][r]] += R.og[t][r]; A.cnt1[R.oj[t][r]] += 1; }
   A.craw.assign(m, nan); A.cc.assign(m, nan); A.shift.assign(m, 0.0); A.mean1.assign(m, nan);
   for (int j = 0; j < m; ++j) {
-    if (vi[j] < 0 || A.cnt1[j] == 0) continue;
+    if (A.cnt1[j] == 0) continue;
     A.mean1[j] = A.sum1[j] / A.cnt1[j];
     A.craw[j] = (2.0 * ns * af[j] - sum_obs[j]) / A.cnt1[j];
     A.cc[j] = std::min(2.0, std::max(0.0, A.craw[j]));

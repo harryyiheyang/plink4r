@@ -15,8 +15,9 @@
 #' An optional column `r2` (imputation quality; 1 = typed) is carried through, so [sumstat_impute()] uses only
 #' rows with r2 == 1 as typed and re-imputes the rest; without it every row is typed (r2 = 1).
 #' @param gwas file path or data.frame.
-#' @param ref reference parquet (columns ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index) or data.frame.
-#' @param build 37 or 38.
+#' @param ref panel SNP table: the LD panel directory (its .parquet is read), a parquet path, or a data.frame
+#'   with ID, chr, bp37 and/or bp38, ref, alt, AF_PanUKB, block, ld_index.
+#' @param build 37 or 38; the panel must carry that build's position column.
 #' @param output optional output path (.parquet or text).
 #' @return data.table: ID, chr, bp37, bp38, A1 (= ref alt), A2 (= ref ref), freq, Z, N, r2, block, ld_index.
 #' @export
@@ -39,8 +40,11 @@ summarystat_tidy <- function(gwas, ref, build = 37, freq_thresh = 0.2, N_sd_rang
   if (has_r2) message(sum(g$r2 < 1), " rows with r2 < 1 (imputed): kept, flagged for re-imputation")
   message(nrow(g), " valid SNPs")
 
-  r <- .read_table(ref)
-  r <- r[, .(ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index)]
+  r <- .ld_panel(ref)
+  bcol <- paste0("bp", build)
+  if (!bcol %in% names(r)) stop("the panel has no ", bcol, " column: it supports only ",
+                                paste(intersect(c("bp37", "bp38"), names(r)), collapse = ", "), call. = FALSE)
+  r <- .with_bp(r)[, .(ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index)]
   r[, BP := if (build == 37) bp37 else bp38]
   same <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("chr", "BP", "alt", "ref"))
   swap <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("chr", "BP", "ref", "alt"))

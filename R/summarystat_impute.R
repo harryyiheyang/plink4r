@@ -12,21 +12,23 @@
 #' further adjustment. Only rows of `tidy` with `r2 == 1` (or without an
 #' `r2` column) are used as typed, so re-running on an imputed file re-imputes its imputed rows from the typed ones.
 #' @param tidy output of [summarystat_tidy()] (data.table or file).
-#' @param ref reference parquet / data.frame (ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index).
-#' @param ld_dir directory with block<N>.eigen.bin (SBayesRC or plink4r layout).
+#' @param ref panel SNP table (ID, chr, bp37 and/or bp38, ref, alt, AF_PanUKB, block, ld_index); NULL
+#'   (default) reads the .parquet in `ld_dir`.
+#' @param ld_dir directory with block<N>.eigen.bin (SBayesRC or plink4r layout) and the panel SNP .parquet.
 #' @param thresh eigenvalue variance kept (SBayesRC default 0.995); <= 0 keeps every stored pair.
-#' @param delta diagonal added to R (SBayesRC: 0.1).
+#' @param delta diagonal added to R (SBayesRC: 0.1); must be > 0.
 #' @param output optional output path (.parquet or text).
 #' @return data.table over all `ref` SNPs: ID, chr, bp37, bp38, A1, A2, freq, Z, BETA, SE, P, N, r2.
 #' @export
-sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, output = NULL) {
+sumstat_impute <- function(tidy, ref = NULL, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, output = NULL) {
   threads <- .threads(threads)
+  .check_delta(delta)
   x <- .read_table(tidy)
   if (!"r2" %in% names(x)) x[, r2 := 1]
   n_prev <- sum(is.finite(x$Z) & !(x$r2 >= 1))
   if (n_prev) message(n_prev, " rows with r2 < 1 (imputed before) are re-imputed, not used as typed")
   x <- x[is.finite(Z) & r2 >= 1]
-  r <- .read_table(ref)[, .(ID, chr, bp37, bp38, A1 = alt, A2 = ref, AF_PanUKB, block, ld_index)]
+  r <- .with_bp(.ld_panel(ref, ld_dir))[, .(ID, chr, bp37, bp38, A1 = alt, A2 = ref, AF_PanUKB, block, ld_index)]
   data.table::setorder(r, block, ld_index)
   N_med <- stats::median(x$N)
   r <- x[, .(ID, freq, Z, N)][r, on = "ID"]
