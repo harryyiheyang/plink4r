@@ -12,7 +12,7 @@
 #' @return data.table over all `ref` SNPs: ID, chr, bp37, bp38, A1, A2, freq, Z, BETA, SE, P, N, r2
 #'   (r2 = 1 typed, 0 imputed, -1 block without typed SNPs).
 #' @export
-summarystat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, output = NULL) {
+sumstat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, threads = 4L, output = NULL) {
   x <- .read_table(tidy)
   r <- .read_table(ref)[, .(ID, chr, bp37, bp38, A1 = alt, A2 = ref, AF_PanUKB, block, ld_index)]
   data.table::setorder(r, block, ld_index)
@@ -51,3 +51,8 @@ summarystat_impute <- function(tidy, ref, ld_dir, thresh = 0.995, delta = 0.1, t
   }
   out[]
 }
+
+#' @rdname sumstat_impute
+#' @details `summarystat_impute()` is the former name, kept as an alias.
+#' @export
+summarystat_impute <- function(...) sumstat_impute(...)
