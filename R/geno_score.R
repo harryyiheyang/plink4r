@@ -96,72 +96,56 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   ok <- which(is.na(skip))
   if (!length(ok)) stop("No weight variant matched the .pvar.", call. = FALSE)
 
-  st <- pgen_stats_cpp(pgen, length(iid), act, as.integer(idx[ok] - 1L), as.integer(si - 1L), threads)
-  if (isTRUE(st$dosage)) stop("geno_score scores hard calls; this PGEN holds dosages.", call. = FALSE)
-  n_obs <- st$n_obs; sum_obs <- st$sum; n_miss <- n - n_obs
-  allmiss <- n_obs == 0
-  skip[ok[allmiss]] <- "all calls missing"
-  # A1 frequency: given, else observed.
-  p_obs_alt <- sum_obs / (2 * pmax(n_obs, 1))
-  p1 <- ifelse(is.finite(pfreq[ok]), pfreq[ok], ifelse(flip[ok], 1 - p_obs_alt, p_obs_alt))
-  if (transform == "standardize") skip[ok[is.na(skip[ok]) & !(p1 > 0 & p1 < 1)]] <- "zero variance (standardize)"
-  keep <- is.na(skip[ok])
-  ok <- ok[keep]; n_obs <- n_obs[keep]; sum_obs <- sum_obs[keep]; n_miss <- n_miss[keep]; p1 <- p1[keep]
-  m <- length(ok)
-  if (!m) stop("No variant left to score.", call. = FALSE)
-  fl <- flip[ok]
   q <- ncol(W)
-
-  # ---- fill of a missing call, in ALT units, and which variants go through the LD panel
-  fill <- rep(if (impute == "none") "none" else "mean", m)
-  p_alt_anchor <- ifelse(fl, 1 - pfreq[ok], pfreq[ok])
-  f_alt <- sum_obs / pmax(n_obs, 1)
-  if (impute == "anchor") {
-    a <- is.finite(p_alt_anchor) & n_miss > 0
-    f_alt[a] <- pmin(2, pmax(0, (2 * n * p_alt_anchor[a] - sum_obs[a]) / n_miss[a]))
-    fill[is.finite(p_alt_anchor)] <- "anchor"
-  }
-  in_ld <- rep(FALSE, m)
+  # anchor of the LD path, in PGEN-ALT units: the given A1 frequency, else the panel's AF_PanUKB
+  p_alt_given <- ifelse(flip, 1 - pfreq, pfreq)
+  ld_cand <- rep(FALSE, length(ids)); k_all <- rep(NA_integer_, length(ids))
   if (!is.null(ld) && impute == "anchor") {
     al <- .ld_align(.ld_panel(ld$ref, ld$dir), pvar)  # panel rows in the PGEN, with vi and sign
     al[, `:=`(arow = .I, anchor = ifelse(sign > 0, AF_PanUKB, 1 - AF_PanUKB))]  # anchor: PGEN-ALT frequency
-    k <- match(idx[ok] - 1L, al$vi)
-    anc <- ifelse(is.finite(p_alt_anchor), p_alt_anchor, al$anchor[k])
-    in_ld <- !is.na(k) & is.finite(anc) & anc > 0 & anc < 1 & n_miss > 0
-    fill[in_ld] <- "ld"
+    k_all[ok] <- match(idx[ok] - 1L, al$vi)
+    anc <- ifelse(is.finite(p_alt_given), p_alt_given, al$anchor[k_all])
+    ld_cand[ok] <- !is.na(k_all[ok]) & is.finite(anc[ok]) & anc[ok] > 0 & anc[ok] < 1
   }
 
-  # ---- per-variant tables: value a (d - off) w for A1 dosage d = c0 + s x, x = ALT count of code 0/1/2
-  s <- ifelse(fl, -1, 1); c0 <- 2 * fl
-  a <- rep(1, m); off <- rep(0, m)
-  if (transform != "none") {
-    off <- 2 * p1
-    if (transform == "standardize") a <- 1 / sqrt(2 * p1 * (1 - p1))
-  }
-  Wa <- W[ok, , drop = FALSE] * a
-  tab <- array(0, c(q, 4L, m))
-  for (code in 0:2) tab[, code + 1L, ] <- t(Wa * (c0 + s * code - off))
-  d_fill <- c0 + s * f_alt
-  tab[, 4L, ] <- t(Wa * ifelse(fill == "none", 0, ifelse(in_ld, c0 - off, d_fill - off)))
-  ct <- matrix(2L, 4L, m)
-  ct[4L, fill == "none"] <- 0L
-  gemm <- if (q >= 2L) 2L else 0L  # one trait: lookup table; several: float32 product per chunk
-  # One progress bar: a step per chromosome of the stream (scheme 3 / plink / none), then per LD block.
+  # ---- one pass over the PGEN per chromosome, in file order: counts, tables and scores (C++)
   chr <- pvar$CHROM[idx[ok]]
   chrs <- unique(chr)
-  ld_blocks_todo <- if (any(in_ld)) sort(unique(al$block[k[in_ld]])) else integer(0)
-  pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(chrs) + length(ld_blocks_todo), style = 3) else NULL
+  pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(chrs), style = 3) else NULL
   step <- 0L
   tick <- function() { step <<- step + 1L; if (!is.null(pb)) utils::setTxtProgressBar(pb, step) }
   S <- matrix(0, n, q); allele_ct <- integer(n)
+  m0 <- length(ok)
+  n_obs <- numeric(m0); status <- integer(m0); fcode <- integer(m0); p1 <- numeric(m0); a <- numeric(m0)
   for (cc in chrs) {
     sel <- which(chr == cc)
-    res <- score_stream_cpp(pgen, length(iid), act, as.integer(idx[ok][sel] - 1L), as.integer(si - 1L),
-                            as.numeric(tab[, , sel, drop = FALSE]), as.integer(ct[, sel, drop = FALSE]), q, threads,
-                            as.integer(P$chunk), gemm)
+    sel <- sel[order(idx[ok][sel])]
+    j <- ok[sel]
+    res <- score_stream_cpp(pgen, length(iid), act, as.integer(idx[j] - 1L), as.integer(si - 1L),
+                            W[j, , drop = FALSE], as.integer(flip[j]), pfreq[j], ld_cand[j], impute == "none",
+                            match(transform, c("none", "center", "standardize")) - 1L, threads, as.integer(P$chunk))
     S <- S + res$score; allele_ct <- allele_ct + res$allele_ct
+    n_obs[sel] <- res$n_obs; status[sel] <- res$status; fcode[sel] <- res$fill; p1[sel] <- res$p1; a[sel] <- res$a
     tick()
   }
+  if (!is.null(pb)) close(pb)
+  skip[ok[status == 1L]] <- "all calls missing"
+  skip[ok[status == 2L]] <- "zero variance (standardize)"
+  keep <- status == 0L
+  ok <- ok[keep]; n_obs <- n_obs[keep]; fcode <- fcode[keep]; p1 <- p1[keep]; a <- a[keep]
+  m <- length(ok)
+  if (!m) stop("No variant left to score.", call. = FALSE)
+  n_miss <- n - n_obs
+  fl <- flip[ok]
+  fill <- c("none", "mean", "anchor", "ld")[fcode + 1L]
+  in_ld <- fcode == 3L
+  k <- k_all[ok]
+  p_alt_anchor <- p_alt_given[ok]
+  s <- ifelse(fl, -1, 1)
+  Wa <- W[ok, , drop = FALSE] * a
+  ld_blocks_todo <- if (any(in_ld)) sort(unique(al$block[k[in_ld]])) else integer(0)
+  pb <- if (isTRUE(P$progress) && length(ld_blocks_todo)) utils::txtProgressBar(0, length(ld_blocks_todo), style = 3) else NULL
+  step <- 0L
   t_stream <- proc.time()[["elapsed"]] - t0
 
   # ---- LD panel variants: S += (s a w) g over their filled cells, one block at a time
@@ -203,7 +187,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 
 #' Defaults of [geno_score()]
 #'
-#' chunk 512 variants read per streaming step; progress: one bar over chromosomes then LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
+#' chunk 512 variants read per streaming step; progress: a bar over chromosomes, then one over LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
 #' stored eigenpairs, delta 0.01 ridge of stage 1, anchor_min_miss 0.01 (stage 2 at or above this missing
 #' rate), nb_people NULL (people per batch from mem_gb), mem_gb 2.
 #' @export

@@ -11,6 +11,7 @@
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 #include "impute_kernel.h"
@@ -34,29 +35,34 @@ struct ByteTables {
 const ByteTables& byte_tables() { static const ByteTables T; return T; }
 }  // namespace
 
-// var_idx: 0-based PGEN variants; sample_idx: 0-based PSAM rows (row order of the output);
-// tab: 4 * q values per variant, layout [variant][code][trait]; ct_tab: 4 allele counts per variant;
-// gemm: 0 = per-variant lookup (one trait), 2 = float32 product per chunk (several traits), 1 = double product.
-// Each chunk's genovecs are first compacted to the selected samples (a straight copy when all samples are
-// taken in file order) and then decoded a byte (4 samples) at a time.
+// One pass per chunk of variants: read and compact the genovecs, count each variant's observed calls and ALT
+// sum over the selected samples, build its 4-entry tables here (A1 alignment, transform, fill of a missing
+// call), then score. So the PGEN is read once, not once for the counts and again for the scores.
+// var_idx: 0-based PGEN variants (file order is fastest); sample_idx: 0-based PSAM rows (output row order).
+// W: raw weights (variants x q); flip: A1 is REF; pfreq: given A1 frequency (NaN = observed);
+// ld_cand: the variant goes through the LD panel when it has missing calls (its missing cells then add only the
+// constant part here, the per-cell part comes from score_ld_block_cpp); impute_none: missing calls add nothing;
+// transform: 0 none, 1 center, 2 standardize. q = 1: per-variant byte lookup; q >= 2: float32 product.
+// Per variant out: n_obs, sum (ALT), status (0 scored, 1 all calls missing, 2 zero variance under
+// standardize), fill (0 none, 1 mean, 2 anchor, 3 ld), p1 (A1 frequency used), a (scale).
 // [[Rcpp::export]]
 Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
-                            Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab,
-                            Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm) {
+                            Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix W,
+                            Rcpp::IntegerVector flip, Rcpp::NumericVector pfreq, Rcpp::LogicalVector ld_cand,
+                            bool impute_none, int transform, int threads, int chunk) {
   const int T = plink4r::resolve_threads(threads);
-  const int p = var_idx.size(), ns = sample_idx.size();
-  if (tab.size() != static_cast<R_xlen_t>(4) * q * p || ct_tab.size() != static_cast<R_xlen_t>(4) * p)
-    Rcpp::stop("score tables do not match the variants");
+  const int p = var_idx.size(), ns = sample_idx.size(), q = W.ncol();
+  if (W.nrow() != p || flip.size() != p || pfreq.size() != p || ld_cand.size() != p)
+    Rcpp::stop("weights / flip / pfreq / ld_cand do not match the variants");
+  const bool gemm = q >= 2;
   const std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  if (!gemm && q != 1) Rcpp::stop("the lookup path scores one trait");
   bool ident = ns == n_raw;
   for (int s = 0; ident && s < ns; ++s) ident = si[s] == s;
-  const double* tb = tab.begin();
-  const int* ctb = ct_tab.begin();
   const ByteTables& BT = byte_tables();
   const plink4r::LaFns& LA = plink4r::la();
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
+  if (pf.dosage()) Rcpp::stop("geno_score scores hard calls; this PGEN holds dosages.");
   const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;  // bytes per compacted variant
   const int V = std::max(1, chunk);
   std::vector<unsigned char> buf(static_cast<std::size_t>(V) * sb);
@@ -66,9 +72,14 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   const int sblk = gemm ? 1024 : 4096;  // multiple of 4: a sample block starts on a byte
   const int nsb = (ns + sblk - 1) / sblk;
   std::vector<double> base_sum(q, 0.0);
-  if (gemm) for (int j = 0; j < p; ++j) for (int t = 0; t < q; ++t) base_sum[t] += tb[static_cast<std::size_t>(j) * 4 * q + t];
+  std::vector<double> nobs(p), sumv(p), p1v(p, NA_REAL), av(p, 1.0);
+  std::vector<int> status(p, 0), fillv(p, 0);
+  std::vector<double> tab(static_cast<std::size_t>(V) * 4 * q);  // chunk tables [variant][code][trait]
+  std::vector<int> ctab(static_cast<std::size_t>(V) * 4);
   std::vector<double> L1;  // lookup path: per chunk variant, 256 x 4 values (q = 1)
   if (!gemm) L1.resize(static_cast<std::size_t>(V) * 256 * 4);
+  // padding bits of the last byte are code 0 (observed, ALT 0) after compaction, so they add nothing below
+  int tail_pad = static_cast<int>(sb * 4 - ns);
   for (int c0 = 0; c0 < p; c0 += V) {
     const int nv = std::min(V, p - c0);
 #ifdef _OPENMP
@@ -78,24 +89,78 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
       const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[c0 + v]), plink4r::ik::tid());
       if (!gv) { bad[plink4r::ik::tid()] = c0 + v; continue; }
       unsigned char* dst = &buf[static_cast<std::size_t>(v) * sb];
-      if (ident) { std::memcpy(dst, gv, sb); continue; }
-      std::memset(dst, 0, sb);
-      for (int s = 0; s < ns; ++s) {
-        const int r = si[s];
-        dst[s >> 2] |= static_cast<unsigned char>(((gv[r >> 2] >> (2 * (r & 3))) & 3u) << (2 * (s & 3)));
+      if (ident) {
+        std::memcpy(dst, gv, sb);
+        if (tail_pad) dst[sb - 1] &= static_cast<unsigned char>(0xFFu >> (2 * tail_pad));  // file padding -> code 0
+      } else {
+        std::memset(dst, 0, sb);
+        for (int s = 0; s < ns; ++s) {
+          const int r = si[s];
+          dst[s >> 2] |= static_cast<unsigned char>(((gv[r >> 2] >> (2 * (r & 3))) & 3u) << (2 * (s & 3)));
+        }
       }
+      long long miss = 0, alt = 0;
+      for (std::size_t y = 0; y < sb; ++y) {
+        const unsigned byte = dst[y];
+        miss += __builtin_popcount(BT.miss[byte]);
+        alt += static_cast<long long>(BT.x[byte][0] + BT.x[byte][1] + BT.x[byte][2] + BT.x[byte][3]);
+      }
+      nobs[c0 + v] = static_cast<double>(ns - miss); sumv[c0 + v] = static_cast<double>(alt);
     }
     for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop("PGEN read failed at variant %d", bad[t] + 1);
-    if (gemm) {
-      Eigen::MatrixXd SlopeD(nv, q), MissD(nv, q);
-      std::vector<int> ct_obs(nv), ct_mis(nv);
-      for (int v = 0; v < nv; ++v) {
-        const double* tv = tb + static_cast<std::size_t>(c0 + v) * 4 * q;
-        for (int t = 0; t < q; ++t) { SlopeD(v, t) = tv[q + t] - tv[t]; MissD(v, t) = tv[3 * q + t] - tv[t]; }
-        ct_obs[v] = ctb[static_cast<std::size_t>(c0 + v) * 4];
-        ct_mis[v] = ctb[static_cast<std::size_t>(c0 + v) * 4 + 3];
+    // tables of this chunk: value a (d - off) w for A1 dosage d = c0 + s x, x = ALT count of code 0/1/2
+    std::fill(tab.begin(), tab.end(), 0.0);
+    std::fill(ctab.begin(), ctab.end(), 0);
+    for (int v = 0; v < nv; ++v) {
+      const int j = c0 + v;
+      const double no = nobs[j], so = sumv[j], nm = ns - no;
+      if (no == 0) { status[j] = 1; continue; }
+      const bool fl = flip[j] != 0;
+      const double pg = pfreq[j];
+      const bool given = std::isfinite(pg);
+      const double palt_obs = so / (2 * no);
+      const double p1 = given ? pg : (fl ? 1 - palt_obs : palt_obs);
+      p1v[j] = p1;
+      if (transform == 2 && !(p1 > 0 && p1 < 1)) { status[j] = 2; continue; }
+      const double off = transform ? 2 * p1 : 0, a = transform == 2 ? 1 / std::sqrt(2 * p1 * (1 - p1)) : 1.0;
+      av[j] = a;
+      const double sg = fl ? -1.0 : 1.0, cc = fl ? 2.0 : 0.0;
+      double f_alt = so / no;
+      int fill = impute_none ? 0 : 1;
+      if (!impute_none && given) {
+        fill = 2;
+        if (nm > 0) {
+          const double pa = fl ? 1 - pg : pg;
+          f_alt = std::min(2.0, std::max(0.0, (2.0 * ns * pa - so) / nm));
+        }
       }
-      const Eigen::MatrixXf SlopeF = SlopeD.cast<float>();
+      if (!impute_none && ld_cand[j] && nm > 0) fill = 3;
+      fillv[j] = fill;
+      const double dmiss = fill == 0 ? 0.0 : (fill == 3 ? cc - off : cc + sg * f_alt - off);
+      double* tv = &tab[static_cast<std::size_t>(v) * 4 * q];
+      for (int t = 0; t < q; ++t) {
+        const double wa = W(j, t) * a;
+        for (int code = 0; code < 3; ++code) tv[code * q + t] = wa * (cc + sg * code - off);
+        tv[3 * q + t] = fill == 0 ? 0.0 : wa * dmiss;
+      }
+      int* cv = &ctab[static_cast<std::size_t>(v) * 4];
+      cv[0] = cv[1] = cv[2] = 2; cv[3] = fill == 0 ? 0 : 2;
+    }
+    int ctsum = 0;
+    for (int v = 0; v < nv; ++v) ctsum += ctab[static_cast<std::size_t>(v) * 4];
+    if (gemm) {
+      Eigen::MatrixXf SlopeF(nv, q);
+      Eigen::MatrixXd MissD(nv, q);
+      std::vector<int> ct_mis(nv);
+      for (int v = 0; v < nv; ++v) {
+        const double* tv = &tab[static_cast<std::size_t>(v) * 4 * q];
+        for (int t = 0; t < q; ++t) {
+          SlopeF(v, t) = static_cast<float>(tv[q + t] - tv[t]);
+          MissD(v, t) = tv[3 * q + t] - tv[t];
+          base_sum[t] += tv[t];
+        }
+        ct_mis[v] = ctab[static_cast<std::size_t>(v) * 4 + 3] - ctab[static_cast<std::size_t>(v) * 4];
+      }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1) num_threads(T)
 #endif
@@ -118,31 +183,24 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
             }
           }
         }
-        Eigen::MatrixXd P;
-        if (gemm == 2) {
-          Eigen::MatrixXf PF(nr, q);
-          LA.sgemm_nn(XF.data(), nr, nv, nr4, SlopeF.data(), q, nv, PF.data(), nr);
-          P = PF.cast<double>();
-        }
-        else P = XF.topRows(nr).cast<double>() * SlopeD;
-        int ctsum = 0;
-        for (int v = 0; v < nv; ++v) ctsum += ct_obs[v];
+        Eigen::MatrixXf PF(nr, q);
+        LA.sgemm_nn(XF.data(), nr, nv, nr4, SlopeF.data(), q, nv, PF.data(), nr);
         for (int s = s0; s < s1; ++s) {
           double* Ss = &S[static_cast<std::size_t>(s) * q];
-          for (int t = 0; t < q; ++t) Ss[t] += P(s - s0, t);
+          for (int t = 0; t < q; ++t) Ss[t] += PF(s - s0, t);
           ct[s] += ctsum;
         }
         for (std::size_t e = 0; e < mi.size(); ++e) {
           double* Ss = &S[static_cast<std::size_t>(mi[e]) * q];
           for (int t = 0; t < q; ++t) Ss[t] += MissD(mv[e], t);
-          ct[mi[e]] += ct_mis[mv[e]] - ct_obs[mv[e]];
+          ct[mi[e]] += ct_mis[mv[e]];
         }
       }
       continue;
     }
     // lookup path (q = 1): per variant a 256 x 4 table byte -> the values of its 4 samples
     for (int v = 0; v < nv; ++v) {
-      const double* tv = tb + static_cast<std::size_t>(c0 + v) * 4;
+      const double* tv = &tab[static_cast<std::size_t>(v) * 4];
       double* Lv = &L1[static_cast<std::size_t>(v) * 1024];
       for (int byte = 0; byte < 256; ++byte)
         for (int k = 0; k < 4; ++k) Lv[4 * byte + k] = tv[(byte >> (2 * k)) & 3];
@@ -153,20 +211,23 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
     for (int b = 0; b < nsb; ++b) {
       const int s0 = b * sblk, s1 = std::min(ns, s0 + sblk);
       const int full = s0 + (s1 - s0) / 4 * 4;  // samples covered by whole bytes
+      for (int s = s0; s < s1; ++s) ct[s] += ctsum;  // every call counts; missing ones corrected below
       for (int v = 0; v < nv; ++v) {
         const unsigned char* g = &buf[static_cast<std::size_t>(v) * sb];
         const double* Lv = &L1[static_cast<std::size_t>(v) * 1024];
-        const int* cv = ctb + static_cast<std::size_t>(c0 + v) * 4;
+        const int* cv = &ctab[static_cast<std::size_t>(v) * 4];
+        const int dct = cv[3] - cv[0];
         double* Sp = S.data();
         for (int s = s0; s < full; s += 4) {
-          const double* e = Lv + 4 * g[s >> 2];
+          const unsigned byte = g[s >> 2];
+          const double* e = Lv + 4 * byte;
           Sp[s] += e[0]; Sp[s + 1] += e[1]; Sp[s + 2] += e[2]; Sp[s + 3] += e[3];
+          if (dct) for (unsigned mm = BT.miss[byte]; mm; mm &= mm - 1) ct[s + __builtin_ctz(mm)] += dct;
         }
-        for (int s = full; s < s1; ++s) Sp[s] += Lv[4 * g[s >> 2] + (s & 3)];
-        if (cv[3] == cv[0]) {
-          for (int s = s0; s < s1; ++s) ct[s] += cv[0];
-        } else {
-          for (int s = s0; s < s1; ++s) ct[s] += ((g[s >> 2] >> (2 * (s & 3))) & 3u) == 3u ? cv[3] : cv[0];
+        for (int s = full; s < s1; ++s) {
+          const unsigned c = (g[s >> 2] >> (2 * (s & 3))) & 3u;
+          Sp[s] += Lv[4 * g[s >> 2] + (s & 3)];
+          if (c == 3u) ct[s] += dct;
         }
       }
     }
@@ -174,7 +235,10 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   if (gemm) for (int s = 0; s < ns; ++s) for (int t = 0; t < q; ++t) S[static_cast<std::size_t>(s) * q + t] += base_sum[t];
   Rcpp::NumericMatrix out(ns, q);
   for (int s = 0; s < ns; ++s) for (int t = 0; t < q; ++t) out(s, t) = S[static_cast<std::size_t>(s) * q + t];
-  return Rcpp::List::create(Rcpp::_["score"] = out, Rcpp::_["allele_ct"] = Rcpp::wrap(ct));
+  return Rcpp::List::create(Rcpp::_["score"] = out, Rcpp::_["allele_ct"] = Rcpp::wrap(ct),
+                            Rcpp::_["n_obs"] = Rcpp::wrap(nobs), Rcpp::_["sum"] = Rcpp::wrap(sumv),
+                            Rcpp::_["status"] = Rcpp::wrap(status), Rcpp::_["fill"] = Rcpp::wrap(fillv),
+                            Rcpp::_["p1"] = Rcpp::wrap(p1v), Rcpp::_["a"] = Rcpp::wrap(av));
 }
 
 // One LD block over its working rows (panel rows in the PGEN; rows / var_idx / af / sign as in

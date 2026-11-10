@@ -65,8 +65,8 @@ resources_cpp <- function(threads, mem_gb) {
     .Call(`_plink4r_resources_cpp`, threads, mem_gb)
 }
 
-score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm) {
-    .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm)
+score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk) {
+    .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk)
 }
 
 score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows) {

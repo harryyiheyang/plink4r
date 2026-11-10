@@ -248,8 +248,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // score_stream_cpp
-Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericVector tab, Rcpp::IntegerVector ct_tab, int q, int threads, int chunk, int gemm);
-RcppExport SEXP _plink4r_score_stream_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP tabSEXP, SEXP ct_tabSEXP, SEXP qSEXP, SEXP threadsSEXP, SEXP chunkSEXP, SEXP gemmSEXP) {
+Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix W, Rcpp::IntegerVector flip, Rcpp::NumericVector pfreq, Rcpp::LogicalVector ld_cand, bool impute_none, int transform, int threads, int chunk);
+RcppExport SEXP _plink4r_score_stream_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP WSEXP, SEXP flipSEXP, SEXP pfreqSEXP, SEXP ld_candSEXP, SEXP impute_noneSEXP, SEXP transformSEXP, SEXP threadsSEXP, SEXP chunkSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -258,13 +258,15 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
-    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type tab(tabSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type ct_tab(ct_tabSEXP);
-    Rcpp::traits::input_parameter< int >::type q(qSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type W(WSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type flip(flipSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type pfreq(pfreqSEXP);
+    Rcpp::traits::input_parameter< Rcpp::LogicalVector >::type ld_cand(ld_candSEXP);
+    Rcpp::traits::input_parameter< bool >::type impute_none(impute_noneSEXP);
+    Rcpp::traits::input_parameter< int >::type transform(transformSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     Rcpp::traits::input_parameter< int >::type chunk(chunkSEXP);
-    Rcpp::traits::input_parameter< int >::type gemm(gemmSEXP);
-    rcpp_result_gen = Rcpp::wrap(score_stream_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, tab, ct_tab, q, threads, chunk, gemm));
+    rcpp_result_gen = Rcpp::wrap(score_stream_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -367,7 +369,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_dense_xtx_cpp", (DL_FUNC) &_plink4r_dense_xtx_cpp, 2},
     {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
-    {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
+    {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 13},
     {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 16},
     {"_plink4r_simd_isa_cpp", (DL_FUNC) &_plink4r_simd_isa_cpp, 0},
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 18},
