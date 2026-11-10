@@ -238,7 +238,7 @@ BEGIN_RCPP
 END_RCPP
 }
 // simd_isa_cpp
-std::string simd_isa_cpp();
+Rcpp::CharacterVector simd_isa_cpp();
 RcppExport SEXP _plink4r_simd_isa_cpp() {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;

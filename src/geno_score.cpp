@@ -55,6 +55,7 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
   const double* tb = tab.begin();
   const int* ctb = ct_tab.begin();
   const ByteTables& BT = byte_tables();
+  const plink4r::LaFns& LA = plink4r::la();
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
   const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;  // bytes per compacted variant
   const int V = std::max(1, chunk);
@@ -118,7 +119,11 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
           }
         }
         Eigen::MatrixXd P;
-        if (gemm == 2) P = (XF.topRows(nr) * SlopeF).cast<double>();
+        if (gemm == 2) {
+          Eigen::MatrixXf PF(nr, q);
+          LA.sgemm_nn(XF.data(), nr, nv, nr4, SlopeF.data(), q, nv, PF.data(), nr);
+          P = PF.cast<double>();
+        }
         else P = XF.topRows(nr).cast<double>() * SlopeD;
         int ctsum = 0;
         for (int v = 0; v < nv; ++v) ctsum += ct_obs[v];
@@ -210,6 +215,9 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
                             Rcpp::_["persons_solved"] = static_cast<double>(R.persons_solved));
 }
 
-// Instruction set the LD imputation kernel selected at run time (avx512, avx2 or scalar).
+// Instruction sets selected at run time: the LD plane-dot kernel and the dense linear algebra.
 // [[Rcpp::export]]
-std::string simd_isa_cpp() { return plink4r::ik::plane_dot_impl().isa; }
+Rcpp::CharacterVector simd_isa_cpp() {
+  return Rcpp::CharacterVector::create(Rcpp::_["plane_dot"] = plink4r::ik::plane_dot_impl().isa,
+                                       Rcpp::_["linalg"] = plink4r::la().isa);
+}

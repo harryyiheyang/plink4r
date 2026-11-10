@@ -44,6 +44,7 @@
 #endif
 #include "eigen_bin.h"
 #include "pgen_reader.h"
+#include "la_dispatch.h"
 
 namespace plink4r {
 namespace ik {
@@ -206,26 +207,15 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   L.t_eig += ik::secs(t0); t0 = std::chrono::steady_clock::now();
   const int mp = (m + 15) / 16 * 16;  // padded rows for the 16-wide plane dot
   L.mp = mp;
-  VectorXf w(k);
-  for (int j = 0; j < k; ++j) w[j] = ld.lambda[j] / (ld.lambda[j] + static_cast<float>(delta));
-  Eigen::setNbThreads(T);
   MatrixXf& C = L.C;
   C.resize(m, m);
-  if (!L.window) {
-    MatrixXf UW = ld.U * w.asDiagonal();
-    C.noalias() = UW * ld.U.transpose();
-  } else {
-    MatrixXf Uw(m, k);
-    for (int r = 0; r < m; ++r) {
-      if (rows[r] < 0 || rows[r] >= ld.m) { Eigen::setNbThreads(1); throw std::runtime_error("rows out of range"); }
-      Uw.row(r) = ld.U.row(rows[r]);
-    }
-    MatrixXf Rw = (Uw * ld.lambda.asDiagonal()) * Uw.transpose();
-    Rw.diagonal().array() += static_cast<float>(delta);
-    Eigen::LLT<MatrixXf> llt(Rw);
-    if (llt.info() != Eigen::Success) { Eigen::setNbThreads(1); throw std::runtime_error("Cholesky of R_WW + delta I failed"); }
-    C = -static_cast<float>(delta) * llt.solve(MatrixXf::Identity(m, m));
-    C.diagonal().array() += 1.0f;
+  for (int r = 0; r < static_cast<int>(rows.size()); ++r)
+    if (rows[r] < 0 || rows[r] >= ld.m) throw std::runtime_error("rows out of range");
+  {
+    char err[256] = {0};
+    if (la().build_C(ld.U.data(), ld.m, k, ld.lambda.data(), delta, rows.data(), static_cast<int>(rows.size()),
+                     C.data(), T, err) != 0)
+      throw std::runtime_error(err);
   }
   Eigen::setNbThreads(1);
   MatrixXf& Aw = L.Aw;

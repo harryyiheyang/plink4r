@@ -1,0 +1,158 @@
+// Dense linear-algebra kernels compiled once per instruction set and chosen at run time (la_dispatch.h).
+//
+// Eigen picks its SIMD width at preprocessing time from __AVX2__ / __FMA__ / __AVX512F__, which R's default
+// package flags never define, so Eigen products in ordinary translation units run on SSE2. This file is
+// compiled three times by src/Makevars (generic flags, -mavx2 -mfma, and AVX-512), each copy with
+// PLINK4R_LA_ISA set and with the Eigen namespace renamed to Eigen_<isa>, so that the three copies of every
+// Eigen template are distinct symbols and the linker never mixes them (no ODR clash between ISA copies).
+// Only Eigen and plain arrays are used here (no std containers, no Rcpp): nothing in this file is an inline
+// function shared with the rest of the package.
+#ifndef PLINK4R_LA_ISA
+#error "PLINK4R_LA_ISA must be defined (generic, avx2 or avx512)"
+#endif
+#define PLINK4R_CAT2(a, b) a##b
+#define PLINK4R_CAT(a, b) PLINK4R_CAT2(a, b)
+#define Eigen PLINK4R_CAT(Eigen_, PLINK4R_LA_ISA)
+#include <Eigen/Dense>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include "la_dispatch.h"
+
+namespace {
+
+using MatF = Eigen::MatrixXf;
+using VecF = Eigen::VectorXf;
+using MapM = Eigen::Map<MatF>;
+using MapCM = Eigen::Map<const MatF>;
+using MapCV = Eigen::Map<const VecF>;
+
+void set_err(char* err, const char* msg) { if (err) std::snprintf(err, 256, "%s", msg); }
+
+// C (m x m, or rows x rows for a window) of the LD imputation, as impute_kernel.h documents.
+int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, const int* rows, int nrows,
+            float* Cout, int threads, char* err) {
+  MapCM Uf(U, ld_m, k);
+  MapCV lam(lambda, k);
+  const bool window = nrows > 0;
+  const int m = window ? nrows : ld_m;
+  MapM C(Cout, m, m);
+  VecF w(k);
+  for (int j = 0; j < k; ++j) w[j] = lam[j] / (lam[j] + static_cast<float>(delta));
+  Eigen::setNbThreads(threads);
+  if (!window) {
+    MatF UW = Uf * w.asDiagonal();
+    C.noalias() = UW * Uf.transpose();
+  } else {
+    MatF Uw(m, k);
+    for (int r = 0; r < m; ++r) Uw.row(r) = Uf.row(rows[r]);
+    MatF Rw = (Uw * lam.asDiagonal()) * Uw.transpose();
+    Rw.diagonal().array() += static_cast<float>(delta);
+    Eigen::LLT<MatF> llt(Rw);
+    if (llt.info() != Eigen::Success) { Eigen::setNbThreads(1); set_err(err, "Cholesky of R_WW + delta I failed"); return 1; }
+    C = -static_cast<float>(delta) * llt.solve(MatF::Identity(m, m));
+    C.diagonal().array() += 1.0f;
+  }
+  Eigen::setNbThreads(1);
+  return 0;
+}
+
+// Out (M x N, leading dim ldo) = A (M x K, leading dim lda) * B (K x N, leading dim ldb); single thread.
+void sgemm_nn(const float* A, int M, int K, int lda, const float* B, int N, int ldb, float* Out, int ldo) {
+  Eigen::Map<const MatF, 0, Eigen::OuterStride<>> a(A, M, K, Eigen::OuterStride<>(lda));
+  Eigen::Map<const MatF, 0, Eigen::OuterStride<>> b(B, K, N, Eigen::OuterStride<>(ldb));
+  Eigen::Map<MatF, 0, Eigen::OuterStride<>> o(Out, M, N, Eigen::OuterStride<>(ldo));
+  o.noalias() = a * b;
+}
+
+// diag(L^-1 X)'s column squared norms: out[j] = |L^-1 X_j|^2 for a lower Cholesky factor L.
+template <class LLT, class M>
+void inv_norms(const LLT& llt, const M& X, float* out) {
+  MatF Y = X;
+  llt.matrixL().solveInPlace(Y);
+  for (int j = 0; j < Y.cols(); ++j) out[j] = Y.col(j).squaredNorm();
+}
+
+// Summary-statistics imputation of one block (z_M = R_MO (R_OO + delta I)^{-1} z_O, R = U diag(lam) U'),
+// solved in the smallest exact space, with the imputation quality
+//   r2_j = R_jM (R_OO + delta I)^{-1} R_Oj / R_jj   (fraction of R_jj explained; 0..1).
+// typed: increasing 0-based rows (nt); missing: the other rows (nm), increasing. Returns the method
+// (1 missing-SNP space, 2 eigen space, 3 typed space), 0 when nothing is missing, -1 on error.
+int sumstat_block(const float* U, int m, int k, const float* lambda, const int* typed, int nt, const float* z,
+                  const int* miss, int nm, float d, float* zout, float* r2out, char* err) {
+  if (nm == 0) return 0;
+  MapCM Uf(U, m, k);
+  MapCV lam(lambda, k);
+  VecF Rjj(nm);
+  for (int i = 0; i < nm; ++i) Rjj[i] = (Uf.row(miss[i]).array().square() * lam.transpose().array()).sum();
+  const int method = (nm <= nt && nm <= k) ? 1 : (k < nt ? 2 : 3);
+  if (method == 1) {
+    VecF zf = VecF::Zero(m);
+    for (int i = 0; i < nt; ++i) zf[typed[i]] = z[i];
+    const VecF dO = Uf.transpose() * zf;
+    MatF UM(nm, k);
+    for (int i = 0; i < nm; ++i) UM.row(i) = Uf.row(miss[i]);
+    const VecF w = lam.array() / (lam.array() + d);
+    const VecF rhs = UM * (w.array() * dO.array()).matrix();
+    const VecF sw = w.array().sqrt();
+    for (int j = 0; j < k; ++j) UM.col(j) *= sw[j];
+    MatF S = MatF::Identity(nm, nm);
+    S.noalias() -= UM * UM.transpose();
+    UM.resize(0, 0);
+    Eigen::LLT<Eigen::Ref<MatF>, Eigen::Lower> llt(S);
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (missing-SNP system)"); return -1; }
+    const VecF sol = llt.solve(rhs);
+    for (int i = 0; i < nm; ++i) zout[i] = sol[i];
+    // S = delta (R + delta I)^{-1}_MM, so R_MO (R_OO + delta I)^{-1} R_OM = R_MM + delta I - delta S^{-1}.
+    VecF sinv(nm);
+    inv_norms(llt, MatF::Identity(nm, nm), sinv.data());
+    for (int i = 0; i < nm; ++i) r2out[i] = Rjj[i] + d - d * sinv[i];
+  } else {
+    MatF UO(nt, k);
+    VecF zo(nt);
+    for (int i = 0; i < nt; ++i) { UO.row(i) = Uf.row(typed[i]); zo[i] = z[i]; }
+    MatF UMt(k, nm);  // U_M'
+    for (int i = 0; i < nm; ++i) UMt.col(i) = Uf.row(miss[i]).transpose();
+    VecF c;
+    if (method == 2) {
+      const VecF sl = lam.array().sqrt();
+      for (int j = 0; j < k; ++j) UO.col(j) *= sl[j];
+      MatF S = (UO.transpose() * UO) / d;
+      S.diagonal().array() += 1.0f;
+      Eigen::LLT<Eigen::Ref<MatF>, Eigen::Lower> llt(S);
+      if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (eigen-space system)"); return -1; }
+      const VecF a = llt.solve((UO.transpose() * zo) / d);
+      c = sl.array() * a.array();
+      // r_j = UO_s v_j with v_j = lam^{1/2} u_j:  quality = |v_j|^2 - |L^{-1} v_j|^2, |v_j|^2 = R_jj.
+      const MatF V = sl.asDiagonal() * UMt;
+      VecF q(nm);
+      inv_norms(llt, V, q.data());
+      for (int i = 0; i < nm; ++i) r2out[i] = Rjj[i] - q[i];
+    } else {
+      MatF R = UO * lam.asDiagonal() * UO.transpose();
+      R.diagonal().array() += d;
+      Eigen::LLT<Eigen::Ref<MatF>, Eigen::Lower> llt(R);
+      if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (typed system)"); return -1; }
+      const VecF s = llt.solve(zo);
+      c = lam.array() * (UO.transpose() * s).array();
+      const MatF ROM = UO * (lam.asDiagonal() * UMt);  // R_OM
+      VecF q(nm);
+      inv_norms(llt, ROM, q.data());
+      for (int i = 0; i < nm; ++i) r2out[i] = q[i];
+    }
+    for (int i = 0; i < nm; ++i) zout[i] = Uf.row(miss[i]).dot(c);
+  }
+  for (int i = 0; i < nm; ++i) {
+    float r = Rjj[i] > 0 ? r2out[i] / Rjj[i] : 0.0f;
+    r2out[i] = r < 0 ? 0.0f : (r > 1 ? 1.0f : r);
+  }
+  return method;
+}
+
+}  // namespace
+
+#define PLINK4R_LA_TABLE PLINK4R_CAT(plink4r_la_, PLINK4R_LA_ISA)
+#define PLINK4R_STR2(x) #x
+#define PLINK4R_STR(x) PLINK4R_STR2(x)
+extern const plink4r::LaFns PLINK4R_LA_TABLE;
+const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, PLINK4R_STR(PLINK4R_LA_ISA)};

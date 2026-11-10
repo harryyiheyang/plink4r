@@ -12,3 +12,4 @@ Encoding: UTF-8
 Imports: data.table, arrow, Rcpp, stats
 LinkingTo: Rcpp, RcppEigen
 NeedsCompilation: yes
+SystemRequirements: GNU make
