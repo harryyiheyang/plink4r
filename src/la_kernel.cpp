@@ -40,6 +40,14 @@ void by_columns(int m, int threads, F f) {
   for (int s = 0; s < ns; ++s) f(s * W, (s + 1) * W < m ? W : m - s * W);
 }
 
+// Copies the strict lower triangle of C (m x m) to the upper, by column slices; each slice writes its own rows.
+void mirror_lower(MapM& C, int m, int threads) {
+  by_columns(m, threads, [&](int c0, int nc) {
+    for (int c = c0; c < c0 + nc; ++c)
+      for (int r = c + 1; r < m; ++r) C(c, r) = C(r, c);
+  });
+}
+
 // C_S = I - delta (R_SS + delta I)^{-1} over the working rows S (rows[0..nrows-1]), R = U diag(lam) U'.
 // S = the whole block: U diag(lam / (lam + delta)) U' as before. Otherwise two exact routes, the cheaper one by
 // min(|S|, k):
@@ -66,7 +74,11 @@ int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, 
     VecF w(k);
     for (int j = 0; j < k; ++j) w[j] = lam[j] / (lam[j] + static_cast<float>(delta));
     const MatF UW = Uf * w.asDiagonal();
-    by_columns(m, T, [&](int c0, int nc) { C.middleCols(c0, nc).noalias() = UW * Uf.middleRows(c0, nc).transpose(); });
+    // lower triangle only (half the flops of the full product), then mirrored
+    by_columns(m, T, [&](int c0, int nc) {
+      C.block(c0, c0, m - c0, nc).noalias() = UW.bottomRows(m - c0) * Uf.middleRows(c0, nc).transpose();
+    });
+    mirror_lower(C, m, T);
     return 0;
   }
   MatF US(m, k);
@@ -90,8 +102,7 @@ int build_C(const float* U, int ld_m, int k, const float* lambda, double delta, 
     by_columns(m, T, [&](int c0, int nc) {
       C.block(c0, c0, m - c0, nc).noalias() = V.bottomRows(m - c0) * V.middleRows(c0, nc).transpose();
     });
-    for (int c = 0; c < m; ++c)
-      for (int r = c + 1; r < m; ++r) C(c, r) = C(r, c);
+    mirror_lower(C, m, T);
   } else {
     const MatF UL = US * lam.asDiagonal();
     MatF Rw(m, m);
