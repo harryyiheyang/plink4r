@@ -23,13 +23,13 @@
 #'   variants with sd 0 are `NA`), mean, sd, n_miss (missing calls per variant
 #'   before filling), n, a1 (counted allele), a2, dosage, time)
 #' @export
-cor_pgen <- function(pfile, snps = NULL, sample = NULL, af = NULL, impute = c("mean", "median"), threads = 4L) {
+cor_pgen <- function(pfile, snps = NULL, sample = NULL, af = NULL, threads = 4L, impute = c("mean", "median")) {
   .cor_file(list(pgenfile = pfile), snps, sample, af, match.arg(impute), threads)
 }
 
 #' @rdname cor_pgen
 #' @export
-cor_bed <- function(bfile, snps = NULL, sample = NULL, af = NULL, impute = c("mean", "median"), threads = 4L) {
+cor_bed <- function(bfile, snps = NULL, sample = NULL, af = NULL, threads = 4L, impute = c("mean", "median")) {
   .cor_file(list(bedfile = bfile), snps, sample, af, match.arg(impute), threads)
 }
 

@@ -40,12 +40,14 @@
 #'   chromosome may appear in one file only.
 #' @param snp_info Path or data.frame with CHR, BP37 and/or BP38, REF, ALT and
 #'   optionally A1_Freq.
-#' @param blocks Block file: always a header line (its names are not
-#'   checked), then exactly three whitespace-separated columns chr, start,
-#'   stop; any other layout is an error. "chr" prefixes are ignored.
+#' @param blocks Block file on the same build as the genotypes (set by the
+#'   user): a header line (names not checked), then exactly three
+#'   whitespace-separated columns chr, start, stop; any other layout is an
+#'   error. "chr" prefixes are ignored. `NULL` uses the bundled file for
+#'   `build` ([ld_blocks_default()]).
 #' @param out_dir Output folder (created if needed).
-#' @param build 38 or 37: which BP column of `snp_info` is used; the block file
-#'   and the genotypes must be on the same build.
+#' @param build 38 or 37: the build of the genotypes; picks the BP column of
+#'   `snp_info` and the default block file.
 #' @param sample IIDs to use (`NULL` = all samples of each file).
 #' @param thresh Eigenvalue truncation (proportion of the positive sum).
 #' @param min_snp Blocks with fewer matched variants are merged (see 2.).
@@ -55,13 +57,14 @@
 #' @param overwrite Recompute blocks whose output already exists.
 #' @return Invisibly, list(plan, log, snp_info, ldm_info) (only `plan` when `dry_run`).
 #' @export
-ld_panel_build <- function(geno, snp_info, blocks, out_dir, build = 38, sample = NULL,
+ld_panel_build <- function(geno, snp_info, out_dir, blocks = NULL, build = 38, sample = NULL,
                            thresh = 0.999, min_snp = 100L, threads = 4L,
                            dry_run = FALSE, overwrite = FALSE) {
   threads <- .threads(threads)
   build <- as.integer(build)
   if (!build %in% c(37L, 38L)) stop("build must be 37 or 38.", call. = FALSE)
   if (!(thresh > 0 && thresh <= 1)) stop("thresh must lie in (0, 1].", call. = FALSE)
+  if (is.null(blocks)) blocks <- ld_blocks_default(build)
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
   ref <- .ldb_snp_info(snp_info, build)
@@ -144,6 +147,22 @@ ld_panel_build <- function(geno, snp_info, blocks, out_dir, build = 38, sample =
                  snp_info = info, ldm_info = ldm))
 }
 
+#' Bundled LD block files
+#'
+#' GRCh38: pyrho EUR blocks (1,336 blocks, chr1-22). GRCh37: LDetect EUR
+#' blocks (Berisa and Pickrell 2016; 1,702 blocks, chr1-22). Both are a header
+#' line plus chr, start, stop.
+#' @param build 38 or 37.
+#' @return Path to the block file.
+#' @export
+ld_blocks_default <- function(build = 38) {
+  f <- switch(as.character(build),
+              "38" = "blocks_GRCh38_pyrho_EUR.txt",
+              "37" = "blocks_GRCh37_LDetect_EUR.txt",
+              stop("build must be 37 or 38.", call. = FALSE))
+  system.file("extdata", f, package = "plink4r", mustWork = TRUE)
+}
+
 .ldb_chr <- function(x) sub("^chr", "", as.character(x), ignore.case = TRUE)
 .ldb_auto <- as.character(1:22)
 
@@ -216,13 +235,7 @@ ld_panel_build <- function(geno, snp_info, blocks, out_dir, build = 38, sample =
     warning(sum(dup), " snp_info variants match more than one genotype row; the first is used.", call. = FALSE)
     m <- m[!dup]
   }
-  if (!nrow(m)) stop("No snp_info variant matches the genotype files (check build and chromosome names).", call. = FALSE)
-  shared <- intersect(unique(ref$CHR), unique(v$CHR))
-  rate <- nrow(m) / sum(ref$CHR %in% shared)
-  if (rate < 0.5) {
-    warning(sprintf("Only %.1f%% of snp_info variants on the genotyped chromosomes match; check that build = %s fits both files.",
-                    100 * rate, "the chosen build"), call. = FALSE)
-  }
+  if (!nrow(m)) stop("No snp_info variant matches the genotype files.", call. = FALSE)
   m
 }
 
@@ -242,11 +255,9 @@ ld_panel_build <- function(geno, snp_info, blocks, out_dir, build = 38, sample =
   bl <- data.table::data.table(src = seq_len(nrow(body)), CHR = .ldb_chr(body[, 1L]),
                                start = suppressWarnings(as.numeric(body[, 2L])),
                                end = suppressWarnings(as.numeric(body[, 3L])))
-  if (anyNA(bl$start) || anyNA(bl$end) || any(bl$end <= bl$start)) stop("Bad block coordinates in ", path, call. = FALSE)
+  if (anyNA(bl$start) || anyNA(bl$end)) stop("start and stop must be numbers: ", path, call. = FALSE)
   bl <- bl[CHR %in% .ldb_auto]
   data.table::setorder(bl, CHR, start)
-  ov <- bl[, any(utils::head(end, -1L) > utils::tail(start, -1L)), by = CHR][V1 == TRUE]
-  if (nrow(ov)) stop("Overlapping blocks on chromosome ", ov$CHR[1L], " in ", path, call. = FALSE)
   bl
 }
 
