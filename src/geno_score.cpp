@@ -207,7 +207,7 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
   const int ns = G.ns;
   const plink4r::PersonPlanes P = plink4r::build_planes(L, G, T);
   const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
-  const plink4r::Stage2Result A = plink4r::impute_stage2(R, vi, G.sum_obs, afv, ns, anchor_min_miss);
+  const plink4r::Stage2Result A = plink4r::impute_stage2(R, G.sum_obs, afv, ns, anchor_min_miss);
   Rcpp::NumericMatrix S(ns, q);
   double cells = 0;
   plink4r::for_each_cell(R, A, keep, [&](int i, int j, float, double g) {

@@ -43,13 +43,10 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
     al <- .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)
     jobs <- list(list(block = block, lo = NULL, hi = NULL, keep = NULL))
   } else {
-    pid <- pvar$ID[pvar$ID %in% snps]
-    p0 <- .ld_panel(ref, ld_dir)
-    al0 <- .ld_align(p0[p0$ID %in% snps | p0$ID %in% pid], pvar)  # requested SNPs, by panel or PGEN ID
-    rs <- al0[al0$ID %in% snps | pvar$ID[al0$vi + 1L] %in% snps]
+    al <- .ld_align(.ld_panel(ref, ld_dir), pvar)  # whole panel: `snps` may be panel or PGEN IDs
+    rs <- al[al$ID %in% snps | pvar$ID[al$vi + 1L] %in% snps]
     if (nrow(rs) < length(unique(snps))) warning(length(unique(snps)) - nrow(rs), " of `snps` not in both `ref` and the PGEN")
     if (!nrow(rs)) stop("none of `snps` is in both `ref` and ", pfile, ".pvar")
-    al <- .ld_align(p0[p0$block %in% unique(rs$block)], pvar)
     jobs <- lapply(sort(unique(rs$block)), function(b) {
       li <- rs$ld_index[rs$block == b]
       list(block = b, lo = min(li) - flank, hi = max(li) + flank, keep = rs$vi[rs$block == b])

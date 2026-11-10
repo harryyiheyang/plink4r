@@ -184,7 +184,7 @@ inline const PlaneDot& plane_dot_impl() { static const PlaneDot d = pick_plane_d
 // ---- LD of one block: C, the scaled columns a_lj and A_j, the anchor mean / sd per row.
 struct ImputeLD {
   int m = 0, k = 0, mp = 0, nw = 0;
-  bool window = false, restrict_nbr = false;
+  bool restrict_nbr = false;
   std::vector<int> vi;                  // 0-based PGEN variant per working row
   std::vector<float> mu, sd, isd, Aj;   // 2p, s sqrt(2p(1-p)) (signed), 1/sd, A_j
   Eigen::MatrixXf C, Aw;
@@ -206,7 +206,6 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   const int m = static_cast<int>(rows.size()), k = ld.k;
   if (m == 0) throw std::runtime_error("no working rows (no panel SNP of the block is in the PGEN)");
   if (!(delta > 0)) throw std::runtime_error("delta must be > 0");
-  L.window = m < ld.m;
   L.m = m; L.k = k;
   if (static_cast<int>(vi.size()) != m || static_cast<int>(af.size()) != m || static_cast<int>(sign.size()) != m)
     throw std::runtime_error("rows / var_idx / af / sign differ in length");
@@ -540,9 +539,9 @@ struct Stage2Result {
   double t_anchor = 0;
 };
 
-inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<int>& vi, const std::vector<double>& sum_obs,
+inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<double>& sum_obs,
                                   const std::vector<double>& af, int ns, double anchor_min_miss) {
-  const int m = static_cast<int>(vi.size());
+  const int m = static_cast<int>(sum_obs.size());
   const double nan = std::numeric_limits<double>::quiet_NaN();
   Stage2Result A;
   A.sum1.assign(m, 0.0); A.cnt1.assign(m, 0.0);

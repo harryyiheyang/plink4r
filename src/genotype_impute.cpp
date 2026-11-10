@@ -42,7 +42,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
   const plink4r::PersonPlanes P = plink4r::build_planes(L, B, T);
   const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
   const auto t2 = std::chrono::steady_clock::now();
-  const plink4r::Stage2Result A = plink4r::impute_stage2(R, vi, B.sum_obs, afv, ns, anchor_min_miss);
+  const plink4r::Stage2Result A = plink4r::impute_stage2(R, B.sum_obs, afv, ns, anchor_min_miss);
 
   std::size_t nout = 0;
   for (std::size_t t = 0; t < R.oj.size(); ++t) for (std::size_t r = 0; r < R.oj[t].size(); ++r) if (kr[R.oj[t][r]]) ++nout;

@@ -10,7 +10,8 @@
 .panel_cols <- c("ID", "chr", "bp37", "bp38", "ref", "alt", "AF_PanUKB", "block", "ld_index")
 
 # Panel SNP table, optionally only some blocks / IDs. ref: parquet path or data.frame; NULL (or a directory)
-# reads the one .parquet in ld_dir (where the released panel keeps it).
+# reads the one .parquet in ld_dir (where the released panel keeps it). With `blocks` only those blocks are
+# scanned; otherwise the whole table (panel columns only) is read.
 .ld_panel <- function(ref = NULL, ld_dir = NULL, blocks = NULL, ids = NULL) {
   if (is.character(ref) && length(ref) == 1L && dir.exists(ref)) { ld_dir <- ref; ref <- NULL }
   if (is.null(ref)) {
@@ -19,8 +20,18 @@
     if (length(f) != 1L) stop("expected one .parquet SNP table in ", ld_dir, ", found ", length(f), call. = FALSE)
     ref <- f
   }
-  r <- if (is.data.frame(ref)) data.table::as.data.table(ref) else
-    data.table::as.data.table(arrow::read_parquet(ref, col_select = intersect(.panel_cols, names(arrow::open_dataset(ref)))))
+  if (is.data.frame(ref)) {
+    r <- data.table::as.data.table(ref)
+  } else {
+    ds <- arrow::open_dataset(ref)
+    cols <- intersect(.panel_cols, names(ds))
+    r <- if (is.null(blocks)) data.table::as.data.table(arrow::read_parquet(ref, col_select = cols)) else {
+      # only the requested blocks (the released parquet is sorted by block, so whole row groups are skipped)
+      inb <- arrow::Expression$create("is_in", arrow::Expression$field_ref("block"),
+                                      options = list(value_set = arrow::Array$create(as.integer(blocks)), skip_nulls = TRUE))
+      data.table::as.data.table(as.data.frame(ds$NewScan()$Filter(inb)$Project(cols)$Finish()$ToTable()))
+    }
+  }
   need <- c("ID", "block", "ld_index", "AF_PanUKB")
   if (length(setdiff(need, names(r)))) stop("the panel table lacks ", paste(setdiff(need, names(r)), collapse = ", "), call. = FALSE)
   r <- r[, intersect(.panel_cols, names(r)), with = FALSE]
