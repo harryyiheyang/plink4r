@@ -43,7 +43,8 @@
 #' @return list(sum = n x q scores (plink2 `<name>_SUM`), avg = sum / allele_ct (`<name>_AVG`),
 #'   allele_ct (`ALLELE_CT`), sample, variants = data.table(ID, A1, flip (A1 is REF), fill ("mean",
 #'   "anchor", "ld", "none"), n_miss, p (A1 frequency used)), skipped = data.table(ID, A1, reason),
-#'   ld_blocks, time).
+#'   ld_blocks, simd (instruction set picked at run time for the LD kernel: avx512, avx2 or scalar;
+#'   environment variable PLINK4R_SIMD caps it), time).
 #' @export
 geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols = NULL, freq_col = "A1Freq",
                        impute = c("anchor", "none"), ld = NULL, transform = c("none", "center", "standardize"),
@@ -207,7 +208,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   list(sum = S, avg = S / allele_ct, allele_ct = allele_ct, sample = iid[si],
        variants = data.table::data.table(ID = ids[ok], A1 = wa1[ok], flip = fl, fill = fill, n_miss = n_miss, p = p1),
        skipped = data.table::data.table(ID = ids[!is.na(skip)], A1 = wa1[!is.na(skip)], reason = skip[!is.na(skip)]),
-       ld_blocks = ld_info,
+       ld_blocks = ld_info, simd = simd_isa_cpp(),
        time = c(stream = t_stream, total = proc.time()[["elapsed"]] - t0))
 }
 

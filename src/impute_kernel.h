@@ -34,7 +34,9 @@
 #include <string>
 #include <vector>
 #include <sys/resource.h>
-#if defined(__AVX512F__) || defined(__AVX2__)
+#include <cstdlib>
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#define PLINK4R_X86_DISPATCH 1
 #include <immintrin.h>
 #endif
 #ifdef _OPENMP
@@ -64,9 +66,28 @@ inline int tid() {
   return 0;
 #endif
 }
-// sum_l col[l] * (het_l + 2 hom_l) over the bit-planes of one person (m padded to a multiple of 16 with zeros)
-#if defined(__AVX512F__)
-inline float plane_dot(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
+// sum_l col[l] * (het_l + 2 hom_l) over the bit-planes of one person (m padded to a multiple of 16 with zeros).
+// Three versions (AVX-512, AVX2, portable); plane_dot_impl() picks the best one the CPU supports at run time,
+// so a default build (no -march flags) still uses AVX-512 / AVX2. PLINK4R_SIMD=avx512|avx2|scalar overrides.
+inline float plane_dot_scalar(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
+  float acc = 0;
+  for (int q = 0; q < nbyte; ++q) {
+    const uint8_t h = het[q], o = hom[q];
+    if ((h | o) == 0) continue;
+    for (int b = 0; b < 8; ++b) acc += col[8 * q + b] * static_cast<float>(((h >> b) & 1) + 2 * ((o >> b) & 1));
+  }
+  return acc;
+}
+inline float plane_dot_words_scalar(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
+  float acc = 0;
+  for (int t = 0; t < nwl; ++t) {
+    const int q = wl[t];
+    acc += plane_dot_scalar(col + 16 * q, het + 2 * q, hom + 2 * q, 2);
+  }
+  return acc;
+}
+#if defined(PLINK4R_X86_DISPATCH)
+__attribute__((target("avx512f"))) inline float plane_dot_avx512(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
   __m512 acc = _mm512_setzero_ps();
   const uint16_t* h16 = reinterpret_cast<const uint16_t*>(het);
   const uint16_t* o16 = reinterpret_cast<const uint16_t*>(hom);
@@ -79,8 +100,7 @@ inline float plane_dot(const float* col, const uint8_t* het, const uint8_t* hom,
   }
   return _mm512_reduce_add_ps(acc);
 }
-
-inline float plane_dot_words(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
+__attribute__((target("avx512f"))) inline float plane_dot_words_avx512(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
   __m512 acc = _mm512_setzero_ps();
   const uint16_t* h16 = reinterpret_cast<const uint16_t*>(het);
   const uint16_t* o16 = reinterpret_cast<const uint16_t*>(hom);
@@ -94,13 +114,12 @@ inline float plane_dot_words(const float* col, const uint8_t* het, const uint8_t
   }
   return _mm512_reduce_add_ps(acc);
 }
-#elif defined(__AVX2__)
 struct Lut8 {  // byte -> 8 lane masks
   alignas(32) uint32_t v[256][8];
   Lut8() { for (int x = 0; x < 256; ++x) for (int b = 0; b < 8; ++b) v[x][b] = ((x >> b) & 1) ? 0xFFFFFFFFu : 0u; }
 };
 inline const Lut8& lut8() { static const Lut8 L; return L; }
-inline float plane_dot(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
+__attribute__((target("avx2"))) inline float plane_dot_avx2(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
   const Lut8& L = lut8();
   __m256 acc = _mm256_setzero_ps();
   for (int q = 0; q < nbyte; ++q) {
@@ -114,27 +133,36 @@ inline float plane_dot(const float* col, const uint8_t* het, const uint8_t* hom,
   s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
   return _mm_cvtss_f32(s);
 }
-#else
-inline float plane_dot(const float* col, const uint8_t* het, const uint8_t* hom, int nbyte) {
-  float acc = 0;
-  for (int q = 0; q < nbyte; ++q) {
-    const uint8_t h = het[q], o = hom[q];
-    if ((h | o) == 0) continue;
-    for (int b = 0; b < 8; ++b) acc += col[8 * q + b] * static_cast<float>(((h >> b) & 1) + 2 * ((o >> b) & 1));
-  }
-  return acc;
-}
-#endif
-#if !defined(__AVX512F__)
-inline float plane_dot_words(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
+__attribute__((target("avx2"))) inline float plane_dot_words_avx2(const float* col, const uint8_t* het, const uint8_t* hom, const int* wl, int nwl) {
   float acc = 0;
   for (int t = 0; t < nwl; ++t) {
     const int q = wl[t];
-    acc += plane_dot(col + 16 * q, het + 2 * q, hom + 2 * q, 2);
+    acc += plane_dot_avx2(col + 16 * q, het + 2 * q, hom + 2 * q, 2);
   }
   return acc;
 }
 #endif
+
+using PlaneDotFn = float (*)(const float*, const uint8_t*, const uint8_t*, int);
+using PlaneDotWordsFn = float (*)(const float*, const uint8_t*, const uint8_t*, const int*, int);
+struct PlaneDot {
+  PlaneDotFn dot;
+  PlaneDotWordsFn words;
+  const char* isa;
+};
+inline PlaneDot pick_plane_dot() {
+  const char* env = std::getenv("PLINK4R_SIMD");
+  const std::string want = env ? env : "";
+#if defined(PLINK4R_X86_DISPATCH)
+  __builtin_cpu_init();
+  const bool a512 = __builtin_cpu_supports("avx512f"), a2 = __builtin_cpu_supports("avx2");
+  if (a512 && (want.empty() || want == "avx512")) return {plane_dot_avx512, plane_dot_words_avx512, "avx512"};
+  if (a2 && (want.empty() || want == "avx512" || want == "avx2")) return {plane_dot_avx2, plane_dot_words_avx2, "avx2"};
+#endif
+  return {plane_dot_scalar, plane_dot_words_scalar, "scalar"};
+}
+// The choice is made once per process; PLINK4R_SIMD is read the first time.
+inline const PlaneDot& plane_dot_impl() { static const PlaneDot d = pick_plane_dot(); return d; }
 }  // namespace ik
 
 // ---- LD of one block: C, the scaled columns a_lj and A_j, the anchor mean / sd per row.
@@ -360,6 +388,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   const std::vector<float>& sd = L.sd;
   const std::vector<int>& vi = L.vi;
   const std::vector<std::vector<int>>& MiA = P.Mi;
+  const ik::PlaneDot& PD = ik::plane_dot_impl();
   // person blocks: fixed size, or as large as the memory budget for S_i, rhs and the SNP lists allows
   std::vector<int> bstart{0};
   {
@@ -446,8 +475,8 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         const int q = static_cast<int>(M.size());
         const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
         const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
-        float r = L.Aj[j] + (L.restrict_nbr ? ik::plane_dot_words(aj, hi, oi_, L.words[j].data(), static_cast<int>(L.words[j].size()))
-                                            : ik::plane_dot(aj, hi, oi_, nbyte));
+        float r = L.Aj[j] + (L.restrict_nbr ? PD.words(aj, hi, oi_, L.words[j].data(), static_cast<int>(L.words[j].size()))
+                                            : PD.dot(aj, hi, oi_, nbyte));
         float* Sc = &S[static_cast<std::size_t>(soff[i]) + static_cast<std::size_t>(a) * q];  // column a of S_i
         for (int bq = 0; bq < q; ++bq) {
           const int l = M[bq];

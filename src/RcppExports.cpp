@@ -237,6 +237,16 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// simd_isa_cpp
+std::string simd_isa_cpp();
+RcppExport SEXP _plink4r_simd_isa_cpp() {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    rcpp_result_gen = Rcpp::wrap(simd_isa_cpp());
+    return rcpp_result_gen;
+END_RCPP
+}
 // genotype_impute_cpp
 Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, const std::string& eigen_file, Rcpp::NumericVector af, double thresh, double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people, double mem_gb, double nbr_frac, int nbr_max, Rcpp::IntegerVector rows);
 RcppExport SEXP _plink4r_genotype_impute_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP keep_rowSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP nbr_fracSEXP, SEXP nbr_maxSEXP, SEXP rowsSEXP) {
@@ -297,6 +307,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 4},
     {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 11},
     {"_plink4r_score_ld_block_cpp", (DL_FUNC) &_plink4r_score_ld_block_cpp, 15},
+    {"_plink4r_simd_isa_cpp", (DL_FUNC) &_plink4r_simd_isa_cpp, 0},
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 17},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
