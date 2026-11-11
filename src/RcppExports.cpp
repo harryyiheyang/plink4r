@@ -37,8 +37,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // geno_open_bed_cpp
-SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, bool mean, int threads, Rcpp::NumericVector fill_af);
-RcppExport SEXP _plink4r_geno_open_bed_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP m_totalSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP meanSEXP, SEXP threadsSEXP, SEXP fill_afSEXP) {
+SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr, Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af);
+RcppExport SEXP _plink4r_geno_open_bed_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP m_totalSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP meanSEXP, SEXP threadsSEXP, SEXP fill_cSEXP, SEXP cell_ptrSEXP, SEXP cell_iSEXP, SEXP cell_gSEXP, SEXP fill_afSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -49,14 +49,18 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type samples(samplesSEXP);
     Rcpp::traits::input_parameter< bool >::type mean(meanSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type fill_c(fill_cSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type cell_ptr(cell_ptrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type cell_i(cell_iSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type cell_g(cell_gSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type fill_af(fill_afSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_open_bed_cpp(path, n_total, m_total, variants, samples, mean, threads, fill_af));
+    rcpp_result_gen = Rcpp::wrap(geno_open_bed_cpp(path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af));
     return rcpp_result_gen;
 END_RCPP
 }
 // geno_open_pgen_cpp
-SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, bool mean, int threads, Rcpp::NumericVector fill_af);
-RcppExport SEXP _plink4r_geno_open_pgen_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP allele_ctSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP meanSEXP, SEXP threadsSEXP, SEXP fill_afSEXP) {
+SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr, Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af);
+RcppExport SEXP _plink4r_geno_open_pgen_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP allele_ctSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP meanSEXP, SEXP threadsSEXP, SEXP fill_cSEXP, SEXP cell_ptrSEXP, SEXP cell_iSEXP, SEXP cell_gSEXP, SEXP fill_afSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -67,8 +71,12 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type samples(samplesSEXP);
     Rcpp::traits::input_parameter< bool >::type mean(meanSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type fill_c(fill_cSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type cell_ptr(cell_ptrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type cell_i(cell_iSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type cell_g(cell_gSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type fill_af(fill_afSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_open_pgen_cpp(path, n_total, allele_ct, variants, samples, mean, threads, fill_af));
+    rcpp_result_gen = Rcpp::wrap(geno_open_pgen_cpp(path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -338,8 +346,8 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 15},
-    {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 8},
-    {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 8},
+    {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 12},
+    {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 12},
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},
     {"_plink4r_geno_xtx_cpp", (DL_FUNC) &_plink4r_geno_xtx_cpp, 2},
     {"_plink4r_geno_xtm_cpp", (DL_FUNC) &_plink4r_geno_xtm_cpp, 3},
