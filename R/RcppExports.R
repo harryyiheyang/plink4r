@@ -5,12 +5,12 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
-geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af) {
-    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af)
+geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads, fill_af) {
+    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads, fill_af)
 }
 
-geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af) {
-    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af)
+geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads, fill_af) {
+    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads, fill_af)
 }
 
 geno_info_cpp <- function(ptr) {

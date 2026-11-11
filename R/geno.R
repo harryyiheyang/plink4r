@@ -48,7 +48,6 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally supplied fills (used by [genotype_fill()]).
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
 #'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
 #'   `impute`. With a finite `af`, every missing call of that variant takes
@@ -67,7 +66,7 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL, af = NULL) {
+                      scale = TRUE, threads = 4L, af = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
   if (is.null(bedfile) == is.null(pgenfile)) {
@@ -96,7 +95,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   }
   vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
-  fs <- .geno_fill_spec(fill, length(vidx), iid[sidx])
   if (is.null(af)) {
     af <- numeric(0)
   } else {
@@ -106,10 +104,10 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   }
   ptr <- if (!is.null(bedfile)) {
     geno_open_bed_cpp(bed, length(iid), length(snp), vidx - 1L, sidx - 1L,
-                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
+                      impute == "mean", threads, af)
   } else {
     geno_open_pgen_cpp(files$pgen, length(iid), allele_ct,
-                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
+                       vidx - 1L, sidx - 1L, impute == "mean", threads, af)
   }
   info <- geno_info_cpp(ptr)
   structure(list(ptr = ptr, n = length(sidx), p = length(vidx),
@@ -175,29 +173,6 @@ geno_append <- function(X, M, threads = X$threads) {
   K <- geno_xtx_cpp(X$ptr, as.integer(threads))
   if (!is.null(X$cache)) X$cache$xtx <- K
   K
-}
-
-# fill = list(const = one value per selected variant (NA = built-in fill),
-#             cells = data.frame(j = column, IID, g)) -> CSR over the selected rows.
-.geno_fill_spec <- function(fill, p, iid) {
-  out <- list(c = numeric(0), ptr = integer(0), i = integer(0), g = numeric(0))
-  if (is.null(fill)) return(out)
-  if (!is.null(fill$const)) {
-    if (length(fill$const) != p) stop("fill$const needs one value per selected variant.", call. = FALSE)
-    out$c <- as.numeric(fill$const)
-  }
-  cl <- fill$cells
-  if (!is.null(cl) && nrow(cl)) {
-    i <- match(as.character(cl$IID), iid)
-    j <- as.integer(cl$j)
-    ok <- !is.na(i) & !is.na(j)
-    o <- order(j[ok], i[ok])
-    j <- j[ok][o]; i <- i[ok][o]; g <- as.numeric(cl$g)[ok][o]
-    out$ptr <- c(0L, cumsum(tabulate(j, nbins = p)))
-    out$i <- i - 1L
-    out$g <- g
-  }
-  out
 }
 
 .geno_index <- function(x, ids, alt_ids, arg) {
