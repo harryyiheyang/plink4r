@@ -163,6 +163,7 @@ geno_append <- function(X, M, threads = X$threads) {
   out <- .geno_new(ptr, cols, list(sample = X$sample, fid = if (is.null(X$fid)) rep(NA_character_, X$n) else X$fid),
                    impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
                    appended = c(X$appended, p0 + seq_len(k)))
+  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller (e.g. SuSiE4I's `fill`) stay
   A <- geno_dense_cpp(ptr, seq_len(X$n) - 1L, p0 + seq_len(k) - 1L, threads)  # stored values of the appended columns
   K01 <- geno_xtm_cpp(X$ptr, A, threads)
   K <- matrix(0, p, p)

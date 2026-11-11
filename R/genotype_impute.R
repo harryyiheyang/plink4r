@@ -39,7 +39,7 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   obj <- inherits(pfile, "geno")
   if (obj) {
     if (!is.null(sample)) stop("with a geno object, sample must be NULL (use geno_subset() first)", call. = FALSE)
-    if (pfile$dosage) stop("LD imputation needs hard calls; this geno object holds dosages.", call. = FALSE)
+    if (pfile$dosage) stop("LD imputation on an object needs hard calls; for a PGEN with dosages give the PGEN prefix.", call. = FALSE)
     X <- pfile
     pvar <- .geno_vartab(X)  # appended columns have allele_ct 0: never aligned to the panel
     iid <- X$sample

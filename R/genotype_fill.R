@@ -15,7 +15,8 @@
 #'
 #' The file route of earlier versions is kept: when `x` is a character PLINK2 prefix the call is
 #' `genotype_fill(pfile, snp, ld, sample, para)` and behaves as before (match `snp` to the .pvar, QC, per-SNP
-#' fill constants and LD cells, for `geno_open(fill = )`).
+#' fill constants and LD cells, for `geno_open(fill = )`). It stays the route for LD fills of a PGEN with
+#' dosages (the object route takes hard calls only).
 #'
 #' @param x A `geno` object; or (old route) a PLINK2 prefix.
 #' @param ... Old route only: `snp`, `ld`, `sample` by position or name (see `.genotype_fill_file`).
@@ -78,7 +79,8 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   if (!is.null(ld) && any(x$n_miss > 0)) {
     P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
     .check_delta(P$delta)
-    if (x$dosage) stop("LD fill needs hard calls; this object holds dosages.", call. = FALSE)
+    if (x$dosage) stop("LD fill on an object needs hard calls; for a PGEN with dosages use the file route ",
+                       "genotype_fill(pfile, snp, ld, sample) and geno_open(pgenfile =, fill = ).", call. = FALSE)
     pan <- .ld_panel(ld$ref, ld$dir)
     al <- .ld_align(pan, .geno_vartab(x))
     use <- sort(intersect(al$vi + 1L, which(x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
