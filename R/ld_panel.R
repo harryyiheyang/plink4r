@@ -47,7 +47,8 @@
 # Adds vi (0-based PGEN variant) and sign (+1 / -1) to the panel rows found in the PGEN; others are dropped.
 # 1. by ID, kept only when the alleles agree (the sign comes from them);
 # 2. the rest by chr + position + allele pair. The position column is the panel's only build column (bp37 or
-#    bp38: the PGEN must be on that build); with both, the build that places more SNPs.
+#    bp38: the PGEN must be on that build); with both, the build that places more SNPs among every 10th
+#    unmatched row decides, then all rows are matched on it.
 # A PGEN variant is used once; multiallelic variants are not aligned. No panel SNP in the PGEN is an error.
 .ld_align <- function(panel, pvar) {
   p <- data.table::copy(panel)
@@ -64,15 +65,20 @@
     used <- rep(FALSE, nrow(pvar)); used[p$vi[!is.na(p$vi)] + 1L] <- TRUE
     pv <- pvar[bi & !used, .(CHROM, POS, REF, ALT, row)]
     q <- p[rest, .(i = rest, CHROM = as.character(chr), ref, alt)]
-    best <- NULL
-    for (b in builds) {
-      qb <- data.table::copy(q)[, POS := as.integer(p[[b]][i])]
+    hits <- function(qq, b) {
+      qb <- data.table::copy(qq)[, POS := as.integer(p[[b]][i])]
       same <- pv[qb, on = .(CHROM, POS, REF = ref, ALT = alt), nomatch = NULL, .(i = i.i, row = x.row, s = 1L)]
       swap <- pv[qb, on = .(CHROM, POS, REF = alt, ALT = ref), nomatch = NULL, .(i = i.i, row = x.row, s = -1L)]
       h <- rbind(same, swap)
-      h <- h[!duplicated(i) & !duplicated(row)]
-      if (is.null(best) || nrow(h) > nrow(best)) best <- h
+      h[!duplicated(i) & !duplicated(row)]
     }
+    b <- builds[1L]
+    if (length(builds) == 2L) {  # both builds: decide on every 10th row (all rows when fewer than 10000)
+      qs <- if (nrow(q) < 10000L) q else q[seq(1L, nrow(q), by = 10L)]
+      n37 <- nrow(hits(qs, "bp37")); n38 <- nrow(hits(qs, "bp38"))
+      b <- if (n38 > n37) "bp38" else "bp37"
+    }
+    best <- hits(q, b)
     if (nrow(best)) p[best$i, `:=`(vi = best$row - 1L, sign = best$s)]
   }
   p <- p[!is.na(vi)]
