@@ -48,7 +48,11 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally supplied fills (used by [genotype_fill()]).
+#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result (its per-SNP
+#'   `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by ID), or
+#'   `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column, IID, g))`.
+#'   A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) / bim A1 (BED)
+#'   dosages.
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
 #'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
 #'   `impute`. With a finite `af`, every missing call of that variant takes
@@ -96,7 +100,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   }
   vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
-  fs <- .geno_fill_spec(fill, length(vidx), iid[sidx])
+  fs <- .geno_fill_spec(fill, snp[vidx], iid[sidx])
   if (is.null(af)) {
     af <- numeric(0)
   } else {
@@ -178,10 +182,16 @@ geno_append <- function(X, M, threads = X$threads) {
 }
 
 # fill = list(const = one value per selected variant (NA = built-in fill),
-#             cells = data.frame(j = column, IID, g)) -> CSR over the selected rows.
-.geno_fill_spec <- function(fill, p, iid) {
+#             cells = data.frame(j = column, IID, g)), or a genotype_fill() result -> CSR over the selected rows.
+.geno_fill_spec <- function(fill, ids, iid) {
+  p <- length(ids)
   out <- list(c = numeric(0), ptr = integer(0), i = integer(0), g = numeric(0))
   if (is.null(fill)) return(out)
+  if (!is.null(fill$snp)) {  # a genotype_fill() result: by variant ID
+    cl <- fill$cells
+    fill <- list(const = fill$snp$fill_const[match(ids, fill$snp$ID)],
+                 cells = if (!is.null(cl) && nrow(cl)) data.frame(j = match(cl$ID, ids), IID = cl$IID, g = cl$g))
+  }
   if (!is.null(fill$const)) {
     if (length(fill$const) != p) stop("fill$const needs one value per selected variant.", call. = FALSE)
     out$c <- as.numeric(fill$const)
