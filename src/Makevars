@@ -13,7 +13,7 @@ LA_OBJECTS = la_generic.o
 LA_DEFS =
 endif
 
-OBJECTS = RcppExports.o cor_geno.o geno.o geno_score.o genotype_impute.o sumstat_impute.o $(LA_OBJECTS) $(PGENLIB_OBJECTS)
+OBJECTS = RcppExports.o assoc_stream.o cor_geno.o geno.o geno_score.o genotype_impute.o sumstat_impute.o $(LA_OBJECTS) $(PGENLIB_OBJECTS)
 # EIGEN_DONT_PARALLELIZE: Eigen never starts threads of its own; all parallelism is the outer OpenMP over the
 # `threads` argument of each function (no setNbThreads, no global thread setting).
 PKG_CPPFLAGS = -DNO_UNALIGNED -DPGENLIB_NOPRINT -DEIGEN_DONT_PARALLELIZE -Ipgenlib $(LA_DEFS)

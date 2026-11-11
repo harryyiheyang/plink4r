@@ -132,6 +132,16 @@ void sgemm_nn(const float* A, int M, int K, int lda, const float* B, int N, int 
   o.noalias() = a * b;
 }
 
+void dgemm_tn(const double* A, int K, int M, int lda, const double* B, int N, int ldb, double* Out, int ldo,
+              int beta) {
+  using MatD = Eigen::MatrixXd;
+  Eigen::Map<const MatD, 0, Eigen::OuterStride<>> a(A, K, M, Eigen::OuterStride<>(lda));
+  Eigen::Map<const MatD, 0, Eigen::OuterStride<>> b(B, K, N, Eigen::OuterStride<>(ldb));
+  Eigen::Map<MatD, 0, Eigen::OuterStride<>> o(Out, M, N, Eigen::OuterStride<>(ldo));
+  if (beta) o.noalias() += a.transpose() * b;
+  else o.noalias() = a.transpose() * b;
+}
+
 // diag(L^-1 X)'s column squared norms: out[j] = |L^-1 X_j|^2 for a lower Cholesky factor L.
 template <class LLT, class M>
 void inv_norms(const LLT& llt, const M& X, float* out) {
@@ -263,4 +273,4 @@ float plane_dot(const float* col, const unsigned char* het, const unsigned char*
 #define PLINK4R_STR2(x) #x
 #define PLINK4R_STR(x) PLINK4R_STR2(x)
 extern const plink4r::LaFns PLINK4R_LA_TABLE;
-const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, PLINK4R_STR(PLINK4R_LA_ISA)};
+const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, dgemm_tn, PLINK4R_STR(PLINK4R_LA_ISA)};

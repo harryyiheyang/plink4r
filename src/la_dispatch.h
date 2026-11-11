@@ -17,6 +17,10 @@ struct LaFns {
                        const int* miss, int nm, float delta, float* zout, float* r2out, char* err);
   // sum_l col[l] * (het_l + 2 hom_l) over one person's bit-planes (nbyte even: rows padded to 16 with zeros)
   float (*plane_dot)(const float* col, const unsigned char* het, const unsigned char* hom, int nbyte);
+  // Out (M x N, ldo) = A' B (beta = 0) or Out += A' B (beta = 1); A is K x M (lda), B is K x N (ldb), column-major
+  // doubles, one serial call (the association stream runs one per thread).
+  void (*dgemm_tn)(const double* A, int K, int M, int lda, const double* B, int N, int ldb, double* Out, int ldo,
+                   int beta);
   const char* isa;
 };
 
