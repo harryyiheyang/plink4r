@@ -12,12 +12,14 @@
 #'    - `ld` (scheme 4): per-cell conditional mean from the eigen.bin panel ([genotype_impute()]: stage 1
 #'      z_M = R_MO (R_OO + delta I)^-1 z_O on the SNPs +- `flank` panel rows, stage 2 anchor shift when the
 #'      missing rate >= `anchor_min_miss`), anchored to `A1Freq` when given, else to the panel AF.
-#'      SNPs absent from the panel (or with REF/ALT swapped relative to it) keep the per-SNP constant.
+#'      The panel is aligned to the PGEN by ID and alleles, else by chromosome, position and allele pair, in
+#'      either orientation (a swapped REF/ALT enters with a negative sign); SNPs absent from the panel keep the
+#'      per-SNP constant.
 #'
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam); hard calls, dosages, or both, with missing cells.
 #' @param snp data.frame with CHR, BP37 or BP38 (the build of the .pvar POS), A1, A2; optional A1Freq.
-#' @param ld NULL, or list(dir = folder of block<N>.eigen.bin, ref = panel SNP parquet path or data.frame with
-#'   chr, bp37 and/or bp38, ref, alt, AF_PanUKB, block, ld_index).
+#' @param ld NULL, or list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
+#'   parquet path or data.frame in place of that table; see [genotype_impute()]).
 #' @param sample IIDs (NULL = all .psam rows), in the row order wanted.
 #' @param para named list overriding the defaults of [genotype_fill_para()].
 #' @return list(snp = one row per kept SNP: ID (pvar), idx (1-based pvar row), CHR, POS, REF, ALT, A1, A2,
@@ -30,6 +32,8 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   bad <- setdiff(names(para), names(P))
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "))
   P[names(para)] <- para
+  P$threads <- .threads(P$threads); P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
+  if (!is.null(ld)) .check_delta(P$delta)
   snp <- data.table::copy(data.table::as.data.table(snp))
   bpcol <- if (!is.null(P$build)) paste0("BP", P$build) else intersect(c("BP37", "BP38"), names(snp))
   if (length(bpcol) != 1L) stop("`snp` needs exactly one of BP37 / BP38, or set para$build")
@@ -37,27 +41,21 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   if (length(miss_col)) stop("`snp` lacks ", paste(miss_col, collapse = ", "))
   chr_std <- function(x) sub("^chr", "", as.character(x), ignore.case = TRUE)
 
-  pf <- paste0(pfile, ".pvar")
-  pvar <- if (file.exists(pf)) data.table::fread(pf, skip = "#CHROM", select = 1:5, colClasses = "character") else
-    data.table::fread(cmd = paste("zstdcat", shQuote(paste0(pf, ".zst")), "| grep -v '^##'"), select = 1:5, colClasses = "character")
-  data.table::setnames(pvar, c("CHROM", "POS", "ID", "REF", "ALT"))
-  pvar[, `:=`(row = .I, CHROM = chr_std(CHROM), POS = as.integer(POS))]
-  act <- as.integer(2L + lengths(regmatches(pvar$ALT, gregexpr(",", pvar$ALT))))
+  pvar <- .read_pvar5(pfile)
+  act <- pvar$allele_ct
 
   q <- data.table::data.table(k = seq_len(nrow(snp)), CHROM = chr_std(snp$CHR), POS = as.integer(snp[[bpcol]]),
                               A1 = toupper(snp$A1), A2 = toupper(snp$A2),
                               A1Freq = if ("A1Freq" %in% names(snp)) as.numeric(snp$A1Freq) else NA_real_)
-  m <- merge(q, pvar, by = c("CHROM", "POS"), allow.cartesian = TRUE)
+  m <- merge(q, pvar[, .(CHROM, POS, ID, REF, ALT, row)], by = c("CHROM", "POS"), allow.cartesian = TRUE)
   m <- m[(A1 == ALT & A2 == REF) | (A1 == REF & A2 == ALT)]
   m[, a1_is_alt := A1 == ALT]
   m <- m[!duplicated(k)]
   dropped <- data.table::data.table(k = setdiff(q$k, m$k), reason = "not in pvar (CHR/BP/alleles)")
   data.table::setorder(m, k)
 
-  psam <- data.table::fread(paste0(pfile, ".psam"), colClasses = "character")
-  iid <- psam[[intersect(c("IID", "#IID"), names(psam))[1]]]
-  si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam")
+  iid <- .psam_ids(pfile)
+  si <- .sample_rows(sample, iid)
   n <- length(si)
   pg <- normalizePath(paste0(pfile, ".pgen"))
   st <- pgen_stats_cpp(pg, length(iid), act, as.integer(m$row - 1L), as.integer(si - 1L), as.integer(P$threads))
@@ -78,20 +76,14 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   cells <- data.table::data.table(ID = character(0), IID = character(0), g = numeric(0))
   m[, in_ld := FALSE]
   if (!is.null(ld)) {
-    ref <- if (is.data.frame(ld$ref)) data.table::as.data.table(ld$ref) else data.table::as.data.table(arrow::read_parquet(ld$ref))
-    rbp <- if (bpcol == "BP37") "bp37" else "bp38"
-    ref[, `:=`(CHROM = chr_std(chr), POS = as.integer(get(rbp)))]
-    ref[pvar, on = .(CHROM, POS, ref = REF, alt = ALT), pid := i.ID]
-    hit <- ref[!is.na(pid) & pid %in% m$ID]
-    m[, in_ld := ID %in% hit$pid]
-    if (nrow(hit)) {
-      rb <- ref[block %in% unique(hit$block)]
-      rb[, ID := pid]
-      ua <- m[in_ld == TRUE & is.finite(p_alt), .(ID, p_alt)]
-      rb[ua, on = "ID", AF_PanUKB := i.p_alt]
-      gi <- genotype_impute(pfile, rb[, .(ID, block, ld_index, AF_PanUKB)], ld$dir, snps = m$ID[m$in_ld],
-                            flank = P$flank, sample = iid[si], delta = P$delta, anchor_min_miss = P$anchor_min_miss,
-                            thresh = P$thresh, threads = P$threads, mem_gb = P$mem_gb)
+    pan <- .ld_panel(ld$ref, ld$dir)
+    al <- .ld_align(pan, pvar)
+    m[, in_ld := (row - 1L) %in% al$vi]
+    if (any(m$in_ld)) {
+      ua <- m[in_ld == TRUE & is.finite(p_alt)]
+      gi <- genotype_impute(pfile, pan, ld$dir, snps = m$ID[m$in_ld], flank = P$flank, sample = iid[si],
+                            delta = P$delta, anchor_min_miss = P$anchor_min_miss, thresh = P$thresh,
+                            threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID))
       cells <- gi$fill[, .(ID = snp, IID, g)]
       method <- paste0("scheme4+", method)
     }

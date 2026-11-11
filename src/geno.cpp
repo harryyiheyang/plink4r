@@ -18,10 +18,21 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <utility>
 #include "geno_kernel.h"
-#include "pgen_file.h"
+#include "pgen_reader.h"
+#include "resources.h"
+#include "la_dispatch.h"
 
 namespace {
+
+using plink4r::PgenFile;
+// PGEN genovec codes as ALT dosage for the geno object: 0 hom REF, 1 het, 2 two non-REF alleles, 3 missing.
+// This matches the BED table of geno (A1 dosage, as BEDMatrix), since plink2 imports BED with A1 as ALT.
+const NibbleTable& pgen_table() {
+  static const NibbleTable t({0, 1, 2, -1});
+  return t;
+}
 
 constexpr std::size_t kGroup = 64;          // variants per read group
 constexpr std::size_t kDBlock = 8;          // mask words per prefix count (512 rows)
@@ -47,6 +58,7 @@ struct Geno {
   std::vector<DCol> D;
   std::vector<double> dsum, dsq, dhd;  // column sums of D, D^2 and H D
   std::vector<double> mu, sd;   // column mean and sd (n - 1) of X = H + D
+  std::vector<double> nmiss;    // missing calls per variant before filling
   std::size_t dnnz() const {
     std::size_t s = 0;
     for (const DCol& c : D) s += c.q.size();
@@ -112,25 +124,10 @@ inline double d_at(const DCol& c, std::size_t i) {
   return c.q[e] * c.unit;
 }
 
-inline int omp_thread() {
-#ifdef _OPENMP
-  return omp_get_thread_num();
-#else
-  return 0;
-#endif
-}
-
-inline int omp_threads() {
-#ifdef _OPENMP
-  return omp_get_num_threads();
-#else
-  return 1;
-#endif
-}
 
 inline int resolve_threads(int threads) {
 #ifdef _OPENMP
-  return threads <= 0 ? omp_get_max_threads() : threads;
+  return plink4r::resolve_threads(threads);
 #else
   return 1;
 #endif
@@ -185,13 +182,21 @@ void plane_stats(Geno& g, std::size_t j) {
 // (NaN = the built-in median / mean) and per-cell values in CSR form, cells of
 // variant j at ptr[j]..ptr[j+1] with selected-row index ci (ascending) and value cg.
 // A missing cell takes its per-cell value when given, else the constant.
+// af[j] (finite) anchors the fill instead (scheme 3): the missing calls of
+// variant j all take c = (2 n af - sum of observed) / (number missing),
+// clipped to [0, 2], so the filled column has mean 2 af.
 struct FillSpec {
-  std::vector<double> c;
+  std::vector<double> c, af;
   std::vector<int> ptr, ci;
   std::vector<double> cg;
   bool has_c(std::size_t j) const { return !c.empty() && std::isfinite(c[j]); }
   bool has_cells() const { return !ptr.empty(); }
+  bool has_af(std::size_t j) const { return !af.empty() && std::isfinite(af[j]); }
 };
+
+inline double anchor_fill(double af, double n, double obs_sum, double miss) {
+  return std::min(2.0, std::max(0.0, (2.0 * n * af - obs_sum) / miss));
+}
 
 // Fill of missing row i of variant j, cursor k walking the variant's cells (rows ascending).
 inline double cell_fill(const FillSpec* fs, std::size_t j, std::size_t i, int& k, double f) {
@@ -212,8 +217,9 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
   std::int64_t cm = 0;
   for (std::size_t w = 0; w < W; ++w) cm += popcount64(miss[w]);
   const std::int64_t obs = static_cast<std::int64_t>(n) - cm;
+  g.nmiss[j] = static_cast<double>(cm);
   DBuilder db(g, j);
-  if (cm && (obs || (fs && (fs->has_c(j) || fs->has_cells())))) {
+  if (cm && (obs || (fs && (fs->has_c(j) || fs->has_cells() || fs->has_af(j))))) {
     std::int64_t c1 = 0, c2 = 0;
     for (std::size_t w = 0; w < W; ++w) {
       c1 += popcount64(lo[w]);
@@ -223,6 +229,8 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
     double f = !obs ? 0.0 : g.mean ? static_cast<double>(c1 + 2 * c2) / static_cast<double>(obs)
       : (2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0));
     if (fs && fs->has_c(j)) f = fs->c[j];
+    else if (fs && fs->has_af(j))
+      f = anchor_fill(fs->af[j], static_cast<double>(n), static_cast<double>(c1 + 2 * c2), static_cast<double>(cm));
     int k = fs && fs->has_cells() ? fs->ptr[j] : 0;
     fill_missing(g, j, miss, [fs, j, f, &k](std::size_t i) { return cell_fill(fs, j, i, k, f); }, db);
   }
@@ -241,6 +249,7 @@ void init_geno(Geno& g, std::size_t n, std::size_t p, bool mean) {
   g.dsum.assign(p, 0.0);
   g.dsq.assign(p, 0.0);
   g.dhd.assign(p, 0.0);
+  g.nmiss.assign(p, 0.0);
 }
 
 void finish_stats(Geno& g) {
@@ -270,15 +279,15 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
                  const FillSpec* fs = nullptr) {
   const std::size_t n = g.n, p = g.p, sel_stride = (n + 3) / 4, W = g.G.words;
   g.dosage = true;
-  const NibbleTable& table = PgenFile::table();
-  const std::uint16_t kMiss = PgenFile::kDosageMissing;
+  const NibbleTable& table = pgen_table();
+  const std::uint16_t kMiss = PgenFile::kMissing;
   std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
     int failed = 0, range = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       const std::size_t j = g0 + static_cast<std::size_t>(k);
       const std::uint16_t* x = file.read_dosage(static_cast<std::size_t>(variants[j]), t);
       if (!x) {
@@ -300,10 +309,13 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
         range = 1;
         continue;
       }
+      g.nmiss[j] = static_cast<double>(miss);
       unsigned int hfill = 0;
       int qfill = 0;
       double fmean = miss < n ? static_cast<double>(obs_sum) / 16384.0 / static_cast<double>(n - miss) : 0.0;
       if (fs && fs->has_c(j)) fmean = fs->c[j];
+      else if (miss && fs && fs->has_af(j))
+        fmean = anchor_fill(fs->af[j], static_cast<double>(n), static_cast<double>(obs_sum) / 16384.0, static_cast<double>(miss));
       if (miss) quantize_fill(fmean, hfill, qfill);
       const bool percell = miss && fs && fs->has_cells() && fs->ptr[j + 1] > fs->ptr[j];
       int kc = percell ? fs->ptr[j] : 0;
@@ -398,8 +410,13 @@ void add_d_xtx(const Geno& g, double* out, int threads) {
 }
 
 FillSpec make_fill(const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector& cell_ptr,
-                   const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, std::size_t p) {
+                   const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g,
+                   const Rcpp::NumericVector& fill_af, std::size_t p) {
   FillSpec fs;
+  if (fill_af.size()) {
+    if (static_cast<std::size_t>(fill_af.size()) != p) Rcpp::stop("af must have one value per variant.");
+    fs.af.assign(fill_af.begin(), fill_af.end());
+  }
   if (fill_c.size()) {
     if (static_cast<std::size_t>(fill_c.size()) != p) Rcpp::stop("fill constants must have one value per variant.");
     fs.c.assign(fill_c.begin(), fill_c.end());
@@ -419,20 +436,11 @@ FillSpec make_fill(const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector&
 SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
                        const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
                        bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr,
-                       Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
+                       Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af) {
   threads = resolve_threads(threads);
-  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
-  const std::size_t stride = (static_cast<std::size_t>(n_total) + 3) / 4;
-  std::ifstream input(path, std::ios::binary | std::ios::ate);
-  if (!input) Rcpp::stop("Cannot open BED file: " + path);
-  const std::streamoff actual = input.tellg();
-  if (actual < 0 || static_cast<std::uint64_t>(actual) != 3 + static_cast<std::uint64_t>(m_total) * stride)
-    Rcpp::stop("BED size does not match its BIM and FAM files: " + path);
-  input.seekg(0);
-  unsigned char header[3];
-  input.read(reinterpret_cast<char*>(header), 3);
-  if (header[0] != 0x6c || header[1] != 0x1b || header[2] != 0x01)
-    Rcpp::stop("BED must be a PLINK SNP-major BED file: " + path);
+  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, fill_af, variants.size());
+  plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
+  const std::size_t stride = bf.stride();
 
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
@@ -446,13 +454,13 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
     for (std::size_t k = 0; k < count; ++k) {
-      input.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variants[g0 + k]) * stride));
-      input.read(reinterpret_cast<char*>(buffer.data() + k * stride), static_cast<std::streamsize>(stride));
-      if (!input) Rcpp::stop("Could not read BED file: " + path);
+      const unsigned char* row = bf.read(static_cast<std::size_t>(variants[g0 + k]), 0);
+      if (!row) Rcpp::stop("Could not read BED file: " + path);
+      std::memcpy(buffer.data() + k * stride, row, stride);
     }
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
       gather_packed(buffer.data() + k * stride, rows, buf);
       encode_column(*g, table, buf, g0 + k, missbuf.data() + static_cast<std::size_t>(t) * W, &fs);
@@ -467,10 +475,10 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
 SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct,
                         const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
                         bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr,
-                        Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
+                        Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af) {
   threads = resolve_threads(threads);
-  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
-  PgenFile file(path, static_cast<std::size_t>(n_total), allele_ct, threads);
+  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, fill_af, variants.size());
+  PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
   if (file.dosage()) {
@@ -483,7 +491,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
     return g;
   }
   init_geno(*g, rows.size(), variants.size(), mean);
-  const NibbleTable& table = PgenFile::table();
+  const NibbleTable& table = pgen_table();
   const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
   std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
   std::vector<u64> missbuf(static_cast<std::size_t>(threads) * W);
@@ -493,7 +501,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
     int failed = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       const unsigned char* column = file.read(static_cast<std::size_t>(variants[g0 + k]), t);
       if (!column) {
         #pragma omp atomic write
@@ -518,6 +526,7 @@ Rcpp::List geno_info_cpp(SEXP ptr) {
                             Rcpp::Named("p") = static_cast<double>(g->p),
                             Rcpp::Named("mean") = g->mu,
                             Rcpp::Named("sd") = g->sd,
+                            Rcpp::Named("n_miss") = g->nmiss,
                             Rcpp::Named("dosage") = g->dosage,
                             Rcpp::Named("dosage_nnz") = static_cast<double>(g->dnnz()),
                             Rcpp::Named("bytes_H") = bytes_h(*g),
@@ -595,7 +604,7 @@ Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, int thre
   const std::size_t used_words = (n + 63) / 64;
   #pragma omp parallel num_threads(threads)
   {
-    const int nt = omp_threads(), t = omp_thread();
+    const int nt = plink4r::thread_team(), t = plink4r::thread_id();
     const std::size_t w0 = used_words * t / nt, w1 = used_words * (t + 1) / nt;
     std::vector<double> bj(k);
     for (std::size_t j = 0; j < p; ++j) {
@@ -654,6 +663,7 @@ SEXP geno_append_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
     g->dsum[j] = a->dsum[j];
     g->dsq[j] = a->dsq[j];
     g->dhd[j] = a->dhd[j];
+    g->nmiss[j] = a->nmiss[j];
   }
   #pragma omp parallel for num_threads(threads) schedule(static)
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(k); ++cc) {
@@ -718,4 +728,166 @@ Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows,
       }
   }
   return out;
+}
+
+// Standardized products in C++ (no BLAS from R): out = (K - s u v') / (da db'), elementwise; an empty
+// da or db is 1. geno_crossprod / geno_cor give their centered, scaled forms through this.
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_std_cpp(const Rcpp::NumericMatrix& K, const Rcpp::NumericVector& u,
+                                 const Rcpp::NumericVector& v, double s, const Rcpp::NumericVector& da,
+                                 const Rcpp::NumericVector& db, int threads) {
+  threads = resolve_threads(threads);
+  const std::size_t r = K.nrow(), c = K.ncol();
+  if (static_cast<std::size_t>(u.size()) != r || static_cast<std::size_t>(v.size()) != c) Rcpp::stop("u, v do not match K.");
+  const bool ha = da.size() > 0, hb = db.size() > 0;
+  if ((ha && static_cast<std::size_t>(da.size()) != r) || (hb && static_cast<std::size_t>(db.size()) != c)) Rcpp::stop("da, db do not match K.");
+  Rcpp::NumericMatrix out(r, c);
+  const double* k = K.begin();
+  double* o = out.begin();
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(c); ++jj) {
+    const std::size_t j = static_cast<std::size_t>(jj);
+    const double vj = s * v[j], bj = hb ? db[j] : 1.0;
+    for (std::size_t i = 0; i < r; ++i) o[i + j * r] = (k[i + j * r] - u[i] * vj) / ((ha ? da[i] : 1.0) * bj);
+  }
+  return out;
+}
+
+// A'A of a dense n x k matrix (double, columns pairs shared out by OpenMP).
+// [[Rcpp::export]]
+Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads) {
+  threads = resolve_threads(threads);
+  const std::size_t n = A.nrow(), k = A.ncol();
+  Rcpp::NumericMatrix out(k, k);
+  const double* a = A.begin();
+  double* o = out.begin();
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
+  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(k); ++jj) {
+    const std::size_t j = static_cast<std::size_t>(jj);
+    for (std::size_t i = j; i < k; ++i) {
+      double acc = 0.0;
+      for (std::size_t r = 0; r < n; ++r) acc += a[r + i * n] * a[r + j * n];
+      o[i + j * k] = acc; o[j + i * k] = acc;
+    }
+  }
+  return out;
+}
+
+namespace {
+
+// Rows r0..r0+R-1 of stored column j (H + D) as floats: dst[r * stride], times w[r0 + r] when w is given.
+void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, const double* w, float* dst,
+                 std::size_t stride) {
+  for (std::size_t r = 0; r < R; ++r) dst[r * stride] = 0.0f;
+  const u64* lo = g.G.lo(j);
+  const u64* hi = g.G.hi(j);
+  const std::size_t w0 = r0 / 64, w1 = (r0 + R + 63) / 64;
+  for (std::size_t x = w0; x < w1; ++x) {
+    for (u64 bits = lo[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 1.0f;
+    }
+    for (u64 bits = hi[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 2.0f;
+    }
+  }
+  const DCol& dc = g.D[j];
+  if (!dc.mask.empty()) {
+    std::size_t e = d_rank(dc, w0);
+    for (std::size_t x = w0; x < w1 && x < dc.mask.size(); ++x)
+      for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) {
+        const std::size_t i = 64 * x + __builtin_ctzll(bits);
+        const double d = dc.q[e++] * dc.unit;
+        if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] += static_cast<float>(d);
+      }
+  }
+  if (w)
+    for (std::size_t r = 0; r < R; ++r) dst[r * stride] = static_cast<float>(dst[r * stride] * w[r0 + r]);
+}
+
+}  // namespace
+
+// X'WX of the stored matrix, W = diag(w), any real w. Output tiles of 256 x 256 (lower triangle) are shared
+// out by OpenMP within each block of 4096 samples; a tile decodes only its two groups of 256 columns for that
+// block into float (w folded into one side), multiplies them with the run-time-dispatched serial sgemm, and
+// accumulates in double; ~8 MB per thread whatever n and p. With center (and div) given, returns the
+// product of the standardized matrix: (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w.
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center,
+                                  const Rcpp::NumericVector& div, int threads) {
+  Rcpp::XPtr<Geno> g(ptr);
+  threads = resolve_threads(threads);
+  const std::size_t n = g->n, p = g->p;
+  if (static_cast<std::size_t>(w.size()) != n) Rcpp::stop("w must have one value per sample.");
+  for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(w[i])) Rcpp::stop("w must be finite.");
+  const plink4r::LaFns& LA = plink4r::la();
+  constexpr std::size_t TB = 256, RB = 4096;
+  const std::size_t nt = (p + TB - 1) / TB;
+  std::vector<std::pair<std::size_t, std::size_t>> tiles;
+  for (std::size_t b = 0; b < nt; ++b) for (std::size_t a = b; a < nt; ++a) tiles.emplace_back(a, b);
+  Rcpp::NumericMatrix out(p, p);
+  double* o = out.begin();
+  const double* wp = w.begin();
+  #pragma omp parallel num_threads(threads)
+  {
+    std::vector<float> At(TB * RB), B(RB * TB), P(TB * TB);
+    for (std::size_t r0 = 0; r0 < n; r0 += RB) {
+      const std::size_t R = std::min(RB, n - r0);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
+        const std::size_t a0 = tiles[tt].first * TB, b0 = tiles[tt].second * TB;
+        const std::size_t na = std::min(TB, p - a0), nb = std::min(TB, p - b0);
+        for (std::size_t c = 0; c < na; ++c) decode_rows(*g, a0 + c, r0, R, wp, &At[c], TB);    // A' : na x R, ld TB
+        for (std::size_t c = 0; c < nb; ++c) decode_rows(*g, b0 + c, r0, R, nullptr, &B[c * RB], 1);  // B : R x nb, ld RB
+        LA.sgemm_nn(At.data(), static_cast<int>(na), static_cast<int>(R), static_cast<int>(TB), B.data(),
+                    static_cast<int>(nb), static_cast<int>(RB), P.data(), static_cast<int>(TB));
+        for (std::size_t y = 0; y < nb; ++y)
+          for (std::size_t x = 0; x < na; ++x) o[(a0 + x) + (b0 + y) * p] += P[x + y * TB];
+      }  // implicit barrier: the next sample block starts after every tile of this one
+    }
+  }
+  for (std::size_t b = 0; b < p; ++b)  // mirror the lower triangle
+    for (std::size_t a = b + 1; a < p; ++a) o[b + a * p] = o[a + b * p];
+  if (center.size() > 0) {
+    if (static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
+    const bool hd = div.size() > 0;
+    std::vector<double> sw(p, 0.0);
+    double wsum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) wsum += wp[i];
+    #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+    for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(p); ++jj) {  // s = X'w in double
+      const std::size_t j = static_cast<std::size_t>(jj);
+      double acc = 0.0;
+      const u64* lo = g->G.lo(j);
+      const u64* hi = g->G.hi(j);
+      for (std::size_t x = 0; x < g->G.words; ++x) {
+        for (u64 bits = lo[x]; bits; bits &= bits - 1) acc += wp[64 * x + __builtin_ctzll(bits)];
+        for (u64 bits = hi[x]; bits; bits &= bits - 1) acc += 2.0 * wp[64 * x + __builtin_ctzll(bits)];
+      }
+      const DCol& dc = g->D[j];
+      std::size_t e = 0;
+      for (std::size_t x = 0; x < dc.mask.size(); ++x)
+        for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) acc += dc.q[e++] * dc.unit * wp[64 * x + __builtin_ctzll(bits)];
+      sw[j] = acc;
+    }
+    #pragma omp parallel for num_threads(threads) schedule(static)
+    for (std::ptrdiff_t bb = 0; bb < static_cast<std::ptrdiff_t>(p); ++bb) {
+      const std::size_t b = static_cast<std::size_t>(bb);
+      for (std::size_t a = 0; a < p; ++a) {
+        double v = o[a + b * p] - center[a] * sw[b] - sw[a] * center[b] + wsum * center[a] * center[b];
+        if (hd) v /= div[a] * div[b];
+        o[a + b * p] = v;
+      }
+    }
+  }
+  return out;
+}
+
+// Read-only: the threads and memory budget a call with threads = 0 / mem_gb = 0 would use.
+// [[Rcpp::export]]
+Rcpp::List resources_cpp(int threads, double mem_gb) {
+  const plink4r::Resources r = plink4r::detect_resources(threads, mem_gb);
+  return Rcpp::List::create(Rcpp::Named("threads") = r.threads, Rcpp::Named("mem_gb") = r.mem_gb,
+                            Rcpp::Named("threads_from") = r.threads_from, Rcpp::Named("mem_from") = r.mem_from);
 }

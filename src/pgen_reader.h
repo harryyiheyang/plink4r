@@ -1,16 +1,41 @@
-// Hardcall PGEN reader on the bundled pgenlib (read side), one PgenReader per thread.
-// Adapted from SuSiE4I src/pgen_file.h (dosage path removed).
+// PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
+// (read) and, for files whose header flags dosages, 1/16384 fixed-point ALT dosages (read_dosage).
+// The one PgenFile of the package (geno objects, imputation, scoring, correlations).
+// compact_genovec / count_genovec: the sample subset of a genovec, and its observed calls and ALT sum.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
 
 #include <Rcpp.h>
+#include <fstream>
 #include <memory>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <string>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include "pgenlib/pgenlib_read.h"
 
 namespace plink4r {
+
+// OpenMP thread number inside a parallel region (0 without OpenMP): the package's one copy.
+inline int thread_id() {
+#ifdef _OPENMP
+  return omp_get_thread_num();
+#else
+  return 0;
+#endif
+}
+
+// Size of the current OpenMP team (1 without OpenMP; may be below num_threads(T) when the runtime limits it).
+inline int thread_team() {
+#ifdef _OPENMP
+  return omp_get_num_threads();
+#else
+  return 1;
+#endif
+}
 
 struct PgenHeader {
   plink2::PgenFileInfo info;
@@ -58,7 +83,7 @@ public:
     uintptr_t pgfi_cachelines;
     if (plink2::PgfiInitPhase1(path.c_str(), nullptr, UINT32_MAX, UINT32_MAX, &header_ctrl,
                                &info, &pgfi_cachelines, err) != plink2::kPglRetSuccess)
-      Rcpp::stop("Could not open PGEN " + path + ": " + std::string(err));
+      fail(err);
     if (info.raw_sample_ct != n) Rcpp::stop("PGEN sample count does not match .psam: " + path);
     const std::size_t m = info.raw_variant_ct;
     if (allele_ct.size() != m) Rcpp::stop("PGEN variant count does not match .pvar: " + path);
@@ -83,7 +108,7 @@ public:
     uintptr_t pgr_cachelines;
     if (plink2::PgfiInitPhase2(header_ctrl, 1, 0, 0, 0, info.raw_variant_ct, &max_vrec_width,
                                &info, header_.alloc, &pgr_cachelines, err) != plink2::kPglRetSuccess)
-      Rcpp::stop("Could not open PGEN " + path + ": " + std::string(err));
+      fail(err);
     genovec_bytes_ = plink2::NypCtToVecCt(n) * plink2::kBytesPerVec;
     dosage_ = (info.gflags & plink2::kfPgenGlobalDosagePresent) != 0;
     const uintptr_t present_bytes = ((n + 7) / 8 / plink2::kBytesPerVec + 2) * plink2::kBytesPerVec;
@@ -140,11 +165,110 @@ public:
   }
 
 private:
+  [[noreturn]] void fail(const char* err) const {
+    std::string msg(err);
+    if (msg.compare(0, 7, "Error: ") == 0) msg.erase(0, 7);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r')) msg.pop_back();
+    Rcpp::stop("Could not open PGEN file " + path_ + (msg.empty() ? "" : ": " + msg));
+  }
   bool dosage_ = false;
   std::string path_;
   uintptr_t genovec_bytes_ = 0;
   PgenHeader header_;
   std::vector<std::unique_ptr<ThreadReader>> readers_;
+};
+
+// Genovec of the samples sidx[0..ns-1] (0-based .psam rows, output order) into dst ((ns + 3) / 4 bytes): codes
+// 0/1/2/3 as in the file; the bits past the last sample are code 0, so they add nothing to counts or products.
+// identity: sidx is 0..ns-1 over all n_raw samples, a plain copy.
+inline void compact_genovec(const unsigned char* gv, const int* sidx, int ns, bool identity, unsigned char* dst) {
+  const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;
+  if (identity) {
+    std::memcpy(dst, gv, sb);
+    const int pad = static_cast<int>(sb * 4 - ns);
+    if (pad) dst[sb - 1] &= static_cast<unsigned char>(0xFFu >> (2 * pad));
+    return;
+  }
+  std::memset(dst, 0, sb);
+  for (int s = 0; s < ns; ++s) {
+    const int r = sidx[s];
+    dst[s >> 2] |= static_cast<unsigned char>(((gv[r >> 2] >> (2 * (r & 3))) & 3u) << (2 * (s & 3)));
+  }
+}
+
+// True when sidx is 0..n_raw-1 (every sample, file order): compact_genovec is then a copy.
+inline bool identity_samples(const int* sidx, int ns, int n_raw) {
+  if (ns != n_raw) return false;
+  for (int s = 0; s < ns; ++s) if (sidx[s] != s) return false;
+  return true;
+}
+
+// Codes 0/1/2/3 of a compacted genovec of sb bytes (padding is code 0): cnt[c] = calls with code c.
+inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]) {
+  cnt[0] = cnt[1] = cnt[2] = cnt[3] = 0;
+  for (std::size_t y = 0; y < sb; ++y) {
+    const unsigned v = g[y];
+    ++cnt[v & 3u]; ++cnt[(v >> 2) & 3u]; ++cnt[(v >> 4) & 3u]; ++cnt[v >> 6];
+  }
+}
+
+// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
+inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
+  long long cnt[4];
+  count_codes(g, sb, cnt);
+  *miss = cnt[3]; *alt = cnt[1] + 2 * cnt[2];
+}
+
+// PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
+// a variant (all samples, file order) in the .bed coding (00 two A1, 01 missing, 10 one A1, 11 no A1);
+// read_counts() the same row recoded as a genovec counting A1 (codes 0/1/2, 3 missing), so the PGEN helpers
+// (compact_genovec, count_codes) apply. The package's one .bed reader.
+class BedFile {
+public:
+  BedFile(const std::string& path, std::size_t n, std::size_t m, int threads)
+    : path_(path), stride_((n + 3) / 4) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) Rcpp::stop("Cannot open BED file: " + path);
+    const std::streamoff size = f.tellg();
+    if (m > 0 && (size < 0 || static_cast<std::uint64_t>(size) != 3 + static_cast<std::uint64_t>(m) * stride_))
+      Rcpp::stop("BED size does not match its BIM and FAM files: " + path);
+    f.seekg(0);
+    unsigned char h[3];
+    if (!f.read(reinterpret_cast<char*>(h), 3) || h[0] != 0x6c || h[1] != 0x1b || h[2] != 0x01)
+      Rcpp::stop("BED must be a PLINK SNP-major BED file: " + path);
+    for (int t = 0; t < std::max(1, threads); ++t) {
+      streams_.emplace_back(new std::ifstream(path, std::ios::binary));
+      rows_.emplace_back(stride_);
+    }
+  }
+  std::size_t stride() const { return stride_; }
+  const unsigned char* read(std::size_t variant, int thread) { return load(variant, thread); }
+  const unsigned char* read_counts(std::size_t variant, int thread) {
+    struct Tab { unsigned char t[256];
+      Tab() { static const unsigned char m[4] = {2, 3, 1, 0};
+        for (int b = 0; b < 256; ++b) { unsigned v = 0;
+          for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
+          t[b] = static_cast<unsigned char>(v); } } };
+    static const Tab T;
+    unsigned char* r = load(variant, thread);
+    if (!r) return nullptr;
+    for (std::size_t y = 0; y < stride_; ++y) r[y] = T.t[r[y]];
+    return r;
+  }
+private:
+  unsigned char* load(std::size_t variant, int thread) {
+    std::ifstream& f = *streams_[thread];
+    f.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variant) * stride_));
+    if (!f.read(reinterpret_cast<char*>(rows_[thread].data()), static_cast<std::streamsize>(stride_))) {
+      f.clear();
+      return nullptr;
+    }
+    return rows_[thread].data();
+  }
+  std::string path_;
+  std::size_t stride_;
+  std::vector<std::unique_ptr<std::ifstream>> streams_;
+  std::vector<std::vector<unsigned char>> rows_;
 };
 
 }  // namespace plink4r

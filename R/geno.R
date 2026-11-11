@@ -4,7 +4,7 @@
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X, cached per object; X'M), geno_multiply() (X B),
 # geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
-# bed_cor() / pgen_cor() (correlations). Values are A1 (BED) or ALT (PGEN)
+# cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for genotypes) holding dosage - H for a PGEN with dosages,
@@ -47,7 +47,15 @@
 #'   Hardcall input only.
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
+#' @param fill Externally supplied fills (used by [genotype_fill()]).
+#' @param af Optional anchor frequency of the counted allele (bim column 5 for
+#'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
+#'   `impute`. With a finite `af`, every missing call of that variant takes
+#'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
+#'   (stored as round(c) in the planes and the rest in D), so the filled
+#'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
+#'   (default) leaves the behaviour unchanged.
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
 #'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
 #'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
@@ -59,9 +67,9 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL) {
+                      scale = TRUE, threads = 4L, fill = NULL, af = NULL) {
   impute <- match.arg(impute)
-  threads <- as.integer(threads)
+  threads <- .threads(threads)
   if (is.null(bedfile) == is.null(pgenfile)) {
     stop("Give exactly one of bedfile and pgenfile.", call. = FALSE)
   }
@@ -77,25 +85,31 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
     iid <- fam[[2L]]
   } else {
     files <- .geno_pgen_files(pgenfile)
-    pv <- data.table::fread(files$pvar, skip = "#CHROM", colClasses = "character")
-    snp <- pv[["ID"]]
-    a1 <- pv[["ALT"]]
-    a2 <- pv[["REF"]]
-    allele_ct <- 1L + nchar(pv$ALT) - nchar(gsub(",", "", pv$ALT, fixed = TRUE))
-    ps <- data.table::fread(files$psam, colClasses = "character")
-    iid <- ps[[if ("#IID" %in% names(ps)) "#IID" else "IID"]]
-    fid_col <- intersect(c("#FID", "FID"), names(ps))
-    fid <- if (length(fid_col)) ps[[fid_col[1L]]] else rep("0", length(iid))
+    pv <- .read_pvar5(files$prefix)
+    snp <- pv$ID
+    a1 <- pv$ALT
+    a2 <- pv$REF
+    allele_ct <- pv$allele_ct
+    ps <- .psam_ids(files$prefix, fid = TRUE)
+    iid <- ps$iid
+    fid <- ps$fid
   }
   vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
   fs <- .geno_fill_spec(fill, length(vidx), iid[sidx])
+  if (is.null(af)) {
+    af <- numeric(0)
+  } else {
+    af <- as.numeric(af)
+    if (length(af) != length(vidx)) stop("af needs one value per selected variant.", call. = FALSE)
+    if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
+  }
   ptr <- if (!is.null(bedfile)) {
     geno_open_bed_cpp(bed, length(iid), length(snp), vidx - 1L, sidx - 1L,
-                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g)
+                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
   } else {
     geno_open_pgen_cpp(files$pgen, length(iid), allele_ct,
-                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g)
+                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
   }
   info <- geno_info_cpp(ptr)
   structure(list(ptr = ptr, n = length(sidx), p = length(vidx),
@@ -121,7 +135,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 #'
 #' @param X A `geno` object.
 #' @param M Numeric matrix (or vector) with one row per sample.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `geno` object with `p + ncol(M)` columns; `appended` gives the
 #'   positions of all appended columns and `a1`, `a2` are `NA` there.
 #' @export
@@ -132,7 +146,7 @@ geno_append <- function(X, M, threads = X$threads) {
   if (any(!is.finite(M))) stop("Appended columns must be finite.", call. = FALSE)
   if (is.null(colnames(M))) colnames(M) <- paste0("A", X$p + seq_len(ncol(M)))
   if (anyDuplicated(c(X$snp, colnames(M)))) stop("Appended column names must differ from the column names of X.", call. = FALSE)
-  threads <- as.integer(threads)
+  threads <- .threads(threads)
   ptr <- geno_append_cpp(X$ptr, M, threads)
   info <- geno_info_cpp(ptr)
   p0 <- X$p; k <- ncol(M); p <- p0 + k
@@ -150,7 +164,7 @@ geno_append <- function(X, M, threads = X$threads) {
   K[seq_len(p0), seq_len(p0)] <- .geno_raw_xtx(X, threads)
   K[seq_len(p0), p0 + seq_len(k)] <- K01
   K[p0 + seq_len(k), seq_len(p0)] <- t(K01)
-  K[p0 + seq_len(k), p0 + seq_len(k)] <- crossprod(A)
+  K[p0 + seq_len(k), p0 + seq_len(k)] <- dense_xtx_cpp(A, threads)
   out$cache$xtx <- K
   out
 }
@@ -275,7 +289,7 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param M Optional dense matrix (or vector) with one row per sample.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A p by p matrix when `M` is `NULL`, otherwise a p by `ncol(M)` matrix.
 #' @export
 geno_crossprod <- function(X, M = NULL, threads = X$threads) {
@@ -283,14 +297,14 @@ geno_crossprod <- function(X, M = NULL, threads = X$threads) {
     out <- .geno_raw_xtx(X, threads)
     if (X$scale) {
       d <- .geno_div(X)
-      out <- (out - X$n * tcrossprod(X$center)) / tcrossprod(d)
+      out <- geno_std_cpp(out, X$center, X$center, X$n, d, d, .threads(threads))
     }
     dimnames(out) <- list(X$snp, X$snp)
     return(out)
   }
   M <- as.matrix(M) + 0
   out <- geno_xtm_cpp(X$ptr, M, threads)
-  if (X$scale) out <- (out - tcrossprod(X$center, colSums(M))) / .geno_div(X)
+  if (X$scale) out <- geno_std_cpp(out, X$center, colSums(M), 1, .geno_div(X), numeric(0), .threads(threads))
   rownames(out) <- X$snp
   out
 }
@@ -303,7 +317,7 @@ geno_crossprod <- function(X, M = NULL, threads = X$threads) {
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param B Dense matrix with one row per variant, or a numeric vector.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return An n by `ncol(B)` matrix, or a numeric vector when `B` is a vector.
 #' @export
 geno_multiply <- function(X, B, threads = X$threads) {
@@ -312,26 +326,23 @@ geno_multiply <- function(X, B, threads = X$threads) {
   if (X$scale) {
     B <- B / .geno_div(X)
     out <- geno_mx_cpp(X$ptr, B, threads)
-    out <- sweep(out, 2L, as.numeric(crossprod(X$center, B)), "-")
+    out <- sweep(out, 2L, colSums(B * X$center), "-")
   } else {
     out <- geno_mx_cpp(X$ptr, B, threads)
   }
   if (vec) as.numeric(out) else out
 }
 
-# crossprod(X, X * w) and crossprod(X, M) from dense row blocks of at most block_size rows.
-geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L) {
+# crossprod(X, X * w) and crossprod(X, M) (of the standardized matrix when X$scale), all in C++:
+# X'WX by 256 x 256 tiles over blocks of 4096 samples (float products, double sums; geno_xtwx_cpp), X'M by
+# geno_crossprod().
+geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
+  threads <- .threads(threads)
   w <- as.numeric(w)
-  M <- if (is.null(M)) matrix(0, X$n, 0L) else as.matrix(M) + 0
-  rows <- max(1L, min(as.integer(block_size), 2^26 %/% X$p))
-  XtWX <- matrix(0, X$p, X$p)
-  XtM <- matrix(0, X$p, ncol(M))
-  for (start in seq.int(1L, X$n, by = rows)) {
-    idx <- start:min(X$n, start + rows - 1L)
-    G <- X[idx, , drop = FALSE]
-    XtWX <- XtWX + crossprod(G, G * w[idx])
-    if (ncol(M)) XtM <- XtM + crossprod(G, M[idx, , drop = FALSE])
-  }
+  if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
+  XtWX <- if (X$scale) geno_xtwx_cpp(X$ptr, w, X$center, .geno_div(X), threads) else
+    geno_xtwx_cpp(X$ptr, w, numeric(0), numeric(0), threads)
+  XtM <- if (is.null(M)) matrix(0, X$p, 0L) else geno_crossprod(X, M, threads = threads)
   dimnames(XtWX) <- list(X$snp, X$snp)
   rownames(XtM) <- X$snp
   list(XtWX = XtWX, XtM = XtM)
@@ -352,15 +363,11 @@ geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L) {
   }
   prefix <- sub("\\.pgen$", "", x, ignore.case = TRUE)
   pgen <- paste0(prefix, ".pgen")
-  pvar <- paste0(prefix, ".pvar")
-  psam <- paste0(prefix, ".psam")
-  for (path in c(pgen, pvar, psam)) {
+  for (path in c(pgen, paste0(prefix, ".psam"))) {
     if (!file.exists(path)) stop("Required PGEN companion file is missing: ",
                                  path, call. = FALSE)
   }
-  list(pgen = normalizePath(pgen, mustWork = TRUE),
-       pvar = normalizePath(pvar, mustWork = TRUE),
-       psam = normalizePath(psam, mustWork = TRUE))
+  list(pgen = normalizePath(pgen, mustWork = TRUE), prefix = prefix)
 }
 
 #' Correlations of the columns of geno matrices
@@ -371,11 +378,11 @@ geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L) {
 #' give `NA`.
 #'
 #' @param A,B `geno` objects.
-#' @param threads Number of OpenMP threads.
+#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `ncol(A)` by `ncol(B)` matrix (B = A when `NULL`).
 #' @export
 geno_cor <- function(A, B = NULL, threads = A$threads) {
-  threads <- as.integer(threads)
+  threads <- .threads(threads)
   n <- A$n
   if (is.null(B)) {
     K <- .geno_raw_xtx(A, threads)
@@ -395,7 +402,7 @@ geno_cor <- function(A, B = NULL, threads = A$threads) {
       }
     }
   }
-  R <- (K - n * tcrossprod(A$center, B$center)) / ((n - 1) * tcrossprod(A$sd, B$sd))
+  R <- geno_std_cpp(K, A$center, B$center, n, (n - 1) * A$sd, B$sd, threads)
   R[A$sd == 0, ] <- NA_real_
   R[, B$sd == 0] <- NA_real_
   R <- pmin(pmax(R, -1), 1)
@@ -403,41 +410,3 @@ geno_cor <- function(A, B = NULL, threads = A$threads) {
   R
 }
 
-#' Correlations of all variants of PLINK files
-#'
-#' `bed_cor(A)` / `pgen_cor(A)`: correlations of all variants of a BED / PGEN
-#' file; with `B`, of the variants of A against those of B (same samples in
-#' the same order). Missing calls take the variant's lower median; a PGEN with
-#' dosages is read as dosages. Moved here from CppMatrix (same arguments); the
-#' genotypes are held by [geno_open()] and the products are those of
-#' [geno_cor()].
-#'
-#' @param A,B BED paths or prefixes (`bed_cor`), PGEN paths or prefixes
-#'   (`pgen_cor`).
-#' @param threads Number of OpenMP threads.
-#' @return A correlation matrix with variant IDs as dimnames.
-#' @export
-bed_cor <- function(A, B = NULL, threads = 4L) {
-  .geno_file_cor(A, B, threads, "bedfile")
-}
-
-#' @rdname bed_cor
-#' @export
-pgen_cor <- function(A, B = NULL, threads = 4L) {
-  .geno_file_cor(A, B, threads, "pgenfile")
-}
-
-.geno_file_cor <- function(A, B, threads, arg) {
-  if (!is.numeric(threads) || length(threads) != 1L || !is.finite(threads) ||
-      threads < 1 || threads != round(threads)) {
-    stop("threads must be a single positive integer.", call. = FALSE)
-  }
-  open1 <- function(f) do.call(geno_open, stats::setNames(list(f, "median", FALSE, as.integer(threads)),
-                                                          c(arg, "impute", "scale", "threads")))
-  XA <- open1(A)
-  XB <- if (is.null(B)) NULL else open1(B)
-  if (as.numeric(XA$p) * (if (is.null(XB)) XA$p else XB$p) > 1e8) {
-    stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)
-  }
-  geno_cor(XA, XB, threads)
-}

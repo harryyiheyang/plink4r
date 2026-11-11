@@ -1,7 +1,31 @@
 CXX_STD = CXX17
 PGENLIB_OBJECTS = pgenlib/pgenlib_misc.o pgenlib/pgenlib_read.o pgenlib/plink2_base.o \
   pgenlib/plink2_bits.o pgenlib/plink2_simd.o
-OBJECTS = RcppExports.o cor_geno.o geno.o genotype_impute.o sumstat_impute.o $(PGENLIB_OBJECTS)
-PKG_CPPFLAGS = -DNO_UNALIGNED -DPGENLIB_NOPRINT -Ipgenlib
-PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
+
+# Dense linear algebra (la_kernel.cpp) is compiled once per instruction set and chosen at run time
+# (la_dispatch.h): generic flags everywhere, plus AVX2+FMA and AVX-512 copies on x86-64.
+PLINK4R_ARCH := $(shell uname -m 2>/dev/null)
+ifneq ($(filter x86_64 amd64 AMD64 i686 i386,$(PLINK4R_ARCH)),)
+LA_OBJECTS = la_generic.o la_avx2.o la_avx512.o
+LA_DEFS = -DPLINK4R_LA_X86
+else
+LA_OBJECTS = la_generic.o
+LA_DEFS =
+endif
+
+OBJECTS = RcppExports.o assoc_stream.o geno.o geno_score.o genotype_impute.o sumstat_impute.o $(LA_OBJECTS) $(PGENLIB_OBJECTS)
+# EIGEN_DONT_PARALLELIZE: Eigen never starts threads of its own; all parallelism is the outer OpenMP over the
+# `threads` argument of each function (no setNbThreads, no global thread setting).
+PKG_CPPFLAGS = -DNO_UNALIGNED -DPGENLIB_NOPRINT -DEIGEN_DONT_PARALLELIZE -Ipgenlib $(LA_DEFS)
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -Wno-ignored-attributes
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
+
+.PHONY: all
+all: $(SHLIB)
+
+la_generic.o: la_kernel.cpp la_dispatch.h
+	$(CXX) $(ALL_CPPFLAGS) $(ALL_CXXFLAGS) -DPLINK4R_LA_ISA=generic -c la_kernel.cpp -o $@
+la_avx2.o: la_kernel.cpp la_dispatch.h
+	$(CXX) $(ALL_CPPFLAGS) $(ALL_CXXFLAGS) -mavx2 -mfma -DPLINK4R_LA_ISA=avx2 -c la_kernel.cpp -o $@
+la_avx512.o: la_kernel.cpp la_dispatch.h
+	$(CXX) $(ALL_CPPFLAGS) $(ALL_CXXFLAGS) -mavx2 -mfma -mavx512f -mavx512dq -mavx512vl -mavx512bw -DPLINK4R_LA_ISA=avx512 -c la_kernel.cpp -o $@

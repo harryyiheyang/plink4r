@@ -1,47 +1,61 @@
-.read_pvar <- function(pfile) {
-  f <- paste0(pfile, ".pvar")
-  if (file.exists(f)) return(data.table::fread(f, select = c("ID", "ALT"), skip = "#CHROM"))
-  if (file.exists(paste0(f, ".zst")))
-    return(data.table::fread(cmd = paste("zstdcat", shQuote(paste0(f, ".zst")), "| grep -v '^##'"), select = c("ID", "ALT")))
-  stop("no .pvar or .pvar.zst for ", pfile)
-}
-
-#' LD correlation matrix from a PLINK2 .pgen (hardcall or dosage)
+#' LD correlation matrix of selected variants of a PLINK2 .pgen or PLINK1 .bed
 #'
-#' Genotypes are read as ALT dosage (pgen dosages kept at 1/16384 resolution). Missing cells: with `af` the
-#' scheme-3 constant c_j = (2 n p_j - sum_obs g) / m_j (clipped to [0, 2]); without `af` the observed mean.
-#' @param pfile PLINK2 prefix. @param snps variant IDs (.pvar ID), output order.
-#' @param sample IIDs (NULL = all). @param af anchor ALT frequency per SNP (NULL or NA = mean fill).
-#' @return list(R = p x p matrix with dimnames, mean, sd, n_miss, fill, n, dosage, time)
+#' The genotypes are held by [geno_open()] (2-bit planes H plus a sparse int16
+#' deviation D) and the correlations come from [geno_cor()]: X'X by popcount
+#' on the planes plus the D terms, centred and scaled in C++ from the stored
+#' means and sds, so no n x p dense matrix is formed. Values are ALT (PGEN) or
+#' bim A1 (BED) dosages; a PGEN with dosages is read as dosages.
+#'
+#' Missing calls: with `af` (the counted allele's anchor frequency) every
+#' missing call of the variant takes c = (2 n af - sum of observed) /
+#' (number missing), clipped to `[0, 2]` (scheme 3), so the filled column has
+#' mean 2 af; `NA` entries of `af`, or `af = NULL`, use `impute`. The sd is
+#' always the sample sd after filling.
+#'
+#' @param pfile,bfile PLINK2 / PLINK1 prefix or file path.
+#' @param snps Variants, as IDs or 1-based file row indices (use indices when
+#'   IDs repeat), in output order. `NULL` = all.
+#' @param sample IIDs or 1-based indices; `NULL` = all samples.
+#' @param af Anchor frequency of the counted allele per variant, or `NULL`.
+#' @param impute Fill for variants without an anchor: `"mean"` or `"median"`.
+#' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
+#' @return list(R = p x p correlation matrix with dimnames (rows and columns of
+#'   variants with sd 0 are `NA`), mean, sd, n_miss (missing calls per variant
+#'   before filling), n, a1 (counted allele), a2, dosage, time)
 #' @export
-cor_pgen <- function(pfile, snps, sample = NULL, af = NULL, threads = 4L) {
-  pvar <- .read_pvar(pfile)
-  psam <- data.table::fread(paste0(pfile, ".psam"))
-  iid <- as.character(psam[[intersect(c("IID", "#IID"), names(psam))[1]]])
-  vi <- match(snps, pvar$ID)
-  if (anyNA(vi)) stop(sum(is.na(vi)), " of `snps` not in ", pfile, ".pvar")
-  si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam")
-  act <- as.integer(2L + lengths(regmatches(pvar$ALT, gregexpr(",", pvar$ALT))))
-  a <- if (is.null(af)) rep(NA_real_, length(snps)) else as.numeric(af)
-  out <- cor_pgen_cpp(normalizePath(paste0(pfile, ".pgen")), length(iid), act, as.integer(vi - 1L), as.integer(si - 1L), a, as.integer(threads))
-  dimnames(out$R) <- list(snps, snps)
-  out
+cor_pgen <- function(pfile, snps = NULL, sample = NULL, af = NULL, threads = 4L, impute = c("mean", "median")) {
+  .cor_file(list(pgenfile = pfile), snps, sample, af, match.arg(impute), threads)
 }
 
-#' LD correlation matrix from a PLINK1 .bed (counts A1; missing as in [cor_pgen()])
+#' @rdname cor_pgen
 #' @export
-cor_bed <- function(bfile, snps, sample = NULL, af = NULL, threads = 4L) {
-  bim <- data.table::fread(paste0(bfile, ".bim"), header = FALSE, select = 2L)[[1]]
-  fam <- as.character(data.table::fread(paste0(bfile, ".fam"), header = FALSE, select = 2L)[[1]])
-  vi <- match(snps, bim)
-  if (anyNA(vi)) stop(sum(is.na(vi)), " of `snps` not in ", bfile, ".bim")
-  si <- if (is.null(sample)) seq_along(fam) else match(as.character(sample), fam)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .fam")
-  a <- if (is.null(af)) rep(NA_real_, length(snps)) else as.numeric(af)
-  out <- cor_bed_cpp(normalizePath(paste0(bfile, ".bed")), length(fam), as.integer(vi - 1L), as.integer(si - 1L), a, as.integer(threads))
-  dimnames(out$R) <- list(snps, snps)
-  out
+cor_bed <- function(bfile, snps = NULL, sample = NULL, af = NULL, threads = 4L, impute = c("mean", "median")) {
+  .cor_file(list(bedfile = bfile), snps, sample, af, match.arg(impute), threads)
+}
+
+#' @rdname cor_pgen
+#' @details `pgen_cor()` and `bed_cor()` are other names of `cor_pgen()` and `cor_bed()` (same arguments and
+#'   return value).
+#' @export
+pgen_cor <- cor_pgen
+
+#' @rdname cor_pgen
+#' @export
+bed_cor <- cor_bed
+
+.cor_file <- function(file, snps, sample, af, impute, threads, max_cells = Inf) {
+  threads <- .threads(threads)
+  t0 <- proc.time()[["elapsed"]]
+  X <- do.call(geno_open, c(file, list(snp_vec = snps, sample_vec = sample, impute = impute,
+                                       scale = FALSE, threads = threads, af = af)))
+  t1 <- proc.time()[["elapsed"]]
+  if (as.numeric(X$p) * X$p > max_cells) {
+    stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)
+  }
+  R <- geno_cor(X, NULL, threads)
+  info <- geno_info_cpp(X$ptr)
+  list(R = R, mean = X$center, sd = X$sd, n_miss = info$n_miss, n = X$n, a1 = X$a1, a2 = X$a2,
+       dosage = X$dosage, time = c(read = t1 - t0, cor = proc.time()[["elapsed"]] - t1))
 }
 
 #' Eigen-decompose an LD matrix, truncate at `thresh` of the positive eigenvalue sum, write plink4r eigen.bin

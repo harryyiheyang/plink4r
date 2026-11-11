@@ -12,7 +12,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
+#include "la_dispatch.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -251,10 +253,11 @@ void tile_avx2(const Planes& A, std::size_t i0, std::size_t ni,
 }
 #endif
 
+// Chosen with the dense kernels (la_dispatch.h): the AVX2 tile whenever la() picked avx2 or avx512, so
+// PLINK4R_SIMD is the one switch of the package.
 TileKernel select_kernel() {
 #ifdef GENO_KERNEL_X86
-  __builtin_cpu_init();
-  if (__builtin_cpu_supports("avx2")) return tile_avx2;
+  if (std::strcmp(plink4r::la().isa, "generic") != 0) return tile_avx2;
 #endif
   return tile_generic;
 }
