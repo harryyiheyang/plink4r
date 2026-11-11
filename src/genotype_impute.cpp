@@ -6,38 +6,49 @@
 #include <cmath>
 #include <vector>
 #include "impute_kernel.h"
+#include "geno_access.h"
 
-// Working rows (the panel rows of the block / window that are in the PGEN, increasing): rows = 0-based eigen
-// row, var_idx = 0-based PGEN variant, af = PGEN-ALT frequency, sign = +1 (PGEN ALT = panel alt) or -1.
-// sample_idx: 0-based PSAM rows to impute (anchor counts use these samples only).
-// [[Rcpp::export]]
-Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
-                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
-                               const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
-                               double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
-                               int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
-  namespace ik = plink4r::ik;
-  const int T = plink4r::resolve_threads(threads);
-  const auto t_all = std::chrono::steady_clock::now();
+namespace {
 
-  const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
-  const double t_read = ik::secs(t_all);
-  const std::vector<int> rw(rows.begin(), rows.end());
-  const int m = static_cast<int>(rw.size());
+// Working rows of one block / window, checked against the eigen block.
+struct ImputeJob {
+  plink4r::EigenBlock eb;
+  std::vector<int> rw, sg, vi;
+  std::vector<double> afv;
+  std::vector<char> kr;
+  int m = 0;
+  double t_read = 0;
+};
+
+ImputeJob impute_job(const std::string& eigen_file, double thresh, const Rcpp::IntegerVector& rows,
+                     const Rcpp::IntegerVector& var_idx, const Rcpp::NumericVector& af,
+                     const Rcpp::IntegerVector& sign, const Rcpp::LogicalVector& keep_row,
+                     std::chrono::steady_clock::time_point t_all) {
+  ImputeJob J;
+  J.eb = plink4r::read_eigen_block(eigen_file, thresh);
+  J.t_read = plink4r::ik::secs(t_all);
+  J.rw.assign(rows.begin(), rows.end());
+  J.m = static_cast<int>(J.rw.size());
+  const int m = J.m;
   if (var_idx.size() != m || af.size() != m || sign.size() != m || keep_row.size() != m)
     Rcpp::stop("rows / var_idx / af / sign / keep_row differ in length");
-  for (int r : rw) if (r < 0 || r >= eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
-  const std::vector<int> sg(sign.begin(), sign.end());
-  const std::vector<int> vi(var_idx.begin(), var_idx.end());
-  const std::vector<double> afv(af.begin(), af.end());
-  std::vector<char> kr(m);
-  for (int j = 0; j < m; ++j) kr[j] = keep_row[j] ? 1 : 0;
+  for (int r : J.rw) if (r < 0 || r >= J.eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
+  J.sg.assign(sign.begin(), sign.end());
+  J.vi.assign(var_idx.begin(), var_idx.end());
+  J.afv.assign(af.begin(), af.end());
+  J.kr.assign(m, 0);
+  for (int j = 0; j < m; ++j) J.kr[j] = keep_row[j] ? 1 : 0;
+  return J;
+}
 
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, T, t_read);
-  const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
-  const std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
-  plink4r::BlockGenotypes B = plink4r::read_block_genotypes(pf, vi, sidx, T);
+// Stage 1 + 2 on the genotypes of the working rows (shared by the PGEN and the geno-object entries).
+Rcpp::List impute_run(const ImputeJob& J, const plink4r::ImputeLD& L, plink4r::BlockGenotypes& B, double delta,
+                      double anchor_min_miss, int nb_people, double mem_gb, int T,
+                      std::chrono::steady_clock::time_point t_all) {
+  namespace ik = plink4r::ik;
+  const int m = J.m;
+  const std::vector<double>& afv = J.afv;
+  const std::vector<char>& kr = J.kr;
   const int ns = B.ns;
   const plink4r::PersonPlanes P = plink4r::build_planes(L, B, T);
   const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
@@ -74,6 +85,51 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                                   Rcpp::_["rhs_CMM"] = R.t_rhs, Rcpp::_["cholesky"] = R.t_chol,
                                                   Rcpp::_["solve"] = R.t_solve, Rcpp::_["anchor"] = t_anchor,
                                                   Rcpp::_["total"] = ik::secs(t_all)));
+}
+
+}  // namespace
+
+// Working rows (the panel rows of the block / window that are in the PGEN, increasing): rows = 0-based eigen
+// row, var_idx = 0-based PGEN variant, af = PGEN-ALT frequency, sign = +1 (PGEN ALT = panel alt) or -1.
+// sample_idx: 0-based PSAM rows to impute (anchor counts use these samples only).
+// [[Rcpp::export]]
+Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
+                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
+                               const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
+                               double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
+                               int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
+  const int T = plink4r::resolve_threads(threads);
+  const auto t_all = std::chrono::steady_clock::now();
+  const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
+  const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
+  const std::vector<int> act(allele_ct.begin(), allele_ct.end());
+  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
+  plink4r::BlockGenotypes B = plink4r::read_block_genotypes(pf, J.vi, sidx, T);
+  return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
+}
+
+// Same on a geno object (hard calls): var_idx = 0-based columns of the object, every row of the object is
+// imputed; the genotypes come from its planes and its missing-cell rows, in its current counted-allele
+// orientation (af and sign refer to that allele).
+// [[Rcpp::export]]
+Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
+                                    Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
+                                    double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
+                                    double mem_gb, Rcpp::IntegerVector rows) {
+  const int T = plink4r::resolve_threads(threads);
+  const auto t_all = std::chrono::steady_clock::now();
+  const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
+  const auto t0 = std::chrono::steady_clock::now();
+  plink4r::BlockGenotypes B;
+  int ns = 0;
+  plink4r::geno_genovec(ptr, J.vi, B.GS, B.sum_obs, ns, T);
+  B.m = J.m;
+  B.ns = ns;
+  B.sb = (ns + 3) / 4;
+  B.t_geno = plink4r::ik::secs(t0);
+  return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
 }
 
 // Observed calls and ALT sum (hard calls, or dosages when the PGEN holds them) of each variant over the selected

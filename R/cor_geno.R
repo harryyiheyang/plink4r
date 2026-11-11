@@ -47,14 +47,15 @@ bed_cor <- cor_bed
   threads <- .threads(threads)
   t0 <- proc.time()[["elapsed"]]
   X <- do.call(geno_open, c(file, list(snp_vec = snps, sample_vec = sample, impute = impute,
-                                       scale = FALSE, threads = threads, af = af)))
+                                       scale = FALSE, threads = threads)))
+  # anchored fill through the genotype_fill routine; NA entries of af keep `impute` (in place: X is local)
+  if (!is.null(af)) X <- .geno_refill(X, af = af, default = "keep", inplace = TRUE, impute = "af", threads = threads)
   t1 <- proc.time()[["elapsed"]]
   if (as.numeric(X$p) * X$p > max_cells) {
     stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)
   }
   R <- geno_cor(X, NULL, threads)
-  info <- geno_info_cpp(X$ptr)
-  list(R = R, mean = X$center, sd = X$sd, n_miss = info$n_miss, n = X$n, a1 = X$a1, a2 = X$a2,
+  list(R = R, mean = X$center, sd = X$sd, n_miss = X$n_miss, n = X$n, a1 = X$a1, a2 = X$a2,
        dosage = X$dosage, time = c(read = t1 - t0, cor = proc.time()[["elapsed"]] - t1))
 }
 

@@ -48,11 +48,11 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result (its per-SNP
-#'   `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by ID), or
-#'   `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column, IID, g))`.
-#'   A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) / bim A1 (BED)
-#'   dosages.
+#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result of the file route (its
+#'   per-SNP `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by
+#'   ID), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
+#'   IID, g))`. A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) /
+#'   bim A1 (BED) dosages. Same as opening with `impute` and then [genotype_fill()] on the new object.
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
 #'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
 #'   `impute`. With a finite `af`, every missing call of that variant takes
@@ -60,70 +60,72 @@
 #'   (stored as round(c) in the planes and the rest in D), so the filled
 #'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
 #'   (default) leaves the behaviour unchanged.
+#' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
+#'   tables (then leave `bedfile` and `pgenfile` `NULL`).
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
 #'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
 #'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
-#'   `sample` (IIDs in row order), `impute`, `scale`, `center`, `sd`, `dosage`
+#'   `sample` (IIDs in row order), `impute` (how the missing cells are filled now: "median", "mean", "af",
+#'   "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
 #'   (whether the PGEN holds dosages) and `dosage_nnz` (nonzero entries of the
-#'   int16 deviation D). It holds an
+#'   int16 deviation D); per column also `id` (file ID), `chr`, `pos`, `row` (file row), `flipped` (stored
+#'   value = 2 - file value), `n_miss` (missing calls) and `af` (observed frequency of `a1`); per row `fid`;
+#'   and `file` = list(type, path). The rows of the missing cells are kept (see [geno_missing()]). It holds an
 #'   external pointer, so it is valid only in the current R session (it cannot
 #'   be saved with `saveRDS` or sent to parallel workers).
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL, af = NULL) {
+                      scale = TRUE, threads = 4L, fill = NULL, af = NULL, file = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
-  if (is.null(bedfile) == is.null(pgenfile)) {
-    stop("Give exactly one of bedfile and pgenfile.", call. = FALSE)
-  }
-  if (!is.null(bedfile)) {
-    bed <- .geno_bed_path(bedfile)
-    base <- sub("\\.bed$", "", bed)
-    bim <- data.table::fread(paste0(base, ".bim"), header = FALSE, colClasses = "character")
-    fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, colClasses = "character")
-    snp <- bim[[2L]]
-    a1 <- bim[[5L]]
-    a2 <- bim[[6L]]
-    fid <- fam[[1L]]
-    iid <- fam[[2L]]
+  gf <- .as_geno_file(file, bedfile, pgenfile)
+  v <- gf$variants
+  s <- gf$samples
+  ids <- .geno_vid(v)
+  vidx <- .geno_index(snp_vec, ids, NULL, "snp_vec")
+  sidx <- .geno_index(sample_vec, s$iid, paste(s$fid, s$iid, sep = "_"), "sample_vec")
+  ptr <- if (gf$type == "bed") {
+    geno_open_bed_cpp(gf$path, nrow(s), nrow(v), vidx - 1L, sidx - 1L, impute == "mean", threads)
   } else {
-    files <- .geno_pgen_files(pgenfile)
-    pv <- .read_pvar5(files$prefix)
-    snp <- pv$ID
-    a1 <- pv$ALT
-    a2 <- pv$REF
-    allele_ct <- pv$allele_ct
-    ps <- .psam_ids(files$prefix, fid = TRUE)
-    iid <- ps$iid
-    fid <- ps$fid
+    geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, impute == "mean", threads)
   }
-  vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
-  sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
-  fs <- .geno_fill_spec(fill, snp[vidx], iid[sidx])
-  if (is.null(af)) {
-    af <- numeric(0)
-  } else {
-    af <- as.numeric(af)
-    if (length(af) != length(vidx)) stop("af needs one value per selected variant.", call. = FALSE)
-    if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
+  X <- .geno_new(ptr, list(snp = ids[vidx], id = if ("id" %in% names(v)) v$id[vidx] else rep(NA_character_, length(vidx)),
+                           chr = v$chr[vidx], pos = v$pos[vidx], a1 = v$a1[vidx], a2 = v$a2[vidx], row = vidx,
+                           flipped = rep(FALSE, length(vidx))),
+                 list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
+                 file = list(type = gf$type, path = gf$path))
+  if (!is.null(fill) || !is.null(af)) {  # on the new object, which nothing else references yet: in place
+    fs <- .geno_fill_spec(fill, X$snp, X$sample)
+    X <- .geno_refill(X, af = af, const = fs$c, cells = fs, default = "keep", inplace = TRUE,
+                      impute = if (!is.null(fill)) "custom" else "af", threads = threads)
   }
-  ptr <- if (!is.null(bedfile)) {
-    geno_open_bed_cpp(bed, length(iid), length(snp), vidx - 1L, sidx - 1L,
-                      impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
-  } else {
-    geno_open_pgen_cpp(files$pgen, length(iid), allele_ct,
-                       vidx - 1L, sidx - 1L, impute == "mean", threads, fs$c, fs$ptr, fs$i, fs$g, af)
-  }
+  X
+}
+
+# The one constructor of a geno object: per-column fields `cols` (snp, id, chr, pos, a1, a2, row, flipped),
+# per-row fields `rows` (sample, fid); center, sd, n_miss and af come from the store.
+.geno_new <- function(ptr, cols, rows, impute, scale, threads, file = NULL, appended = integer(0)) {
   info <- geno_info_cpp(ptr)
-  structure(list(ptr = ptr, n = length(sidx), p = length(vidx),
-                 snp = snp[vidx],
-                 a1 = a1[vidx], a2 = a2[vidx], sample = iid[sidx],
-                 impute = impute, scale = scale,
-                 center = info$mean, sd = info$sd, threads = threads,
+  n <- as.integer(info$n); p <- as.integer(info$p)
+  for (k in names(cols)) if (length(cols[[k]]) != p) stop("internal: column field ", k, " has the wrong length", call. = FALSE)
+  for (k in names(rows)) if (length(rows[[k]]) != n) stop("internal: row field ", k, " has the wrong length", call. = FALSE)
+  obs <- n - info$n_miss
+  af <- info$obs_sum / (2 * obs)
+  af[obs <= 0] <- NA_real_
+  af[appended] <- NA_real_
+  structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, a1 = cols$a1, a2 = cols$a2, sample = rows$sample,
+                 impute = impute, scale = scale, center = info$mean, sd = info$sd, threads = threads,
                  dosage = isTRUE(info$dosage), dosage_nnz = info$dosage_nnz,
-                 appended = integer(0), cache = new.env(parent = emptyenv())),
+                 appended = as.integer(appended), cache = new.env(parent = emptyenv()),
+                 id = cols$id, chr = cols$chr, pos = cols$pos, row = cols$row, flipped = cols$flipped,
+                 n_miss = info$n_miss, af = af, fid = rows$fid, file = file),
             class = "geno")
+}
+
+.geno_cols <- function(X, j = seq_len(X$p)) {
+  list(snp = X$snp[j], id = X$id[j], chr = X$chr[j], pos = X$pos[j], a1 = X$a1[j], a2 = X$a2[j],
+       row = X$row[j], flipped = X$flipped[j])
 }
 
 #' Append columns to a geno matrix
@@ -141,7 +143,8 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 #' @param M Numeric matrix (or vector) with one row per sample.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `geno` object with `p + ncol(M)` columns; `appended` gives the
-#'   positions of all appended columns and `a1`, `a2` are `NA` there.
+#'   positions of all appended columns and `a1`, `a2`, `id`, `chr`, `pos`, `row`, `flipped`, `af` are `NA`
+#'   there (`n_miss` 0).
 #' @export
 geno_append <- function(X, M, threads = X$threads) {
   if (!inherits(X, "geno")) stop("X must be a geno object.", call. = FALSE)
@@ -152,16 +155,14 @@ geno_append <- function(X, M, threads = X$threads) {
   if (anyDuplicated(c(X$snp, colnames(M)))) stop("Appended column names must differ from the column names of X.", call. = FALSE)
   threads <- .threads(threads)
   ptr <- geno_append_cpp(X$ptr, M, threads)
-  info <- geno_info_cpp(ptr)
   p0 <- X$p; k <- ncol(M); p <- p0 + k
-  out <- X
-  out$ptr <- ptr; out$p <- p
-  out$snp <- c(X$snp, colnames(M))
-  out$a1 <- c(X$a1, rep(NA_character_, k)); out$a2 <- c(X$a2, rep(NA_character_, k))
-  out$center <- info$mean; out$sd <- info$sd
-  out$dosage_nnz <- info$dosage_nnz
-  out$appended <- c(X$appended, p0 + seq_len(k))
-  out$cache <- new.env(parent = emptyenv())
+  pad <- function(x, na) if (is.null(x)) rep(na, p) else c(x, rep(na, k))
+  cols <- list(snp = c(X$snp, colnames(M)), id = pad(X$id, NA_character_), chr = pad(X$chr, NA_character_),
+               pos = pad(X$pos, NA_integer_), a1 = pad(X$a1, NA_character_), a2 = pad(X$a2, NA_character_),
+               row = pad(X$row, NA_integer_), flipped = pad(X$flipped, NA))
+  out <- .geno_new(ptr, cols, list(sample = X$sample, fid = if (is.null(X$fid)) rep(NA_character_, X$n) else X$fid),
+                   impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
+                   appended = c(X$appended, p0 + seq_len(k)))
   A <- geno_dense_cpp(ptr, seq_len(X$n) - 1L, p0 + seq_len(k) - 1L, threads)  # stored values of the appended columns
   K01 <- geno_xtm_cpp(X$ptr, A, threads)
   K <- matrix(0, p, p)
@@ -179,35 +180,6 @@ geno_append <- function(X, M, threads = X$threads) {
   K <- geno_xtx_cpp(X$ptr, as.integer(threads))
   if (!is.null(X$cache)) X$cache$xtx <- K
   K
-}
-
-# fill = list(const = one value per selected variant (NA = built-in fill),
-#             cells = data.frame(j = column, IID, g)), or a genotype_fill() result -> CSR over the selected rows.
-.geno_fill_spec <- function(fill, ids, iid) {
-  p <- length(ids)
-  out <- list(c = numeric(0), ptr = integer(0), i = integer(0), g = numeric(0))
-  if (is.null(fill)) return(out)
-  if (!is.null(fill$snp)) {  # a genotype_fill() result: by variant ID
-    cl <- fill$cells
-    fill <- list(const = fill$snp$fill_const[match(ids, fill$snp$ID)],
-                 cells = if (!is.null(cl) && nrow(cl)) data.frame(j = match(cl$ID, ids), IID = cl$IID, g = cl$g))
-  }
-  if (!is.null(fill$const)) {
-    if (length(fill$const) != p) stop("fill$const needs one value per selected variant.", call. = FALSE)
-    out$c <- as.numeric(fill$const)
-  }
-  cl <- fill$cells
-  if (!is.null(cl) && nrow(cl)) {
-    i <- match(as.character(cl$IID), iid)
-    j <- as.integer(cl$j)
-    ok <- !is.na(i) & !is.na(j)
-    o <- order(j[ok], i[ok])
-    j <- j[ok][o]; i <- i[ok][o]; g <- as.numeric(cl$g)[ok][o]
-    out$ptr <- c(0L, cumsum(tabulate(j, nbins = p)))
-    out$i <- i - 1L
-    out$g <- g
-  }
-  out
 }
 
 .geno_index <- function(x, ids, alt_ids, arg) {
@@ -243,11 +215,13 @@ print.geno <- function(x, ...) {
     cat(sprintf("geno matrix: %d samples x %d variants, dosage (%.1f%% of entries off the hard call), scale = %s (%.2f GB in memory)\n",
                 x$n, x$p, 100 * x$dosage_nnz / (x$n * x$p), x$scale,
                 sum(unlist(geno_info_cpp(x$ptr)[c("bytes_H", "bytes_D")])) / 1e9))
+    if (!is.null(x$n_miss)) cat(sprintf("missing cells: %.0f in %d variants\n", sum(x$n_miss), sum(x$n_miss > 0)))
     return(invisible(x))
   }
   cat(sprintf("geno matrix: %d samples x %d variants, impute = %s, scale = %s (%.2f GB in memory)\n",
               x$n, x$p, x$impute, x$scale,
               sum(unlist(geno_info_cpp(x$ptr)[c("bytes_H", "bytes_D")])) / 1e9))
+  if (!is.null(x$n_miss)) cat(sprintf("missing cells: %.0f in %d variants\n", sum(x$n_miss), sum(x$n_miss > 0)))
   invisible(x)
 }
 
