@@ -2,7 +2,7 @@
 #'
 #' Tests every selected variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
 #' `y ~ covar + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
-#' never formed: the null model `y ~ covar` is fitted once with [stats::glm.fit()], then variants are streamed
+#' never formed: the null model `y ~ covar` is fitted once with [stats::glm()] (which calls glm.fit), and its numeric design (`x = TRUE`: factors and characters expanded by base R with the current contrasts) is the covariate matrix used below; then variants are streamed
 #' from the file in blocks whose size follows from `mem_gb` and reduced in C++ to a few numbers each (the
 #' StreamBlock scheme of GEM 2: two products with fixed n x m matrices per block), so memory is about
 #' `8 n (m1 + m2 + k + S)` bytes shared (the basis `V` and the fixed matrices `L1`, `L2`: `m1 = k S (1 + robust) + S`,
@@ -21,7 +21,7 @@
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
 #' @param data data.frame with one row per sample: `id_col`, the phenotype and covariate columns.
 #' @param pheno Name of the phenotype column. Logistic: coded 0/1 (or 1/2, PLINK case/control).
-#' @param covar Names of covariate columns (numeric, or factors / characters expanded to indicators). An
+#' @param covar Names of covariate columns (numeric, or factors / characters, expanded by base glm()). An
 #'   intercept is always added.
 #' @param family `"gaussian"` (linear) or `"binomial"` (logistic).
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
@@ -58,7 +58,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' Gene-environment interaction of one trait (GEM, linear or logistic)
 #'
 #' For every selected variant fits `y ~ covar + E + int_covar + g + g:E + g:int_covar` (linear or logistic) as GEM
-#' does, from one null-model fit (`y ~ covar + E + int_covar`, [stats::glm.fit()]) and the same streaming as
+#' does, from one null-model fit (`y ~ covar + E + int_covar`, [stats::glm()], design taken from the fit) and the same streaming as
 #' [gwas()]. Several exposures are tested together: `exposure` may name any number of columns, factors and
 #' character columns become indicator columns (one interaction term each), and `int_covar` names covariates whose
 #' interaction with `g` is adjusted for but not tested. `center = TRUE` centres the exposures and interaction
@@ -168,33 +168,40 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     if (length(unique(y)) < 2L) stop("The phenotype has one class only.", call. = FALSE)
   }
 
-  # ---- design: intercept, exposures, interaction covariates (the S interaction columns), then covariates
-  mm <- function(cols) {
-    if (!length(cols)) return(matrix(0, n, 0))
-    for (cl in cols) if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
+  # ---- null model with base glm(): factors and characters are expanded by R's own model.matrix (contrasts
+  # as options("contrasts")), and the numeric design is taken from the fit (x = TRUE). Columns: intercept,
+  # exposures, interaction covariates (the S interaction columns of Z), then the other covariates.
+  for (cl in c(exposure, int_covar, covar))
+    if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
       stop("Column ", cl, " has a single level among the analysed samples.", call. = FALSE)
-    m <- stats::model.matrix(stats::reformulate(sprintf("`%s`", cols)), d)[, -1L, drop = FALSE]
-    storage.mode(m) <- "double"
-    m
-  }
-  Ee <- mm(exposure); Ei <- mm(int_covar); Cv <- mm(covar)
-  Eall <- cbind(Ee, Ei)
-  if (center && ncol(Eall)) Eall <- sweep(Eall, 2L, colMeans(Eall))
-  terms <- colnames(Eall)
-  if (ncol(Eall) && any(apply(Eall, 2L, stats::var) == 0))
-    stop("An exposure or interaction covariate is constant among the analysed samples.", call. = FALSE)
-  X <- cbind(`(Intercept)` = 1, Eall, Cv)
-  S <- 1L + ncol(Eall)
-
+  d[[pheno]] <- y
+  rhs <- c(exposure, int_covar, covar)
+  fml <- stats::reformulate(if (length(rhs)) sprintf("`%s`", rhs) else "1", response = as.name(pheno))
   fam <- if (family == "gaussian") stats::gaussian() else stats::binomial()
-  fit <- stats::glm.fit(X, y, family = fam)
+  fit <- stats::glm(fml, family = fam, data = d, x = TRUE)
   if (!fit$converged) warning("The null model did not converge.", call. = FALSE)
+  X <- fit$x
+  asg <- attr(X, "assign")
+  lab <- gsub("`", "", attr(stats::terms(fit), "term.labels"))
+  cols_of <- function(v) which(asg %in% match(v, lab))
+  ie <- cols_of(exposure); ii <- cols_of(int_covar)
+  X <- X[, c(1L, ie, ii, setdiff(seq_len(ncol(X)), c(1L, ie, ii))), drop = FALSE]
+  attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
+  S <- 1L + length(ie) + length(ii)
+  if (S > 1L) {
+    E <- X[, 2:S, drop = FALSE]
+    if (any(apply(E, 2L, stats::var) == 0))
+      stop("An exposure or interaction covariate is constant among the analysed samples.", call. = FALSE)
+    # centring changes the parametrisation only (the null fit and its residuals are the same)
+    if (center) X[, 2:S] <- sweep(E, 2L, colMeans(E))
+  }
+  terms <- colnames(X)[seq_len(S)[-1L]]
   mu <- fit$fitted.values
   resid <- y - mu
   w <- if (family == "binomial") mu * (1 - mu) else numeric(0)
 
   res <- assoc_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
-                          as.integer(srow - 1L), X, S, ncol(Ee), resid, w, robust, threads, mem_gb,
+                          as.integer(srow - 1L), X, S, length(ie), resid, w, robust, threads, mem_gb,
                           as.integer(block))
   out <- var[vrow, list(CHR, POS, ID, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
@@ -203,5 +210,5 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
                explicit_projection = res$explicit, monomorphic = sum(res$status == 1L),
                singular = sum(res$status == 2L),
                skipped_multiallelic = skipped)
-  list(res = res, out = out, info = info, terms = terms, n_exp = ncol(Ee))
+  list(res = res, out = out, info = info, terms = terms, n_exp = length(ie))
 }
