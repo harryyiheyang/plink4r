@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 #ifdef _OPENMP
@@ -35,15 +34,8 @@ constexpr int kRowChunk = 2048;          // rows of G expanded at a time (multip
 constexpr int kBlockMax = 4096;          // largest automatic block per thread
 constexpr double kKappaMax = 1e4;        // explicit projection when Z_j'WZ_j / A_jj exceeds this
 constexpr double kRankTol = 1.4901161193847656e-08;  // sqrt(DBL_EPSILON), as mgcv
-constexpr std::uint16_t kDosMiss = 65535;
+constexpr std::uint16_t kDosMiss = plink4r::PgenFile::kMissing;
 
-inline int tid() {
-#ifdef _OPENMP
-  return omp_get_thread_num();
-#else
-  return 0;
-#endif
-}
 
 inline int pair_index(int S, int j, int l) {
   if (j > l) std::swap(j, l);
@@ -55,19 +47,6 @@ inline double dot(const double* a, const double* b, int len) {
   for (int i = 0; i < len; ++i) s += a[i] * b[i];
   return s;
 }
-
-// BED byte (4 samples, codes 00 = two A1, 01 missing, 10 one A1, 11 none) -> PGEN-style byte (A1 count, 3 missing)
-struct BedTable {
-  unsigned char t[256];
-  BedTable() {
-    static const unsigned char m[4] = {2, 3, 1, 0};
-    for (int b = 0; b < 256; ++b) {
-      unsigned v = 0;
-      for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
-      t[b] = static_cast<unsigned char>(v);
-    }
-  }
-};
 
 // Null-model quantities shared by all threads.
 struct Pre {
@@ -164,7 +143,6 @@ struct Worker {
   std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
   std::vector<double> mean, G, G2, C1, C2, z, Z, Zt;
   std::vector<int> mono;
-  std::vector<unsigned char> raw;  // BED row
   void init(const Pre& pre, int capacity, bool dos) {
     cap = capacity; n = pre.n; dosage = dos;
     sb = (static_cast<std::size_t>(n) + 3) / 4;
@@ -298,7 +276,9 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
 
   std::unique_ptr<plink4r::PgenFile> pf;
-  if (!bed) pf.reset(new plink4r::PgenFile(path, n_raw, std::vector<int>(allele_ct.begin(), allele_ct.end()), T));
+  std::unique_ptr<plink4r::BedFile> bf;
+  if (bed) bf.reset(new plink4r::BedFile(path, n_raw, allele_ct.size(), T));  // allele_ct: one entry per .bim row
+  else pf.reset(new plink4r::PgenFile(path, n_raw, std::vector<int>(allele_ct.begin(), allele_ct.end()), T));
   const bool dos = pf && pf->dosage();
   const std::size_t rawb = (static_cast<std::size_t>(n_raw) + 3) / 4;
 
@@ -347,16 +327,6 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
     abuf[t].resize(static_cast<std::size_t>(b) * S * S);
     if (robust) bbuf[t].resize(static_cast<std::size_t>(b) * S * S);
   }
-  std::vector<std::ifstream> bedf;
-  if (bed) {
-    bedf.resize(T);
-    for (int t = 0; t < T; ++t) {
-      bedf[t].open(path, std::ios::binary);
-      if (!bedf[t]) Rcpp::stop("Cannot open " + path);
-      wk[t].raw.resize(rawb);
-    }
-  }
-  static const BedTable BT;
   std::vector<int> bad(T, -1);
   int nexp = 0;
 
@@ -365,7 +335,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
 #pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp)
 #endif
     for (int t = 0; t < T; ++t) {
-      const int th = tid();
+      const int th = plink4r::thread_id();
       Worker& W = wk[th];
       const long long j0 = c0 + static_cast<long long>(t) * b;
       if (j0 >= p) continue;
@@ -387,24 +357,12 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
           }
         } else {
           const unsigned char* gv;
-          if (bed) {
-            std::ifstream& f = bedf[th];
-            f.seekg(3 + static_cast<std::streamoff>(vi[j]) * static_cast<std::streamoff>(rawb));
-            f.read(reinterpret_cast<char*>(W.raw.data()), static_cast<std::streamsize>(rawb));
-            if (!f) { bad[th] = static_cast<int>(j); W.mono[s] = 1; f.clear(); continue; }
-            for (std::size_t y = 0; y < rawb; ++y) W.raw[y] = BT.t[W.raw[y]];
-            gv = W.raw.data();
-          } else {
-            gv = pf->read(static_cast<std::size_t>(vi[j]), th);
-            if (!gv) { bad[th] = static_cast<int>(j); W.mono[s] = 1; continue; }
-          }
+          gv = bed ? bf->read_counts(static_cast<std::size_t>(vi[j]), th) : pf->read(static_cast<std::size_t>(vi[j]), th);
+          if (!gv) { bad[th] = static_cast<int>(j); W.mono[s] = 1; continue; }
           unsigned char* dst = &W.g8[s * W.sb];
           plink4r::compact_genovec(gv, si.data(), ns, ident, dst);
-          long long cnt[4] = {0, 0, 0, 0};
-          for (std::size_t y = 0; y < W.sb; ++y) {
-            const unsigned v = dst[y];
-            ++cnt[v & 3]; ++cnt[(v >> 2) & 3]; ++cnt[(v >> 4) & 3]; ++cnt[v >> 6];
-          }
+          long long cnt[4];
+          plink4r::count_codes(dst, W.sb, cnt);
           cnt[0] -= static_cast<long long>(W.sb * 4 - ns);  // padding is code 0
           no = static_cast<double>(cnt[0] + cnt[1] + cnt[2]);
           sum = static_cast<double>(cnt[1] + 2 * cnt[2]);

@@ -22,13 +22,6 @@ using Eigen::MatrixXd;
 using Eigen::MatrixXf;
 
 namespace {
-inline int tidc() {
-#ifdef _OPENMP
-  return omp_get_thread_num();
-#else
-  return 0;
-#endif
-}
 inline double secsc(std::chrono::steady_clock::time_point a) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
 }
@@ -119,12 +112,12 @@ Rcpp::List cor_pgen_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector 
   for (int j = 0; j < p; ++j) {
     std::uint16_t* dst = &G[static_cast<std::size_t>(j) * ns];
     if (dos) {
-      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), tidc());
-      if (!d) { bad[tidc()] = j; continue; }
+      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!d) { bad[plink4r::thread_id()] = j; continue; }
       for (int i = 0; i < ns; ++i) dst[i] = d[si[i]];
     } else {
-      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), tidc());
-      if (!gv) { bad[tidc()] = j; continue; }
+      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!gv) { bad[plink4r::thread_id()] = j; continue; }
       static const std::uint16_t code[4] = {0, 16384, 32768, plink4r::PgenFile::kMissing};
       for (int i = 0; i < ns; ++i) { const int r = si[i]; dst[i] = code[(gv[r >> 2] >> (2 * (r & 3))) & 3u]; }
     }
@@ -143,31 +136,19 @@ Rcpp::List cor_bed_cpp(const std::string& bed, int n_raw, Rcpp::IntegerVector va
   const int T = plink4r::resolve_threads(threads);
   const auto t0 = std::chrono::steady_clock::now();
   const int p = var_idx.size(), ns = sample_idx.size();
-  const std::size_t bpv = (static_cast<std::size_t>(n_raw) + 3) / 4;
   std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
-  {
-    std::ifstream f(bed.c_str(), std::ios::binary);
-    unsigned char mg[3];
-    if (!f.read(reinterpret_cast<char*>(mg), 3) || mg[0] != 0x6c || mg[1] != 0x1b || mg[2] != 0x01) Rcpp::stop("not a SNP-major PLINK1 .bed: " + bed);
-  }
+  plink4r::BedFile bf(bed, static_cast<std::size_t>(n_raw), 0, T);
   std::vector<std::uint16_t> G(static_cast<std::size_t>(p) * ns);
   std::vector<int> bad(T, -1);
   static const std::uint16_t code[4] = {32768, plink4r::PgenFile::kMissing, 16384, 0};
 #ifdef _OPENMP
-#pragma omp parallel num_threads(T)
+#pragma omp parallel for schedule(static) num_threads(T)
 #endif
-  {
-    std::ifstream f(bed.c_str(), std::ios::binary);
-    std::vector<unsigned char> buf(bpv);
-#ifdef _OPENMP
-#pragma omp for schedule(static)
-#endif
-    for (int j = 0; j < p; ++j) {
-      f.seekg(static_cast<std::streamoff>(3 + static_cast<std::size_t>(vi[j]) * bpv));
-      if (!f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(bpv))) { bad[tidc()] = j; f.clear(); continue; }
-      std::uint16_t* dst = &G[static_cast<std::size_t>(j) * ns];
-      for (int i = 0; i < ns; ++i) { const int r = si[i]; dst[i] = code[(buf[r >> 2] >> (2 * (r & 3))) & 3u]; }
-    }
+  for (int j = 0; j < p; ++j) {
+    const unsigned char* buf = bf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+    if (!buf) { bad[plink4r::thread_id()] = j; continue; }
+    std::uint16_t* dst = &G[static_cast<std::size_t>(j) * ns];
+    for (int i = 0; i < ns; ++i) { const int r = si[i]; dst[i] = code[(buf[r >> 2] >> (2 * (r & 3))) & 3u]; }
   }
   for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop(".bed read failed at SNP %d", bad[t] + 1);
   std::vector<double> afv(af.begin(), af.end());
@@ -192,13 +173,13 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
   for (int j = 0; j < p; ++j) {
     long long c = 0; double s = 0;
     if (dos) {
-      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), tidc());
-      if (!d) { bad[tidc()] = j; continue; }
+      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!d) { bad[plink4r::thread_id()] = j; continue; }
       for (int i = 0; i < ns; ++i) { const std::uint16_t v = d[si[i]]; if (v != plink4r::PgenFile::kMissing) { ++c; s += v; } }
       s /= 16384.0;
     } else {
-      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), tidc());
-      if (!gv) { bad[tidc()] = j; continue; }
+      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!gv) { bad[plink4r::thread_id()] = j; continue; }
       for (int i = 0; i < ns; ++i) { const int r = si[i]; const unsigned int x = (gv[r >> 2] >> (2 * (r & 3))) & 3u; if (x != 3u) { ++c; s += x; } }
     }
     nobs[j] = static_cast<double>(c); sum[j] = s;

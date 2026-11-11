@@ -6,7 +6,11 @@
 #define PLINK4R_PGEN_READER_H
 
 #include <Rcpp.h>
+#include <fstream>
 #include <memory>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <string>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +18,15 @@
 #include "pgenlib/pgenlib_read.h"
 
 namespace plink4r {
+
+// OpenMP thread number inside a parallel region (0 without OpenMP): the package's one copy.
+inline int thread_id() {
+#ifdef _OPENMP
+  return omp_get_thread_num();
+#else
+  return 0;
+#endif
+}
 
 struct PgenHeader {
   plink2::PgenFileInfo info;
@@ -191,6 +204,66 @@ inline void count_genovec(const unsigned char* g, std::size_t sb, long long* mis
   for (std::size_t y = 0; y < sb; ++y) { m += T.miss[g[y]]; a += T.alt[g[y]]; }
   *miss = m; *alt = a;
 }
+
+// Codes 0/1/2/3 of a compacted genovec of sb bytes (padding is code 0): cnt[c] = calls with code c.
+inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]) {
+  cnt[0] = cnt[1] = cnt[2] = cnt[3] = 0;
+  for (std::size_t y = 0; y < sb; ++y) {
+    const unsigned v = g[y];
+    ++cnt[v & 3u]; ++cnt[(v >> 2) & 3u]; ++cnt[(v >> 4) & 3u]; ++cnt[v >> 6];
+  }
+}
+
+// PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
+// a variant (all samples, file order) in the .bed coding (00 two A1, 01 missing, 10 one A1, 11 no A1);
+// read_counts() the same row recoded as a genovec counting A1 (codes 0/1/2, 3 missing), so the PGEN helpers
+// (compact_genovec, count_codes) apply. The package's one .bed reader.
+class BedFile {
+public:
+  BedFile(const std::string& path, std::size_t n, std::size_t m, int threads)
+    : path_(path), stride_((n + 3) / 4) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) Rcpp::stop("Cannot open BED file: " + path);
+    const std::streamoff size = f.tellg();
+    if (m > 0 && (size < 0 || static_cast<std::uint64_t>(size) != 3 + static_cast<std::uint64_t>(m) * stride_))
+      Rcpp::stop("BED size does not match its BIM and FAM files: " + path);
+    f.seekg(0);
+    unsigned char h[3];
+    if (!f.read(reinterpret_cast<char*>(h), 3) || h[0] != 0x6c || h[1] != 0x1b || h[2] != 0x01)
+      Rcpp::stop("BED must be a PLINK SNP-major BED file: " + path);
+    for (int t = 0; t < std::max(1, threads); ++t) {
+      streams_.emplace_back(new std::ifstream(path, std::ios::binary));
+      rows_.emplace_back(stride_);
+    }
+  }
+  std::size_t stride() const { return stride_; }
+  const unsigned char* read(std::size_t variant, int thread) {
+    std::ifstream& f = *streams_[thread];
+    f.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variant) * stride_));
+    if (!f.read(reinterpret_cast<char*>(rows_[thread].data()), static_cast<std::streamsize>(stride_))) {
+      f.clear();
+      return nullptr;
+    }
+    return rows_[thread].data();
+  }
+  const unsigned char* read_counts(std::size_t variant, int thread) {
+    struct Tab { unsigned char t[256];
+      Tab() { static const unsigned char m[4] = {2, 3, 1, 0};
+        for (int b = 0; b < 256; ++b) { unsigned v = 0;
+          for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
+          t[b] = static_cast<unsigned char>(v); } } };
+    static const Tab T;
+    unsigned char* r = const_cast<unsigned char*>(read(variant, thread));
+    if (!r) return nullptr;
+    for (std::size_t y = 0; y < stride_; ++y) r[y] = T.t[r[y]];
+    return r;
+  }
+private:
+  std::string path_;
+  std::size_t stride_;
+  std::vector<std::unique_ptr<std::ifstream>> streams_;
+  std::vector<std::vector<unsigned char>> rows_;
+};
 
 }  // namespace plink4r
 #endif

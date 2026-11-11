@@ -5,8 +5,10 @@
 #' never formed: the null model `y ~ covar` is fitted once with [stats::glm.fit()], then variants are streamed
 #' from the file in blocks whose size follows from `mem_gb` and reduced in C++ to a few numbers each (the
 #' StreamBlock scheme of GEM 2: two products with fixed n x m matrices per block), so memory is about
-#' `8 n (k + 4)` bytes for the covariate basis plus, per thread, `n / 4` bytes per variant of the block
-#' (2-bit calls; `2 n` for a PGEN with dosages).
+#' `8 n (m1 + m2 + k + S)` bytes shared (the basis `V` and the fixed matrices `L1`, `L2`: `m1 = k S (1 + robust) + S`,
+#' `m2 = S (S + 1) / 2 (1 + robust)` columns, `k` covariate rank, `S` = 1 + interaction terms; e.g. 0.7 GB for
+#' n = 500,000, k = 20, S = 4, robust) plus, per thread, `n / 4` bytes per variant of the block (2-bit calls;
+#' `2 n` for a PGEN with dosages) and two 2048-row double chunks.
 #'
 #' Linear: `BETA`, `SE`, `T` and `P` are those of `lm(y ~ covar + g)` (t distribution, `n - k - 1` degrees of
 #' freedom, `k` the rank of the covariates with the intercept), with a missing call replaced by the variant's
@@ -31,8 +33,9 @@
 #' @return data.table with one row per variant: `CHR`, `POS`, `ID`, `A1` (counted allele: ALT of a PGEN, .bim
 #'   column 5 of a BED), `A2`, `N` (non-missing calls), `A1_FREQ`, `BETA`, `SE`, `T` (linear) or `Z`
 #'   (logistic), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. Variants with no variation among the analysed
-#'   samples have `NA` statistics. Attribute `info`: samples, covariate rank, block size, threads, memory budget,
-#'   SIMD set, variants recomputed by explicit projection, skipped variants.
+#'   samples (`monomorphic` in `info`) or a singular `Z'WZ` (`singular`) have `NA` statistics. Attribute `info`:
+#'   samples, covariate rank, block size, threads, memory budget, SIMD set, variants recomputed by explicit
+#'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L) {
@@ -168,6 +171,8 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   # ---- design: intercept, exposures, interaction covariates (the S interaction columns), then covariates
   mm <- function(cols) {
     if (!length(cols)) return(matrix(0, n, 0))
+    for (cl in cols) if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
+      stop("Column ", cl, " has a single level among the analysed samples.", call. = FALSE)
     m <- stats::model.matrix(stats::reformulate(sprintf("`%s`", cols)), d)[, -1L, drop = FALSE]
     storage.mode(m) <- "double"
     m
@@ -196,6 +201,7 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   info <- list(samples = n, covariate_rank = res$rank, null_converged = fit$converged, block = res$block,
                threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
                explicit_projection = res$explicit, monomorphic = sum(res$status == 1L),
+               singular = sum(res$status == 2L),
                skipped_multiallelic = skipped)
   list(res = res, out = out, info = info, terms = terms, n_exp = ncol(Ee))
 }

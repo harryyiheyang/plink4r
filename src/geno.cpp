@@ -433,17 +433,8 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
                        Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
   threads = resolve_threads(threads);
   const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
-  const std::size_t stride = (static_cast<std::size_t>(n_total) + 3) / 4;
-  std::ifstream input(path, std::ios::binary | std::ios::ate);
-  if (!input) Rcpp::stop("Cannot open BED file: " + path);
-  const std::streamoff actual = input.tellg();
-  if (actual < 0 || static_cast<std::uint64_t>(actual) != 3 + static_cast<std::uint64_t>(m_total) * stride)
-    Rcpp::stop("BED size does not match its BIM and FAM files: " + path);
-  input.seekg(0);
-  unsigned char header[3];
-  input.read(reinterpret_cast<char*>(header), 3);
-  if (header[0] != 0x6c || header[1] != 0x1b || header[2] != 0x01)
-    Rcpp::stop("BED must be a PLINK SNP-major BED file: " + path);
+  plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
+  const std::size_t stride = bf.stride();
 
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
@@ -457,9 +448,9 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
     for (std::size_t k = 0; k < count; ++k) {
-      input.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variants[g0 + k]) * stride));
-      input.read(reinterpret_cast<char*>(buffer.data() + k * stride), static_cast<std::streamsize>(stride));
-      if (!input) Rcpp::stop("Could not read BED file: " + path);
+      const unsigned char* row = bf.read(static_cast<std::size_t>(variants[g0 + k]), 0);
+      if (!row) Rcpp::stop("Could not read BED file: " + path);
+      std::memcpy(buffer.data() + k * stride, row, stride);
     }
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {

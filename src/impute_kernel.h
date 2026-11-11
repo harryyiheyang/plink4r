@@ -56,13 +56,7 @@ using Eigen::VectorXf;
 inline double secs(std::chrono::steady_clock::time_point a) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
 }
-inline int tid() {
-#ifdef _OPENMP
-  return omp_get_thread_num();
-#else
-  return 0;
-#endif
-}
+inline int tid() { return thread_id(); }
 
 // Size of the current team (read-only; may be below num_threads(T) when the runtime limits threads).
 inline int team() {
