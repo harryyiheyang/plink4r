@@ -194,17 +194,6 @@ inline bool identity_samples(const int* sidx, int ns, int n_raw) {
   return true;
 }
 
-// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
-inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
-  struct Tab { unsigned char miss[256], alt[256];
-    Tab() { for (int b = 0; b < 256; ++b) { miss[b] = alt[b] = 0;
-      for (int k = 0; k < 4; ++k) { const int c = (b >> (2 * k)) & 3; if (c == 3) ++miss[b]; else alt[b] += c; } } } };
-  static const Tab T;
-  long long m = 0, a = 0;
-  for (std::size_t y = 0; y < sb; ++y) { m += T.miss[g[y]]; a += T.alt[g[y]]; }
-  *miss = m; *alt = a;
-}
-
 // Codes 0/1/2/3 of a compacted genovec of sb bytes (padding is code 0): cnt[c] = calls with code c.
 inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]) {
   cnt[0] = cnt[1] = cnt[2] = cnt[3] = 0;
@@ -212,6 +201,13 @@ inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]
     const unsigned v = g[y];
     ++cnt[v & 3u]; ++cnt[(v >> 2) & 3u]; ++cnt[(v >> 4) & 3u]; ++cnt[v >> 6];
   }
+}
+
+// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
+inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
+  long long cnt[4];
+  count_codes(g, sb, cnt);
+  *miss = cnt[3]; *alt = cnt[1] + 2 * cnt[2];
 }
 
 // PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
@@ -237,7 +233,21 @@ public:
     }
   }
   std::size_t stride() const { return stride_; }
-  const unsigned char* read(std::size_t variant, int thread) {
+  const unsigned char* read(std::size_t variant, int thread) { return load(variant, thread); }
+  const unsigned char* read_counts(std::size_t variant, int thread) {
+    struct Tab { unsigned char t[256];
+      Tab() { static const unsigned char m[4] = {2, 3, 1, 0};
+        for (int b = 0; b < 256; ++b) { unsigned v = 0;
+          for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
+          t[b] = static_cast<unsigned char>(v); } } };
+    static const Tab T;
+    unsigned char* r = load(variant, thread);
+    if (!r) return nullptr;
+    for (std::size_t y = 0; y < stride_; ++y) r[y] = T.t[r[y]];
+    return r;
+  }
+private:
+  unsigned char* load(std::size_t variant, int thread) {
     std::ifstream& f = *streams_[thread];
     f.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variant) * stride_));
     if (!f.read(reinterpret_cast<char*>(rows_[thread].data()), static_cast<std::streamsize>(stride_))) {
@@ -246,19 +256,6 @@ public:
     }
     return rows_[thread].data();
   }
-  const unsigned char* read_counts(std::size_t variant, int thread) {
-    struct Tab { unsigned char t[256];
-      Tab() { static const unsigned char m[4] = {2, 3, 1, 0};
-        for (int b = 0; b < 256; ++b) { unsigned v = 0;
-          for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
-          t[b] = static_cast<unsigned char>(v); } } };
-    static const Tab T;
-    unsigned char* r = const_cast<unsigned char*>(read(variant, thread));
-    if (!r) return nullptr;
-    for (std::size_t y = 0; y < stride_; ++y) r[y] = T.t[r[y]];
-    return r;
-  }
-private:
   std::string path_;
   std::size_t stride_;
   std::vector<std::unique_ptr<std::ifstream>> streams_;
