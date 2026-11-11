@@ -279,7 +279,7 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA, doub
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
 // var_idx, sample_idx: 0-based file rows. X: n x kX covariates, columns 0..S-1 = intercept and the
-// interaction variables. resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
+// interaction variables (the n_exp exposures first, then the interaction covariates). resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
 // block: variants per thread (0 = from mem_gb). Returns per variant (rows) the statistics below; beta, se in
 // columns of Z = [g, g e_1, ...]; status 0 ok, 1 monomorphic / all missing.
 // [[Rcpp::export]]
