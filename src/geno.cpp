@@ -58,6 +58,7 @@ struct Geno {
   std::vector<DCol> D;
   std::vector<double> dsum, dsq, dhd;  // column sums of D, D^2 and H D
   std::vector<double> mu, sd;   // column mean and sd (n - 1) of X = H + D
+  std::vector<double> nmiss;    // missing calls per variant before filling
   std::size_t dnnz() const {
     std::size_t s = 0;
     for (const DCol& c : D) s += c.q.size();
@@ -196,13 +197,21 @@ void plane_stats(Geno& g, std::size_t j) {
 // (NaN = the built-in median / mean) and per-cell values in CSR form, cells of
 // variant j at ptr[j]..ptr[j+1] with selected-row index ci (ascending) and value cg.
 // A missing cell takes its per-cell value when given, else the constant.
+// af[j] (finite) anchors the fill instead (scheme 3): the missing calls of
+// variant j all take c = (2 n af - sum of observed) / (number missing),
+// clipped to [0, 2], so the filled column has mean 2 af.
 struct FillSpec {
-  std::vector<double> c;
+  std::vector<double> c, af;
   std::vector<int> ptr, ci;
   std::vector<double> cg;
   bool has_c(std::size_t j) const { return !c.empty() && std::isfinite(c[j]); }
   bool has_cells() const { return !ptr.empty(); }
+  bool has_af(std::size_t j) const { return !af.empty() && std::isfinite(af[j]); }
 };
+
+inline double anchor_fill(double af, double n, double obs_sum, double miss) {
+  return std::min(2.0, std::max(0.0, (2.0 * n * af - obs_sum) / miss));
+}
 
 // Fill of missing row i of variant j, cursor k walking the variant's cells (rows ascending).
 inline double cell_fill(const FillSpec* fs, std::size_t j, std::size_t i, int& k, double f) {
@@ -223,8 +232,9 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
   std::int64_t cm = 0;
   for (std::size_t w = 0; w < W; ++w) cm += popcount64(miss[w]);
   const std::int64_t obs = static_cast<std::int64_t>(n) - cm;
+  g.nmiss[j] = static_cast<double>(cm);
   DBuilder db(g, j);
-  if (cm && (obs || (fs && (fs->has_c(j) || fs->has_cells())))) {
+  if (cm && (obs || (fs && (fs->has_c(j) || fs->has_cells() || fs->has_af(j))))) {
     std::int64_t c1 = 0, c2 = 0;
     for (std::size_t w = 0; w < W; ++w) {
       c1 += popcount64(lo[w]);
@@ -234,6 +244,8 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
     double f = !obs ? 0.0 : g.mean ? static_cast<double>(c1 + 2 * c2) / static_cast<double>(obs)
       : (2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0));
     if (fs && fs->has_c(j)) f = fs->c[j];
+    else if (fs && fs->has_af(j))
+      f = anchor_fill(fs->af[j], static_cast<double>(n), static_cast<double>(c1 + 2 * c2), static_cast<double>(cm));
     int k = fs && fs->has_cells() ? fs->ptr[j] : 0;
     fill_missing(g, j, miss, [fs, j, f, &k](std::size_t i) { return cell_fill(fs, j, i, k, f); }, db);
   }
@@ -252,6 +264,7 @@ void init_geno(Geno& g, std::size_t n, std::size_t p, bool mean) {
   g.dsum.assign(p, 0.0);
   g.dsq.assign(p, 0.0);
   g.dhd.assign(p, 0.0);
+  g.nmiss.assign(p, 0.0);
 }
 
 void finish_stats(Geno& g) {
@@ -311,10 +324,13 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
         range = 1;
         continue;
       }
+      g.nmiss[j] = static_cast<double>(miss);
       unsigned int hfill = 0;
       int qfill = 0;
       double fmean = miss < n ? static_cast<double>(obs_sum) / 16384.0 / static_cast<double>(n - miss) : 0.0;
       if (fs && fs->has_c(j)) fmean = fs->c[j];
+      else if (miss && fs && fs->has_af(j))
+        fmean = anchor_fill(fs->af[j], static_cast<double>(n), static_cast<double>(obs_sum) / 16384.0, static_cast<double>(miss));
       if (miss) quantize_fill(fmean, hfill, qfill);
       const bool percell = miss && fs && fs->has_cells() && fs->ptr[j + 1] > fs->ptr[j];
       int kc = percell ? fs->ptr[j] : 0;
@@ -409,8 +425,13 @@ void add_d_xtx(const Geno& g, double* out, int threads) {
 }
 
 FillSpec make_fill(const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector& cell_ptr,
-                   const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, std::size_t p) {
+                   const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g,
+                   const Rcpp::NumericVector& fill_af, std::size_t p) {
   FillSpec fs;
+  if (fill_af.size()) {
+    if (static_cast<std::size_t>(fill_af.size()) != p) Rcpp::stop("af must have one value per variant.");
+    fs.af.assign(fill_af.begin(), fill_af.end());
+  }
   if (fill_c.size()) {
     if (static_cast<std::size_t>(fill_c.size()) != p) Rcpp::stop("fill constants must have one value per variant.");
     fs.c.assign(fill_c.begin(), fill_c.end());
@@ -430,9 +451,9 @@ FillSpec make_fill(const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector&
 SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
                        const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
                        bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr,
-                       Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
+                       Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af) {
   threads = resolve_threads(threads);
-  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
+  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, fill_af, variants.size());
   plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
   const std::size_t stride = bf.stride();
 
@@ -469,9 +490,9 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
 SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct,
                         const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
                         bool mean, int threads, Rcpp::NumericVector fill_c, Rcpp::IntegerVector cell_ptr,
-                        Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g) {
+                        Rcpp::IntegerVector cell_i, Rcpp::NumericVector cell_g, Rcpp::NumericVector fill_af) {
   threads = resolve_threads(threads);
-  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, variants.size());
+  const FillSpec fs = make_fill(fill_c, cell_ptr, cell_i, cell_g, fill_af, variants.size());
   PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
@@ -520,6 +541,7 @@ Rcpp::List geno_info_cpp(SEXP ptr) {
                             Rcpp::Named("p") = static_cast<double>(g->p),
                             Rcpp::Named("mean") = g->mu,
                             Rcpp::Named("sd") = g->sd,
+                            Rcpp::Named("n_miss") = g->nmiss,
                             Rcpp::Named("dosage") = g->dosage,
                             Rcpp::Named("dosage_nnz") = static_cast<double>(g->dnnz()),
                             Rcpp::Named("bytes_H") = bytes_h(*g),
@@ -656,6 +678,7 @@ SEXP geno_append_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
     g->dsum[j] = a->dsum[j];
     g->dsq[j] = a->dsq[j];
     g->dhd[j] = a->dhd[j];
+    g->nmiss[j] = a->nmiss[j];
   }
   #pragma omp parallel for num_threads(threads) schedule(static)
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(k); ++cc) {

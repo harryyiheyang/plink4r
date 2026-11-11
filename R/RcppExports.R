@@ -5,24 +5,12 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
-cor_pgen_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, af, threads) {
-    .Call(`_plink4r_cor_pgen_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, af, threads)
+geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af) {
+    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af)
 }
 
-cor_bed_cpp <- function(bed, n_raw, var_idx, sample_idx, af, threads) {
-    .Call(`_plink4r_cor_bed_cpp`, bed, n_raw, var_idx, sample_idx, af, threads)
-}
-
-pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads) {
-    .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
-}
-
-geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g) {
-    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g)
-}
-
-geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g) {
-    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g)
+geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af) {
+    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads, fill_c, cell_ptr, cell_i, cell_g, fill_af)
 }
 
 geno_info_cpp <- function(ptr) {
@@ -83,6 +71,10 @@ simd_isa_cpp <- function() {
 
 genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
     .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+}
+
+pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads) {
+    .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {

@@ -75,3 +75,37 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                                   Rcpp::_["solve"] = R.t_solve, Rcpp::_["anchor"] = t_anchor,
                                                   Rcpp::_["total"] = ik::secs(t_all)));
 }
+
+// Observed calls and ALT sum (hard calls, or dosages when the PGEN holds them) of each variant over the selected
+// samples, for genotype_fill. var_idx / sample_idx 0-based.
+// [[Rcpp::export]]
+Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx,
+                          Rcpp::IntegerVector sample_idx, int threads) {
+  const int T = plink4r::resolve_threads(threads);
+  const int p = var_idx.size(), ns = sample_idx.size();
+  std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
+  std::vector<int> act(allele_ct.begin(), allele_ct.end());
+  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
+  const bool dos = pf.dosage();
+  std::vector<double> nobs(p), sum(p);
+  std::vector<int> bad(T, -1);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 8) num_threads(T)
+#endif
+  for (int j = 0; j < p; ++j) {
+    long long c = 0; double s = 0;
+    if (dos) {
+      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!d) { bad[plink4r::thread_id()] = j; continue; }
+      for (int i = 0; i < ns; ++i) { const std::uint16_t v = d[si[i]]; if (v != plink4r::PgenFile::kMissing) { ++c; s += v; } }
+      s /= 16384.0;
+    } else {
+      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
+      if (!gv) { bad[plink4r::thread_id()] = j; continue; }
+      for (int i = 0; i < ns; ++i) { const int r = si[i]; const unsigned int x = (gv[r >> 2] >> (2 * (r & 3))) & 3u; if (x != 3u) { ++c; s += x; } }
+    }
+    nobs[j] = static_cast<double>(c); sum[j] = s;
+  }
+  for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop("PGEN read failed at SNP %d", bad[t] + 1);
+  return Rcpp::List::create(Rcpp::_["n_obs"] = Rcpp::wrap(nobs), Rcpp::_["sum"] = Rcpp::wrap(sum), Rcpp::_["dosage"] = dos);
+}
