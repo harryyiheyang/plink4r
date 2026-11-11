@@ -9,7 +9,7 @@ Description: Reads PLINK BED / PGEN genotypes with the bundled pgenlib into a co
     with OpenMP parallelism. Summary-statistics imputation is ported from SBayesRC.QC2.
 License: GPL (>= 3)
 Encoding: UTF-8
-Imports: data.table, arrow, Rcpp, stats
+Imports: data.table, arrow, Rcpp, stats, utils
 LinkingTo: Rcpp, RcppEigen
 NeedsCompilation: yes
 SystemRequirements: GNU make

@@ -14,12 +14,16 @@
   pvar
 }
 
-# IIDs of a .psam, in file order (the #IID or IID column, read as character).
-.psam_iid <- function(pfile) {
+# IIDs of a .psam, in file order (the #IID or IID column, read as character); with fid, list(iid, fid), fid "0"
+# when the .psam has no FID column.
+.psam_ids <- function(pfile, fid = FALSE) {
   psam <- data.table::fread(paste0(pfile, ".psam"), colClasses = "character")
   col <- intersect(c("#IID", "IID"), names(psam))
   if (!length(col)) stop(pfile, ".psam has no IID column", call. = FALSE)
-  psam[[col[1L]]]
+  iid <- psam[[col[1L]]]
+  if (!fid) return(iid)
+  fc <- intersect(c("#FID", "FID"), names(psam))
+  list(iid = iid, fid = if (length(fc)) psam[[fc[1L]]] else rep("0", length(iid)))
 }
 
 # 1-based .psam rows of `sample` (all rows when NULL), in the order of `sample`.

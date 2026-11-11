@@ -32,7 +32,7 @@ summarystat_tidy <- function(gwas, ref, build = 37, freq_thresh = 0.2, N_sd_rang
   if (!has_r2) g[, r2 := 1]
   g[, r2 := as.numeric(r2)]
   data.table::setnames(g, bp, "BP")
-  for (v in c("CHR", "BP")) data.table::set(g, j = v, value = as.integer(g[[v]]))
+  g[, `:=`(CHR = sub("^chr", "", as.character(CHR), ignore.case = TRUE), BP = as.integer(BP))]
   for (v in c("A1Freq", "BETA", "SE", "N")) data.table::set(g, j = v, value = as.numeric(g[[v]]))
   g[, `:=`(A1 = toupper(A1), A2 = toupper(A2))]
   message(nrow(g), " SNPs in summary data")
@@ -45,13 +45,13 @@ summarystat_tidy <- function(gwas, ref, build = 37, freq_thresh = 0.2, N_sd_rang
   if (!bcol %in% names(r)) stop("the panel has no ", bcol, " column: it supports only ",
                                 paste(intersect(c("bp37", "bp38"), names(r)), collapse = ", "), call. = FALSE)
   r <- .with_bp(r)[, .(ID, chr, bp37, bp38, ref, alt, AF_PanUKB, block, ld_index)]
-  r[, BP := if (build == 37) bp37 else bp38]
-  same <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("chr", "BP", "alt", "ref"))
-  swap <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("chr", "BP", "ref", "alt"))
+  r[, `:=`(BP = if (build == 37) bp37 else bp38, CHRc = as.character(chr))]
+  same <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("CHRc", "BP", "alt", "ref"))
+  swap <- merge(g, r, by.x = c("CHR", "BP", "A1", "A2"), by.y = c("CHRc", "BP", "ref", "alt"))
   swap[, `:=`(BETA = -BETA, A1Freq = 1 - A1Freq)]
   message(nrow(same), " SNPs aligned as is; ", nrow(swap), " SNPs with A1/A2 swapped (converted)")
-  x <- rbind(same[, .(ID, chr = CHR, bp37, bp38, freq = A1Freq, BETA, SE, N, r2, AF_PanUKB, block, ld_index)],
-             swap[, .(ID, chr = CHR, bp37, bp38, freq = A1Freq, BETA, SE, N, r2, AF_PanUKB, block, ld_index)])
+  x <- rbind(same[, .(ID, chr, bp37, bp38, freq = A1Freq, BETA, SE, N, r2, AF_PanUKB, block, ld_index)],
+             swap[, .(ID, chr, bp37, bp38, freq = A1Freq, BETA, SE, N, r2, AF_PanUKB, block, ld_index)])
   dup <- x[duplicated(ID), unique(ID)]
   if (length(dup)) { x <- x[!ID %in% dup]; message(length(dup), " reference SNPs matched more than one GWAS row; removed") }
   x <- x[abs(freq - AF_PanUKB) <= freq_thresh]
@@ -71,3 +71,8 @@ summarystat_tidy <- function(gwas, ref, build = 37, freq_thresh = 0.2, N_sd_rang
   }
   x[]
 }
+
+#' @rdname summarystat_tidy
+#' @details `sumstat_tidy()` is another name of `summarystat_tidy()`.
+#' @export
+sumstat_tidy <- summarystat_tidy

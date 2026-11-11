@@ -75,7 +75,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   # ---- variants
   pvar <- .read_pvar5(pfile)
   act <- pvar$allele_ct
-  iid <- .psam_iid(pfile)
+  iid <- .psam_ids(pfile)
   si <- .sample_rows(sample, iid)
   n <- length(si)
   pgen <- normalizePath(paste0(pfile, ".pgen"))

@@ -9,10 +9,10 @@
 
 .panel_cols <- c("ID", "chr", "bp37", "bp38", "ref", "alt", "AF_PanUKB", "block", "ld_index")
 
-# Panel SNP table, optionally only some blocks / IDs. ref: parquet path or data.frame; NULL (or a directory)
+# Panel SNP table, optionally only some blocks. ref: parquet path or data.frame; NULL (or a directory)
 # reads the one .parquet in ld_dir (where the released panel keeps it). With `blocks` only those blocks are
 # scanned; otherwise the whole table (panel columns only) is read.
-.ld_panel <- function(ref = NULL, ld_dir = NULL, blocks = NULL, ids = NULL) {
+.ld_panel <- function(ref = NULL, ld_dir = NULL, blocks = NULL) {
   if (is.character(ref) && length(ref) == 1L && dir.exists(ref)) { ld_dir <- ref; ref <- NULL }
   if (is.null(ref)) {
     if (is.null(ld_dir)) stop("give ld_dir (or ref)", call. = FALSE)
@@ -32,44 +32,43 @@
       data.table::as.data.table(as.data.frame(ds$NewScan()$Filter(inb)$Project(cols)$Finish()$ToTable()))
     }
   }
-  need <- c("ID", "block", "ld_index", "AF_PanUKB")
+  # required: chr, at least one of bp37 / bp38, ref, alt, AF_PanUKB, block, ld_index; ID is optional
+  need <- c("chr", "ref", "alt", "AF_PanUKB", "block", "ld_index")
   if (length(setdiff(need, names(r)))) stop("the panel table lacks ", paste(setdiff(need, names(r)), collapse = ", "), call. = FALSE)
+  if (!any(c("bp37", "bp38") %in% names(r))) stop("the panel table has neither bp37 nor bp38", call. = FALSE)
   r <- r[, intersect(.panel_cols, names(r)), with = FALSE]
+  if (is.character(r$chr)) r[, chr := sub("^chr", "", chr, ignore.case = TRUE)]
+  r[, `:=`(ref = toupper(ref), alt = toupper(alt))]
+  if (!"ID" %in% names(r)) r[, ID := paste(chr, if ("bp38" %in% names(r)) bp38 else bp37, ref, alt, sep = ":")]
   if (!is.null(blocks)) r <- r[which(r$block %in% blocks)]
-  if (!is.null(ids)) r <- r[which(r$ID %in% ids)]
   r
 }
 
 # Adds vi (0-based PGEN variant) and sign (+1 / -1) to the panel rows found in the PGEN; others are dropped.
-# 1. by ID: kept when the panel has no ref/alt columns (sign +1), else the alleles decide the sign;
+# 1. by ID, kept only when the alleles agree (the sign comes from them);
 # 2. the rest by chr + position + allele pair. The position column is the panel's only build column (bp37 or
 #    bp38: the PGEN must be on that build); with both, the build that places more SNPs.
 # A PGEN variant is used once; multiallelic variants are not aligned. No panel SNP in the PGEN is an error.
 .ld_align <- function(panel, pvar) {
   p <- data.table::copy(panel)
-  p[, `:=`(vi = NA_integer_, sign = NA_integer_)]
   bi <- pvar$allele_ct == 2L
-  has_al <- all(c("ref", "alt") %in% names(p))
-  if (has_al) p[, `:=`(ref_u = toupper(ref), alt_u = toupper(alt))]
   k <- which(bi)[match(p$ID, pvar$ID[bi])]
-  if (has_al) {
-    sg <- ifelse(is.na(k), NA_integer_,
-                 ifelse(pvar$ALT[k] == p$alt_u & pvar$REF[k] == p$ref_u, 1L,
-                        ifelse(pvar$ALT[k] == p$ref_u & pvar$REF[k] == p$alt_u, -1L, NA_integer_)))
-    k[is.na(sg)] <- NA_integer_
-  } else sg <- ifelse(is.na(k), NA_integer_, 1L)
+  sg <- ifelse(is.na(k), NA_integer_,
+               ifelse(pvar$ALT[k] == p$alt & pvar$REF[k] == p$ref, 1L,
+                      ifelse(pvar$ALT[k] == p$ref & pvar$REF[k] == p$alt, -1L, NA_integer_)))
+  k[is.na(sg)] <- NA_integer_
   p[, `:=`(vi = k - 1L, sign = sg)]
   builds <- intersect(c("bp37", "bp38"), names(p))
   rest <- which(is.na(p$vi))
-  if (length(rest) && has_al && "chr" %in% names(p) && length(builds)) {
+  if (length(rest)) {
     used <- rep(FALSE, nrow(pvar)); used[p$vi[!is.na(p$vi)] + 1L] <- TRUE
     pv <- pvar[bi & !used, .(CHROM, POS, REF, ALT, row)]
-    q <- p[rest, .(i = rest, CHROM = sub("^chr", "", as.character(chr), ignore.case = TRUE), ref_u, alt_u)]
+    q <- p[rest, .(i = rest, CHROM = as.character(chr), ref, alt)]
     best <- NULL
     for (b in builds) {
       qb <- data.table::copy(q)[, POS := as.integer(p[[b]][i])]
-      same <- pv[qb, on = .(CHROM, POS, REF = ref_u, ALT = alt_u), nomatch = NULL, .(i = i.i, row = x.row, s = 1L)]
-      swap <- pv[qb, on = .(CHROM, POS, REF = alt_u, ALT = ref_u), nomatch = NULL, .(i = i.i, row = x.row, s = -1L)]
+      same <- pv[qb, on = .(CHROM, POS, REF = ref, ALT = alt), nomatch = NULL, .(i = i.i, row = x.row, s = 1L)]
+      swap <- pv[qb, on = .(CHROM, POS, REF = alt, ALT = ref), nomatch = NULL, .(i = i.i, row = x.row, s = -1L)]
       h <- rbind(same, swap)
       h <- h[!duplicated(i) & !duplicated(row)]
       if (is.null(best) || nrow(h) > nrow(best)) best <- h
@@ -79,7 +78,6 @@
   p <- p[!is.na(vi)]
   if (!nrow(p)) stop("no panel SNP found in the PGEN (by ID, or by chr / ", paste(builds, collapse = " or "),
                      " / alleles): check the build and the variant IDs", call. = FALSE)
-  if (has_al) p[, c("ref_u", "alt_u") := NULL]
   p
 }
 

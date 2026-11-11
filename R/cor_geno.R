@@ -33,6 +33,16 @@ cor_bed <- function(bfile, snps = NULL, sample = NULL, af = NULL, threads = 4L, 
   .cor_file(list(bedfile = bfile), snps, sample, af, match.arg(impute), threads)
 }
 
+#' @rdname cor_pgen
+#' @details `pgen_cor()` and `bed_cor()` are other names of `cor_pgen()` and `cor_bed()` (same arguments and
+#'   return value).
+#' @export
+pgen_cor <- cor_pgen
+
+#' @rdname cor_pgen
+#' @export
+bed_cor <- cor_bed
+
 .cor_file <- function(file, snps, sample, af, impute, threads, max_cells = Inf) {
   threads <- .threads(threads)
   t0 <- proc.time()[["elapsed"]]

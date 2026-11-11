@@ -28,6 +28,15 @@ inline int thread_id() {
 #endif
 }
 
+// Size of the current OpenMP team (1 without OpenMP; may be below num_threads(T) when the runtime limits it).
+inline int thread_team() {
+#ifdef _OPENMP
+  return omp_get_num_threads();
+#else
+  return 1;
+#endif
+}
+
 struct PgenHeader {
   plink2::PgenFileInfo info;
   unsigned char* alloc = nullptr;

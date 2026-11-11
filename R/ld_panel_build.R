@@ -175,15 +175,11 @@ ld_blocks_default <- function(build = 38) {
   for (f in seq_along(geno)) {
     pre <- sub("\\.(pgen|bed)$", "", geno[f])
     if (file.exists(paste0(pre, ".pgen"))) {
-      if (!file.exists(paste0(pre, ".pvar"))) stop("Needs an uncompressed .pvar: ", pre, call. = FALSE)
-      pv <- data.table::fread(paste0(pre, ".pvar"), skip = "#CHROM", colClasses = "character",
-                              select = 1:5)
-      data.table::setnames(pv, c("CHROM", "POS", "ID", "REF", "ALT"))
-      ps <- data.table::fread(paste0(pre, ".psam"), colClasses = "character")
-      files[[f]] <- list(prefix = pre, type = "pgen", n = nrow(ps))
-      v <- data.table::data.table(file = f, row = seq_len(nrow(pv)), CHR = .ldb_chr(pv$CHROM),
-                                  BP = as.integer(pv$POS), cnt = toupper(pv$ALT), oth = toupper(pv$REF))
-      v <- v[!grepl(",", cnt, fixed = TRUE)]
+      pv <- .read_pvar5(pre)
+      files[[f]] <- list(prefix = pre, type = "pgen", n = length(.psam_ids(pre)))
+      v <- data.table::data.table(file = f, row = pv$row, CHR = .ldb_chr(pv$CHROM),
+                                  BP = pv$POS, cnt = pv$ALT, oth = pv$REF)
+      v <- v[pv$allele_ct == 2L]
     } else if (file.exists(paste0(pre, ".bed"))) {
       bim <- data.table::fread(paste0(pre, ".bim"), header = FALSE, colClasses = "character")
       fam <- data.table::fread(paste0(pre, ".fam"), header = FALSE, select = 1L)

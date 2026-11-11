@@ -87,6 +87,9 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
   std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
   const bool dos = pf.dosage();
+  const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
+  const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;
+  std::vector<unsigned char> cbuf(dos ? 0 : static_cast<std::size_t>(T) * sb);
   std::vector<double> nobs(p), sum(p);
   std::vector<int> bad(T, -1);
 #ifdef _OPENMP
@@ -102,7 +105,11 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
     } else {
       const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
       if (!gv) { bad[plink4r::thread_id()] = j; continue; }
-      for (int i = 0; i < ns; ++i) { const int r = si[i]; const unsigned int x = (gv[r >> 2] >> (2 * (r & 3))) & 3u; if (x != 3u) { ++c; s += x; } }
+      unsigned char* dst = &cbuf[static_cast<std::size_t>(plink4r::thread_id()) * sb];
+      plink4r::compact_genovec(gv, si.data(), ns, ident, dst);
+      long long miss = 0, alt = 0;
+      plink4r::count_genovec(dst, sb, &miss, &alt);
+      c = ns - miss; s = static_cast<double>(alt);
     }
     nobs[j] = static_cast<double>(c); sum[j] = s;
   }

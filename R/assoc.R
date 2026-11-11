@@ -130,7 +130,7 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     pvar <- .read_pvar5(pfile)
     var <- data.table::data.table(CHR = pvar$CHROM, POS = pvar$POS, ID = pvar$ID, A1 = pvar$ALT, A2 = pvar$REF,
                                   allele_ct = pvar$allele_ct)
-    iid <- .psam_iid(pfile)
+    iid <- .psam_ids(pfile)
     path <- normalizePath(paste0(pfile, ".pgen"))
   } else {
     bim <- data.table::fread(paste0(bfile, ".bim"), header = FALSE, colClasses = "character")

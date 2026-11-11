@@ -58,14 +58,7 @@ inline double secs(std::chrono::steady_clock::time_point a) {
 }
 inline int tid() { return thread_id(); }
 
-// Size of the current team (read-only; may be below num_threads(T) when the runtime limits threads).
-inline int team() {
-#ifdef _OPENMP
-  return omp_get_num_threads();
-#else
-  return 1;
-#endif
-}
+inline int team() { return thread_team(); }
 }  // namespace ik
 
 // ---- LD of one block: C, the scaled columns a_lj and A_j, the anchor mean / sd per row.

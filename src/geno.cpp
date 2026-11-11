@@ -124,21 +124,6 @@ inline double d_at(const DCol& c, std::size_t i) {
   return c.q[e] * c.unit;
 }
 
-inline int omp_thread() {
-#ifdef _OPENMP
-  return omp_get_thread_num();
-#else
-  return 0;
-#endif
-}
-
-inline int omp_threads() {
-#ifdef _OPENMP
-  return omp_get_num_threads();
-#else
-  return 1;
-#endif
-}
 
 inline int resolve_threads(int threads) {
 #ifdef _OPENMP
@@ -302,7 +287,7 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
     int failed = 0, range = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       const std::size_t j = g0 + static_cast<std::size_t>(k);
       const std::uint16_t* x = file.read_dosage(static_cast<std::size_t>(variants[j]), t);
       if (!x) {
@@ -475,7 +460,7 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
     }
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
       gather_packed(buffer.data() + k * stride, rows, buf);
       encode_column(*g, table, buf, g0 + k, missbuf.data() + static_cast<std::size_t>(t) * W, &fs);
@@ -516,7 +501,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
     int failed = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = omp_thread();
+      const int t = plink4r::thread_id();
       const unsigned char* column = file.read(static_cast<std::size_t>(variants[g0 + k]), t);
       if (!column) {
         #pragma omp atomic write
@@ -619,7 +604,7 @@ Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, int thre
   const std::size_t used_words = (n + 63) / 64;
   #pragma omp parallel num_threads(threads)
   {
-    const int nt = omp_threads(), t = omp_thread();
+    const int nt = plink4r::thread_team(), t = plink4r::thread_id();
     const std::size_t w0 = used_words * t / nt, w1 = used_words * (t + 1) / nt;
     std::vector<double> bj(k);
     for (std::size_t j = 0; j < p; ++j) {

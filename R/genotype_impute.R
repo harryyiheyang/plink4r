@@ -23,20 +23,17 @@
 #' @param thresh eigenvalue variance kept; <= 0 keeps every stored pair.
 #' @param nb_people people per batch (NULL = largest batch whose S_i, rhs and SNP lists fit in `mem_gb`).
 #' @param mem_gb memory budget of the people batches; 0 takes it from [plink4r_resources()].
-#' @param nbr_frac,nbr_max deprecated and ignored (the neighbour restriction of the rhs was removed).
 #' @param af optional anchor frequencies of the PGEN ALT allele, named by PGEN ID; they replace AF_PanUKB.
 #' @return list(fill = data.table(IID, snp, g1, g), snp = per-SNP n_miss / c / shift, info, time); `snp` is
 #'   the PGEN ID and g the ALT dosage.
 #' @export
 genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
-                            mem_gb = 2, nbr_frac = NULL, nbr_max = NULL, af = NULL) {
-  if (!is.null(nbr_frac) || !is.null(nbr_max))
-    warning("nbr_frac and nbr_max are deprecated and ignored: every row enters the imputation", call. = FALSE)
+                            mem_gb = 2, af = NULL) {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
   pvar <- .read_pvar5(pfile)
-  iid <- .psam_iid(pfile)
+  iid <- .psam_ids(pfile)
   si <- .sample_rows(sample, iid) - 1L
   if (is.null(snps)) {
     if (is.null(block)) stop("give `block` or `snps`")

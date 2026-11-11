@@ -4,7 +4,7 @@
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X, cached per object; X'M), geno_multiply() (X B),
 # geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
-# bed_cor() / pgen_cor() (correlations). Values are A1 (BED) or ALT (PGEN)
+# cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for genotypes) holding dosage - H for a PGEN with dosages,
@@ -85,15 +85,14 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
     iid <- fam[[2L]]
   } else {
     files <- .geno_pgen_files(pgenfile)
-    pv <- data.table::fread(files$pvar, skip = "#CHROM", colClasses = "character")
-    snp <- pv[["ID"]]
-    a1 <- pv[["ALT"]]
-    a2 <- pv[["REF"]]
-    allele_ct <- 1L + nchar(pv$ALT) - nchar(gsub(",", "", pv$ALT, fixed = TRUE))
-    ps <- data.table::fread(files$psam, colClasses = "character")
-    iid <- ps[[if ("#IID" %in% names(ps)) "#IID" else "IID"]]
-    fid_col <- intersect(c("#FID", "FID"), names(ps))
-    fid <- if (length(fid_col)) ps[[fid_col[1L]]] else rep("0", length(iid))
+    pv <- .read_pvar5(files$prefix)
+    snp <- pv$ID
+    a1 <- pv$ALT
+    a2 <- pv$REF
+    allele_ct <- pv$allele_ct
+    ps <- .psam_ids(files$prefix, fid = TRUE)
+    iid <- ps$iid
+    fid <- ps$fid
   }
   vidx <- .geno_index(snp_vec, snp, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, iid, paste(fid, iid, sep = "_"), "sample_vec")
@@ -336,8 +335,8 @@ geno_multiply <- function(X, B, threads = X$threads) {
 
 # crossprod(X, X * w) and crossprod(X, M) (of the standardized matrix when X$scale), all in C++:
 # X'WX by 256 x 256 tiles over blocks of 4096 samples (float products, double sums; geno_xtwx_cpp), X'M by
-# geno_crossprod(). block_size is no longer used (kept so existing calls still work).
-geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L, threads = X$threads) {
+# geno_crossprod().
+geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
   threads <- .threads(threads)
   w <- as.numeric(w)
   if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
@@ -364,15 +363,11 @@ geno_wcrossprod <- function(X, w, M = NULL, block_size = 10000L, threads = X$thr
   }
   prefix <- sub("\\.pgen$", "", x, ignore.case = TRUE)
   pgen <- paste0(prefix, ".pgen")
-  pvar <- paste0(prefix, ".pvar")
-  psam <- paste0(prefix, ".psam")
-  for (path in c(pgen, pvar, psam)) {
+  for (path in c(pgen, paste0(prefix, ".psam"))) {
     if (!file.exists(path)) stop("Required PGEN companion file is missing: ",
                                  path, call. = FALSE)
   }
-  list(pgen = normalizePath(pgen, mustWork = TRUE),
-       pvar = normalizePath(pvar, mustWork = TRUE),
-       psam = normalizePath(psam, mustWork = TRUE))
+  list(pgen = normalizePath(pgen, mustWork = TRUE), prefix = prefix)
 }
 
 #' Correlations of the columns of geno matrices
@@ -415,44 +410,3 @@ geno_cor <- function(A, B = NULL, threads = A$threads) {
   R
 }
 
-#' Correlations of all variants of PLINK files
-#'
-#' `bed_cor(A)` / `pgen_cor(A)`: correlations of all variants of a BED / PGEN
-#' file; with `B`, of the variants of A against those of B (same samples in
-#' the same order). Missing calls take the variant's lower median; a PGEN with
-#' dosages is read as dosages. Moved here from CppMatrix (same arguments); the
-#' genotypes are held by [geno_open()] and the products are those of
-#' [geno_cor()]. These are thin wrappers: `bed_cor(A)` is
-#' `cor_bed(A, impute = "median")$R` (and likewise for `pgen_cor`); use
-#' [cor_pgen()] / [cor_bed()] to select variants or samples or to anchor the fill.
-#'
-#' @param A,B BED paths or prefixes (`bed_cor`), PGEN paths or prefixes
-#'   (`pgen_cor`).
-#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @return A correlation matrix with variant IDs as dimnames.
-#' @export
-bed_cor <- function(A, B = NULL, threads = 4L) {
-  .geno_file_cor(A, B, threads, "bedfile")
-}
-
-#' @rdname bed_cor
-#' @export
-pgen_cor <- function(A, B = NULL, threads = 4L) {
-  .geno_file_cor(A, B, threads, "pgenfile")
-}
-
-.geno_file_cor <- function(A, B, threads, arg) {
-  threads <- .threads(threads)
-  if (is.null(B)) {
-    file <- stats::setNames(list(A), arg)
-    return(.cor_file(file, NULL, NULL, NULL, "median", threads, max_cells = 1e8)$R)
-  }
-  open1 <- function(f) do.call(geno_open, stats::setNames(list(f, "median", FALSE, as.integer(threads)),
-                                                          c(arg, "impute", "scale", "threads")))
-  XA <- open1(A)
-  XB <- open1(B)
-  if (as.numeric(XA$p) * XB$p > 1e8) {
-    stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)
-  }
-  geno_cor(XA, XB, threads)
-}

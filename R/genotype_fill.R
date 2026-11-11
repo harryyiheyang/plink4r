@@ -54,7 +54,7 @@ genotype_fill <- function(pfile, snp, ld = NULL, sample = NULL, para = list()) {
   dropped <- data.table::data.table(k = setdiff(q$k, m$k), reason = "not in pvar (CHR/BP/alleles)")
   data.table::setorder(m, k)
 
-  iid <- .psam_iid(pfile)
+  iid <- .psam_ids(pfile)
   si <- .sample_rows(sample, iid)
   n <- length(si)
   pg <- normalizePath(paste0(pfile, ".pgen"))
