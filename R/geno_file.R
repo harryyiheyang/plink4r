@@ -31,9 +31,8 @@ geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
   } else {
     files <- .geno_pgen_files(pgenfile)
     base <- files$prefix
-    pv <- .read_pvar5(base)
-    v <- pv[, list(row, chr = CHROM, pos = POS, id = ID, a1 = ALT, a2 = REF, allele_ct)]
-    if (!id) v[, id := NULL]
+    pv <- .read_pvar5(base, id = id)
+    v <- data.table::setnames(pv, c("CHROM", "POS", "ID", "ALT", "REF"), c("chr", "pos", "id", "a1", "a2"), skip_absent = TRUE)
     ps <- .psam_ids(base, fid = TRUE)
     s <- data.table::data.table(row = seq_along(ps$iid), fid = ps$fid, iid = ps$iid)
     type <- "pgen"; path <- files$pgen
@@ -52,3 +51,16 @@ geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
 
 # Column names of a geno_file's variants: the file ID, or chr:pos:a1:a2 without IDs.
 .geno_vid <- function(v) if ("id" %in% names(v)) v$id else paste(v$chr, v$pos, v$a1, v$a2, sep = ":")
+
+# Rows of chr:pos:a1:a2 names x in a variants table without IDs, as match(x, .geno_vid(v)) but naming only the rows
+# at the positions in x (when no chr contains ":", the second field of a name is its row's pos, so every row with
+# that name is among them); otherwise, or if a name is not found, through all names.
+.geno_vid_index <- function(v, x) {
+  pos <- suppressWarnings(as.integer(sub("^[^:]*:([^:]*):.*$", "\\1", x)))
+  if (!anyNA(pos) && !any(grepl(":", unique(v$chr), fixed = TRUE))) {
+    cand <- which(v$pos %in% pos)
+    idx <- cand[match(x, .geno_vid(v[cand]))]
+    if (!anyNA(idx)) return(idx)
+  }
+  .geno_index(x, .geno_vid(v), NULL, "snp_vec")
+}

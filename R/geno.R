@@ -82,15 +82,18 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   gf <- .as_geno_file(file, bedfile, pgenfile)
   v <- gf$variants
   s <- gf$samples
-  ids <- .geno_vid(v)
-  vidx <- .geno_index(snp_vec, ids, NULL, "snp_vec")
+  # without IDs, chr:pos:a1:a2 names only of the opened rows (and of the candidate rows of character snp_vec)
+  ids <- if ("id" %in% names(v)) v$id else NULL
+  vidx <- if (is.null(ids) && is.character(snp_vec)) .geno_vid_index(v, snp_vec) else
+    .geno_index(snp_vec, if (is.null(ids)) v$row else ids, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, s$iid, paste(s$fid, s$iid, sep = "_"), "sample_vec")
   ptr <- if (gf$type == "bed") {
     geno_open_bed_cpp(gf$path, nrow(s), nrow(v), vidx - 1L, sidx - 1L, impute == "mean", threads)
   } else {
     geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, impute == "mean", threads)
   }
-  X <- .geno_new(ptr, list(snp = ids[vidx], id = if ("id" %in% names(v)) v$id[vidx] else rep(NA_character_, length(vidx)),
+  X <- .geno_new(ptr, list(snp = if (is.null(ids)) .geno_vid(v[vidx]) else ids[vidx],
+                           id = if ("id" %in% names(v)) v$id[vidx] else rep(NA_character_, length(vidx)),
                            chr = v$chr[vidx], pos = v$pos[vidx], a1 = v$a1[vidx], a2 = v$a2[vidx], row = vidx,
                            flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
