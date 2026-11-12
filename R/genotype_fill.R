@@ -94,7 +94,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       cl <- if (is.null(cl)) lc else rbind(cl, lc)  # user cells first: they win
     }
   }
-  .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x$snp, x$sample),
+  .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
                default = "mean", inplace = FALSE, impute = lab, threads = P$threads)
 }
 
@@ -130,15 +130,26 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
 
 # fill = list(const = one value per selected variant (NA = built-in fill),
 #             cells = data.frame(j = column, IID, g)), or a genotype_fill() file-route result -> CSR over the
-# selected rows (cells matched by IID; unmatched cells dropped; the first of repeated cells wins).
-.geno_fill_spec <- function(fill, ids, iid) {
-  p <- length(ids)
+# rows of X (cells matched by IID; unmatched cells dropped; the first of repeated cells wins).
+# A file-route result is matched to the columns of X by chromosome, position and the unordered allele pair
+# (not by ID or column name), and its ALT dosages are turned into dosages of X$a1 (2 - g where a1 is REF).
+.geno_fill_spec <- function(fill, X) {
+  p <- X$p; iid <- X$sample
   out <- list(c = numeric(0), ptr = integer(0), i = integer(0), g = numeric(0))
   if (is.null(fill)) return(out)
-  if (!is.null(fill$snp)) {  # a genotype_fill() result: by variant ID
+  if (!is.null(fill$snp)) {
+    fs <- fill$snp
+    j <- .geno_match_vars(X, fs$CHR, fs$POS, fs$ALT, fs$REF)
+    flip <- !is.na(j) & toupper(X$a1[j]) != toupper(fs$ALT)
+    const <- rep(NA_real_, p)
+    ok <- !is.na(j)
+    const[j[ok]] <- ifelse(flip[ok], 2 - fs$fill_const[ok], fs$fill_const[ok])
     cl <- fill$cells
-    fill <- list(const = fill$snp$fill_const[match(ids, fill$snp$ID)],
-                 cells = if (!is.null(cl) && nrow(cl)) data.frame(j = match(cl$ID, ids), IID = cl$IID, g = cl$g))
+    if (!is.null(cl) && nrow(cl)) {
+      k <- match(cl$ID, fs$ID)
+      cl <- data.frame(j = j[k], IID = cl$IID, g = ifelse(flip[k] %in% TRUE, 2 - cl$g, cl$g))
+    } else cl <- NULL
+    fill <- list(const = const, cells = cl)
   }
   if (!is.null(fill$const)) {
     if (length(fill$const) != p) stop("fill$const needs one value per selected variant.", call. = FALSE)

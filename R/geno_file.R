@@ -64,3 +64,17 @@ geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
   }
   .geno_index(x, .geno_vid(v), NULL, "snp_vec")
 }
+
+# Column of X (or NA) for each variant given by chr, pos and its two alleles a / b (either orientation):
+# chromosome without "chr", alleles upper-case; a column whose counted allele is a matches first, then one
+# whose counted allele is b. IDs and column names are not used.
+.geno_match_vars <- function(X, chr, pos, a, b) {
+  key <- function(c, p, x, y) paste(sub("^chr", "", as.character(c), ignore.case = TRUE), as.integer(p),
+                                    toupper(x), toupper(y), sep = ":")
+  kx <- key(X$chr, X$pos, X$a1, X$a2)
+  kx[is.na(X$chr) | is.na(X$pos)] <- NA_character_  # appended columns match nothing
+  j <- match(key(chr, pos, a, b), kx, incomparables = NA)
+  miss <- is.na(j)
+  j[miss] <- match(key(chr, pos, b, a)[miss], kx, incomparables = NA)
+  j
+}

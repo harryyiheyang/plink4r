@@ -50,7 +50,7 @@
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param fill Externally computed fills of missing calls: a [genotype_fill()] result of the file route (its
 #'   per-SNP `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by
-#'   ID), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
+#'   chromosome, position and allele pair, not by ID, so it works the same with `geno_file(id = FALSE)`), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
 #'   IID, g))`. A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) /
 #'   bim A1 (BED) dosages. Same as opening with `impute` and then [genotype_fill()] on the new object.
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
@@ -68,7 +68,8 @@
 #'   `sample` (IIDs in row order), `impute` (how the missing cells are filled now: "median", "mean", "af",
 #'   "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
 #'   (whether the PGEN holds dosages) and `dosage_nnz` (nonzero entries of the
-#'   int16 deviation D); per column also `id` (file ID), `chr`, `pos`, `row` (file row), `flipped` (stored
+#'   int16 deviation D); per column also `id` (file ID; `chr:pos:a1:a2` when opened from
+#'   `geno_file(id = FALSE)`, built once at open for the opened rows only), `chr`, `pos`, `row` (file row), `flipped` (stored
 #'   value = 2 - file value), `n_miss` (missing calls) and `af` (observed frequency of `a1`); per row `fid`;
 #'   and `file` = list(type, path). The rows of the missing cells are kept (see [geno_missing()]). It holds an
 #'   external pointer, so it is valid only in the current R session (it cannot
@@ -92,14 +93,15 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   } else {
     geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, impute == "mean", threads)
   }
-  X <- .geno_new(ptr, list(snp = if (is.null(ids)) .geno_vid(v[vidx]) else ids[vidx],
-                           id = if ("id" %in% names(v)) v$id[vidx] else rep(NA_character_, length(vidx)),
+  # names built once here, for the opened rows only, and kept in the object (snp and id)
+  nm <- if (is.null(ids)) .geno_vid(v[vidx]) else ids[vidx]
+  X <- .geno_new(ptr, list(snp = nm, id = nm,
                            chr = v$chr[vidx], pos = v$pos[vidx], a1 = v$a1[vidx], a2 = v$a2[vidx], row = vidx,
                            flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
   if (!is.null(fill) || !is.null(af)) {  # on the new object, which nothing else references yet: in place
-    fs <- .geno_fill_spec(fill, X$snp, X$sample)
+    fs <- .geno_fill_spec(fill, X)
     X <- .geno_refill(X, af = af, const = fs$c, cells = fs, default = "keep", inplace = TRUE,
                       impute = if (!is.null(fill)) "custom" else "af", threads = threads)
   }
