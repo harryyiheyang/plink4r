@@ -428,7 +428,9 @@ static const R_CallMethodDef CallEntries[] = {
     {NULL, NULL, 0}
 };
 
+void plink4r_register_ccallables(DllInfo* dll);
 RcppExport void R_init_plink4r(DllInfo *dll) {
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
+    plink4r_register_ccallables(dll);
 }
