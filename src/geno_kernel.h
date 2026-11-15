@@ -18,7 +18,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__)) && !defined(_WIN32)
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #include <immintrin.h>
 #define GENO_KERNEL_X86 1
 #endif

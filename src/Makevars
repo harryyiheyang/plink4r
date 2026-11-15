@@ -18,6 +18,10 @@ OBJECTS = RcppExports.o assoc_stream.o geno.o geno_score.o genotype_impute.o sum
 # `threads` argument of each function (no setNbThreads, no global thread setting).
 PKG_CPPFLAGS = -DNO_UNALIGNED -DPGENLIB_NOPRINT -DEIGEN_DONT_PARALLELIZE -Ipgenlib $(LA_DEFS)
 PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS) -Wno-ignored-attributes
+# Windows (MinGW): the stack is not 32-byte aligned, so spilled AVX2 registers must use unaligned moves.
+ifeq ($(OS),Windows_NT)
+PKG_CXXFLAGS += -Wa,-muse-unaligned-vector-move
+endif
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
 
 .PHONY: all
