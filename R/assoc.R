@@ -23,7 +23,13 @@
 #' (`Z^2` is the score test) and `P`. For variants whose normal P is below `spa_cut`, `P` is the saddlepoint P of
 #' the score (fastSPA: the cumulant generating function is exact over the carriers of the minor allele, dosage at
 #' least 0.05, and normal over the other samples), which keeps rare variants and unbalanced case-control ratios
-#' calibrated; elsewhere it is the normal P. No robust SE for the logistic model.
+#' calibrated; elsewhere it is the normal P. No robust SE for the logistic model. `BETA` and `SE` are not penalised
+#' (use them for meta-analysis); with `shrink = TRUE` (default) the logistic result also has `BETA_POST` and
+#' `SE_POST`, the posterior mean and sd of the per-allele log-OR under a mixture prior (null, three normal scales
+#' that grow as the minor allele frequency falls, and a wide normal for large effects; see `prior`). For variants
+#' with at most `carrier_max` expected carriers the likelihood is first refined over the carriers alone (penalised
+#' Newton from the one-step ridge, to convergence), so large effects of rare variants are not overestimated by the
+#' one-step score. The posterior is shrunk towards 0 by design and must not be meta-analysed.
 #'
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
@@ -37,6 +43,13 @@
 #' @param robust Linear only: add sandwich standard errors.
 #' @param mac_adjust Refer one-degree-of-freedom robust tests to `F(1, M - 1)` with `M` the expected carrier
 #'   count (see Details); `FALSE` keeps the normal (chi-square) P.
+#' @param shrink Logistic only: add `BETA_POST` and `SE_POST`.
+#' @param prior Logistic only: list with any of `sigma0sq` (scale: the per-allele prior variance of component k
+#'   is `sigma0sq * grid[k] * (2 p (1 - p))^alpha`), `weights` (of the `grid` components), `alpha` (default -0.38),
+#'   `grid` (default `c(0, 1, 10, 100)`), `wide_sd` (default 1.5, log-OR, not scaled by MAF) and `wide_weight`
+#'   (default 0.02); fields not given take their defaults. The carrier step uses the ridge penalty `1 / wide_sd^2`.
+#' @param carrier_max Logistic only: refine the likelihood over the carriers for variants with at most this many
+#'   expected carriers (0 = never).
 #' @param spa_cut Logistic only: saddlepoint P for the variants whose normal P is below this; 0 = normal P
 #'   throughout.
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
@@ -51,16 +64,23 @@
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
-                 mac_adjust = TRUE, spa_cut = 0.05) {
+                 mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000) {
   family <- match.arg(family)
+  shrink <- family == "binomial" && shrink
+  pr <- if (shrink) .rv_prior(prior) else NULL
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
-                  robust, center = FALSE, threads, mem_gb, block, spa_cut)
+                  robust, center = FALSE, threads, mem_gb, block, spa_cut,
+                  carrier_max = if (shrink) carrier_max else 0, carrier_lambda = if (shrink) 1 / pr$wide_sd^2 else 1)
   res <- r$res; out <- r$out
   stat <- if (family == "gaussian") "T" else "Z"
   out[, `:=`(BETA = res$beta[, 1L], SE = res$se[, 1L])]
   out[, (stat) := BETA / SE]
   out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else
     data.table::fifelse(is.na(res$p_spa), 2 * stats::pnorm(-abs(get(stat))), res$p_spa)]
+  if (shrink) {
+    .rv_shrink(out, res, pr)
+    r$info$prior <- pr
+  }
   if (robust) {
     out[, SE_ROBUST := res$se_robust[, 1L]]
     out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust)]
@@ -153,7 +173,8 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 
 # Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
 .assoc_run <- function(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust,
-                       center, threads, mem_gb, block, spa_cut = 0) {
+                       center, threads, mem_gb, block, spa_cut = 0, carrier_max = 0,
+                       carrier_lambda = 1) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
   if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
@@ -240,7 +261,8 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 
   res <- assoc_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
                           as.integer(srow - 1L), X, S, length(ie), resid, w, robust, threads, mem_gb,
-                          as.integer(block), if (family == "binomial") as.numeric(spa_cut) else 0)
+                          as.integer(block), if (family == "binomial") as.numeric(spa_cut) else 0,
+                          as.numeric(carrier_max), as.numeric(carrier_lambda))
   out <- var[vrow, list(CHR, POS, ID, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
   info <- list(samples = n, covariate_rank = res$rank, null_converged = fit$converged, block = res$block,
