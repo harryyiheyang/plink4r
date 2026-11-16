@@ -238,6 +238,10 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   const std::vector<float>& sd = L.sd;
   const std::vector<std::vector<int>>& MiA = P.Mi;
   const auto plane_dot = la().plane_dot;
+  // S_i = I - C_MM: gathered from C in the per-person solve when C is small enough to stay in cache (no S
+  // buffer, no scattered writes in the rhs pass); otherwise written column by column in the rhs pass, where
+  // column j of C is hot.
+  const bool gatherS = static_cast<double>(m) * m * 4.0 <= 32e6;
   // person blocks: fixed size, or as large as the memory budget for S_i, rhs and the SNP lists allows
   std::vector<int> bstart{0};
   {
@@ -245,7 +249,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     double acc = 0;
     for (int s = 0; s < ns; ++s) {
       const double q = static_cast<double>(MiA[s].size());
-      const double cost = 4.0 * q * q + 36.0 * q;  // S_i, rhs, flat M_i, cell refs
+      const double cost = (gatherS ? 0.0 : 4.0 * q * q) + 36.0 * q;  // S_i, rhs, flat M_i, cell refs
       const bool full = nb_people > 0 ? (s - bstart.back() >= nb_people) : (acc + cost > budget && s > bstart.back());
       if (full) { bstart.push_back(s); acc = 0; }
       acc += cost;
@@ -281,7 +285,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     for (int i = 0; i < nb; ++i) {
       const int q = static_cast<int>(Mi[i].size());
       moff[i + 1] = moff[i] + q;
-      soff[i + 1] = soff[i] + static_cast<long long>(q) * q;
+      soff[i + 1] = soff[i] + (gatherS ? 0LL : static_cast<long long>(q) * q);
     }
     // per-SNP lists in parallel: thread t counts its person range, then fills its own slots (order = person order)
     {
@@ -350,7 +354,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
           const uint8_t* op = &hom[static_cast<std::size_t>(cp.i) * nbyte];
           for (int b = 0; b < nbyte; b += 64) { __builtin_prefetch(hp + b); __builtin_prefetch(op + b); }
           __builtin_prefetch(mflat + cp.mo);
-          __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
+          if (!gatherS) __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
           __builtin_prefetch(&rhs[cp.mo + cp.a], 1);
         }
         const CellRef& ce = cref[e];
@@ -359,13 +363,19 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
         const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
         float r = L.Aj[j] + plane_dot(aj, hi, oi_, nbyte);
-        float* Sc = &S[static_cast<std::size_t>(ce.so) + static_cast<std::size_t>(a) * q];  // column a of S_i
-        for (int bq = 0; bq < q; ++bq) {
-          const int l = M[bq];
-          r += aj[l] * mu[l];
-          Sc[bq] = -cj[l];
+        float r0 = 0, r1 = 0, r2 = 0, r3 = 0;  // independent partial sums (no single add chain)
+        int bq = 0;
+        for (; bq + 4 <= q; bq += 4) {
+          const int l0 = M[bq], l1 = M[bq + 1], l2 = M[bq + 2], l3 = M[bq + 3];
+          r0 += aj[l0] * mu[l0]; r1 += aj[l1] * mu[l1]; r2 += aj[l2] * mu[l2]; r3 += aj[l3] * mu[l3];
         }
-        Sc[a] += 1.0f;
+        for (; bq < q; ++bq) { const int l = M[bq]; r0 += aj[l] * mu[l]; }
+        r += (r0 + r1) + (r2 + r3);
+        if (!gatherS) {  // column a of S_i
+          float* Sc = &S[static_cast<std::size_t>(ce.so) + static_cast<std::size_t>(a) * q];
+          for (int b = 0; b < q; ++b) Sc[b] = -cj[M[b]];
+          Sc[a] += 1.0f;
+        }
         rhs[ce.mo + a] = r;
       }
     }
@@ -377,6 +387,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
 #endif
     {
       const int th = ik::tid();
+      std::vector<float> sbuf;  // this thread's S_i when gathered
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 32)
 #endif
@@ -384,7 +395,20 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         const std::vector<int>& M = Mi[i];
         const int q = static_cast<int>(M.size());
         if (q == 0) continue;
-        Eigen::Map<MatrixXf> Si(&S[static_cast<std::size_t>(soff[i])], q, q);
+        float* sp;
+        if (gatherS) {  // lower triangle and diagonal of I - C_MM (what LLT reads); the strict upper part too,
+          sbuf.resize(static_cast<std::size_t>(q) * q);  // for the LDLT fallback below
+          sp = sbuf.data();
+          for (int x = 0; x < q; ++x) {
+            const float* cx = C.col(M[x]).data();
+            float* col = sp + static_cast<std::size_t>(x) * q;
+            for (int y = 0; y < q; ++y) col[y] = -cx[M[y]];
+            col[x] += 1.0f;
+          }
+        } else {
+          sp = &S[static_cast<std::size_t>(soff[i])];
+        }
+        Eigen::Map<MatrixXf> Si(sp, q, q);
         Eigen::Map<VectorXf> ri(&rhs[moff[i]], q);
         VectorXf zm;
         Eigen::LLT<Eigen::Ref<MatrixXf>> llt(Si);
