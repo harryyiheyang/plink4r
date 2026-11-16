@@ -115,7 +115,16 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' together (`df` + 1). Linear: model-based variances use the full-model residual variance (`lm`), `robust` (default
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
 #' Logistic: one Newton step from the null model (score-based), no robust SE; `P_MARGINAL` is the saddlepoint P of
-#' [gwas()] below `spa_cut`. Chi-square tests throughout, except
+#' [gwas()] below `spa_cut`. With `shrink = TRUE` (default) the logistic result also has `BETA_POST_G`, `SE_POST_G`,
+#' `BETA_POST_GxE_<term>` and `SE_POST_GxE_<term>`: the joint posterior of the S coefficients, each pair of a
+#' main-effect component (the mixture of [gwas()], learned from the marginal results of the same run unless given)
+#' and an interaction component (null; variance `int_ratio * sigma0sq * (2p(1-p))^alpha` with weight `int_weight`,
+#' default 10 and 0.015; the wide N(0, wide_sd^2) with weight `int_wide_weight`, default 0.005) giving a prior
+#' `N(0, D C D)`, where `D` holds the component sds and `C = I / (tr(I) / S)` is the shape of the variant's
+#' information matrix (its eigenvalues raised to `gamma`, default 1). The shape keeps the prior invariant to how
+#' the exposures are coded and shrinks directions the carriers cannot separate; its size still follows the MAF.
+#' Variants with at most `carrier_max` expected carriers get the S-dimensional carrier step first. Not for
+#' meta-analysis. Chi-square tests throughout, except
 #' that with `mac_adjust = TRUE` the one-degree-of-freedom robust tests (`P_MARGINAL_ROBUST`, and `P_INT_ROBUST`
 #' when there is one exposure term) use the small-count `F(1, M - 1)` reference of [gwas()]; tests with two or more
 #' degrees of freedom keep the chi-square.
@@ -125,16 +134,22 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
 #' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
+#' @param shrink,prior,carrier_max,blocks Logistic only, as [gwas()]; `prior` also takes `int_ratio`, `int_weight`,
+#'   `int_wide_weight` and `gamma` (see Details).
 #' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
 #' @export
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05) {
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
+                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38) {
   family <- match.arg(family)
+  shrink <- family == "binomial" && shrink
+  pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust, center,
-                  threads, mem_gb, block, spa_cut)
+                  threads, mem_gb, block, spa_cut, carrier_max = if (shrink) carrier_max else 0,
+                  carrier_lambda = if (shrink) 1 / pr$wide_sd^2 else 1)
   res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp
   lin <- family == "gaussian"
   pz <- function(b, s) if (lin) 2 * stats::pt(-abs(b / s), res$df_marginal) else 2 * stats::pnorm(-abs(b / s))
@@ -150,6 +165,12 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     out[, (paste0("BETA_", nm[q])) := res$beta[, q]]
     out[, (paste0("SE_", nm[q])) := res$se[, q]]
     if (robust) out[, (paste0("SE_ROBUST_", nm[q])) := res$se_robust[, q]]
+  }
+  if (shrink) {
+    pr <- .rv_learn(data.table::data.table(CHR = out$CHR, POS = out$POS, A1_FREQ = out$A1_FREQ,
+                                           BETA = out$BETA_MARGINAL, SE = out$SE_MARGINAL), pr, names(prior), blocks)
+    .rv_shrink_gxe(out, res, pr, nm, r$info$threads)
+    r$info$prior <- pr
   }
   out[, `:=`(P_INT = stats::pchisq(res$chisq_int, ne, lower.tail = FALSE),
              P_JOINT = stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE))]

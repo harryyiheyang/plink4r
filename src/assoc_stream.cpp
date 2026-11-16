@@ -142,6 +142,7 @@ struct Worker {
   std::vector<unsigned char> g8;   // cap x sb: 2-bit codes (0/1/2 = count, 3 = missing)
   std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
   std::vector<double> mean, G, G2, C1, C2, z, Z, Zt, sg, smu, sy;  // SPA / carrier-step scratch
+  std::vector<int> si;
   std::vector<int> mono;
   void init(const Pre& pre, int capacity, bool dos) {
     cap = capacity; n = pre.n; dosage = dos;
@@ -354,19 +355,23 @@ double spa_marginal(const Pre& pre, Worker& wk, int s, const double* M, double c
   return std::min(1.0, up + lo);
 }
 
-// Carrier step of the logistic effect size (rare_variant_calibration.md sec. 12-13): with the null-model linear
-// predictor as offset, the penalised log-likelihood of the minor-allele coded g over its carriers only (dosage >=
-// kSpaDos), penalty lambda b^2 / 2, maximised by Newton (steps clipped to +-1, to convergence, at most 100) from
-// the one-step ridge anchor U / (I + lambda). Returned as a Gaussian likelihood summary in A1 coding: bhat = mode
-// (Ic + lambda) / Ic, information Ic = sum g^2 m (1 - m) at the mode. False when there is no carrier information.
-bool carrier_step(const Pre& pre, Worker& wk, int s, double U, double I, double lambda, double& bhat, double& info) {
-  const int n = pre.n;
+// Carrier step of the logistic effect sizes (rare_variant_calibration.md sec. 12-13, 15): with the null-model linear
+// predictor as offset, the penalised log-likelihood of z_i = g_i (1, e_i1, ..., e_i,S-1) (g the minor-allele count,
+// or dosage >= kSpaDos) over the carriers only, penalty lambda |b|^2 / 2, maximised by Newton (each step scaled to
+// at most 1 in every coordinate, to convergence, at most 100) from the one-step ridge anchor (A + lambda I)^-1 c.
+// Returned as a Gaussian likelihood summary in A1 coding: score u = (Ic + lambda I) mode, information Ic at the
+// mode (so bhat = Ic^-1 u). False when there is no carrier information.
+bool carrier_step(const Pre& pre, Worker& wk, int s, const double* c, const double* A, double lambda, double* u_out,
+                  double* I_out) {
+  const int n = pre.n, S = pre.S;
+  const std::size_t N = n;
   const double mean = wk.mean[s];
   const bool flip = mean > 1.0;
-  wk.sg.clear(); wk.smu.clear(); wk.sy.clear();
+  wk.sg.clear(); wk.smu.clear(); wk.sy.clear(); wk.si.clear();
   auto add = [&](int i, double g) {
     const double r = pre.r[i], mu = r < 0 ? -r : 1.0 - r;
     wk.sg.push_back(g); wk.smu.push_back(std::log(mu / (1.0 - mu))); wk.sy.push_back(r < 0 ? 0.0 : 1.0);
+    wk.si.push_back(i);
   };
   if (wk.dosage) {
     const std::uint16_t* d = &wk.g16[static_cast<std::size_t>(s) * n];
@@ -386,23 +391,35 @@ bool carrier_step(const Pre& pre, Worker& wk, int s, double U, double I, double 
   }
   const int m = static_cast<int>(wk.sg.size());
   if (!m) return false;
-  double b = (flip ? -U : U) / (I + lambda), Ic = 0.0;
+  const double sgn = flip ? -1.0 : 1.0;
+  Eigen::Map<const Eigen::MatrixXd> Am(A, S, S);
+  Eigen::Map<const Eigen::VectorXd> cv(c, S);
+  const Eigen::MatrixXd L = lambda * Eigen::MatrixXd::Identity(S, S);
+  Eigen::VectorXd b = (Am + L).ldlt().solve(sgn * cv), sc(S), z(S);
+  Eigen::MatrixXd Ic(S, S);
   for (int it = 0; it <= 100; ++it) {
-    double sc = -lambda * b; Ic = 0.0;
-    for (int i = 0; i < m; ++i) {
-      const double g = wk.sg[i], e = wk.smu[i] + b * g;
+    sc = -lambda * b; Ic.setZero();
+    for (int a = 0; a < m; ++a) {
+      const int i = wk.si[a];
+      for (int j = 0; j < S; ++j) z[j] = wk.sg[a] * pre.E[j * N + i];
+      const double e = wk.smu[a] + z.dot(b);
       const double mu = e >= 0 ? 1.0 / (1.0 + std::exp(-e)) : std::exp(e) / (1.0 + std::exp(e));
-      sc += g * (wk.sy[i] - mu);
-      Ic += g * g * mu * (1.0 - mu);
+      sc.noalias() += (wk.sy[a] - mu) * z;
+      Ic.selfadjointView<Eigen::Lower>().rankUpdate(z, mu * (1.0 - mu));
     }
+    Ic = Ic.selfadjointView<Eigen::Lower>();
     if (it == 100) break;
-    const double step = std::max(-1.0, std::min(1.0, sc / (Ic + lambda)));
+    Eigen::VectorXd step = (Ic + L).ldlt().solve(sc);
+    const double mx = step.cwiseAbs().maxCoeff();
+    if (!std::isfinite(mx)) return false;
+    if (mx > 1.0) step /= mx;
     b += step;
-    if (std::fabs(step) < 1e-8) break;
+    if (mx < 1e-8) break;
   }
-  if (!(Ic > 1e-12) || !std::isfinite(b)) return false;
-  bhat = (flip ? -b : b) * (Ic + lambda) / Ic;
-  info = Ic;
+  if (!(Ic.trace() > 1e-12) || !b.allFinite()) return false;
+  const Eigen::VectorXd u = sgn * ((Ic + L) * b);
+  for (int j = 0; j < S; ++j) u_out[j] = u[j];
+  for (int j = 0; j < S * S; ++j) I_out[j] = Ic(j % S, j / S);
   return true;
 }
 
@@ -412,8 +429,9 @@ bool carrier_step(const Pre& pre, Worker& wk, int s, double U, double I, double 
 // var_idx, sample_idx: 0-based file rows. X: n x kX covariates, columns 0..S-1 = intercept and the
 // interaction variables (the n_exp exposures first, then the interaction covariates). resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
 // block: variants per thread (0 = from mem_gb). spa_cut (logistic): saddlepoint P of the marginal score for the
-// variants whose normal P is below it (p_spa, NA elsewhere); 0 = none. carrier_max (logistic, S = 1): the
-// carrier step (beta_carrier, info_carrier) for variants with at most this many HWE-expected carriers; 0 = none.
+// variants whose normal P is below it (p_spa, NA elsewhere); 0 = none. carrier_max (logistic): the carrier
+// step (score_carrier, info_carrier) for variants with at most this many HWE-expected carriers, and for S > 1 the
+// score / information of every variant (score, info); 0 = none.
 // carrier_lambda: its ridge penalty. Returns per variant (rows) the statistics below; beta, se in
 // columns of Z = [g, g e_1, ...]; status 0 ok, 1 monomorphic / all missing.
 // [[Rcpp::export]]
@@ -426,6 +444,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   const int p = var_idx.size(), ns = sample_idx.size();
   if (X.nrow() != ns || resid.size() != ns || (w.size() && w.size() != ns)) Rcpp::stop("X / resid / w do not match");
   if (S < 1 || S > X.ncol()) Rcpp::stop("S out of range");
+  if (w.size() && carrier_max > 0 && S > 8) Rcpp::stop("effect-size shrinkage takes at most 7 interaction terms");
   if (n_exp < 0 || n_exp > S - 1) Rcpp::stop("n_exp out of range");
   if (robust && w.size()) Rcpp::stop("robust standard errors are for the linear model only");
   const std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
@@ -468,7 +487,13 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   Rcpp::NumericVector nobs(p), asum(p);
   Rcpp::IntegerVector status(p);
   Rcpp::NumericMatrix beta(p, S), se(p, S), se_rob(p, robust ? S : 0);
-  Rcpp::NumericVector p_spa(p, NA_REAL), beta_c(p, NA_REAL), info_c(p, NA_REAL);
+  Rcpp::NumericVector p_spa(p, NA_REAL);
+  // logistic effect-size summaries (carrier_max > 0): score c and information A of every variant, and the carrier
+  // step's score / information where it was done; S x S matrices as S^2 columns (column-major)
+  const bool keep = pre.logistic && carrier_max > 0;
+  Rcpp::NumericMatrix u_c(keep ? p : 0, S), i_c(keep ? p : 0, S * S), u_1(keep && S > 1 ? p : 0, S),
+      i_1(keep && S > 1 ? p : 0, S * S);
+  std::fill(u_c.begin(), u_c.end(), NA_REAL); std::fill(i_c.begin(), i_c.end(), NA_REAL);
   Rcpp::NumericVector beta_m(p), se_m(p), se_m_rob(p), chi_int(p), chi_joint(p), chi_int_rob(p), chi_joint_rob(p);
   std::fill(beta.begin(), beta.end(), NA_REAL); std::fill(se.begin(), se.end(), NA_REAL);
   std::fill(se_rob.begin(), se_rob.end(), NA_REAL);
@@ -549,11 +574,19 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
         if (pre.logistic && spa_cut > 0 && a00 > 0 &&
             std::erfc(std::fabs(c0v) / std::sqrt(2.0 * a00)) < spa_cut)
           p_spa[j] = spa_marginal(pre, W, s, &W.C1[static_cast<std::size_t>(s) * pre.m1], c0v, a00);
-        if (pre.logistic && S == 1 && carrier_max > 0 && a00 > 0) {
+        if (keep && S > 1) {
+          for (int q = 0; q < S; ++q) u_1(j, q) = c[q];
+          for (int q = 0; q < S * S; ++q) i_1(j, q) = A(q % S, q / S);
+        }
+        if (keep && a00 > 0) {
           const double maf = std::min(W.mean[s], 2.0 - W.mean[s]) / 2.0;
           if (nobs[j] * (1.0 - (1.0 - maf) * (1.0 - maf)) <= carrier_max) {
-            double bh, ic;
-            if (carrier_step(pre, W, s, c0v, a00, carrier_lambda, bh, ic)) { beta_c[j] = bh; info_c[j] = ic; }
+            double uu[64], ii[64];
+            if (carrier_step(pre, W, s, cc + static_cast<std::size_t>(s) * S, AA + static_cast<std::size_t>(s) * S * S,
+                             carrier_lambda, uu, ii)) {
+              for (int q = 0; q < S; ++q) u_c(j, q) = uu[q];
+              for (int q = 0; q < S * S; ++q) i_c(j, q) = ii[q];
+            }
           }
         }
         Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
@@ -587,7 +620,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   }
 
   Rcpp::List out;
-  out["p_spa"] = p_spa; out["beta_carrier"] = beta_c; out["info_carrier"] = info_c;
+  out["p_spa"] = p_spa; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
   out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
   out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;
   out["se_marginal_robust"] = se_m_rob; out["chisq_int"] = chi_int; out["chisq_joint"] = chi_joint;

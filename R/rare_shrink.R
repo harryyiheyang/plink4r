@@ -8,7 +8,8 @@
 .rv_prior <- function(prior = NULL) {
   d <- list(sigma0sq = 0.05^2 / (2 * 0.25 * 0.75)^-0.38,  # sd 0.05 at MAF 0.25 (fallback, nothing learned)
             weights = c(0.7, 0.15, 0.1, 0.05), alpha = -0.38, grid = c(0, 1, 10, 100),
-            wide_sd = 1.5, wide_weight = 0.02, learned = FALSE)
+            wide_sd = 1.5, wide_weight = 0.02,
+            int_ratio = 10, int_weight = 0.015, int_wide_weight = 0.005, gamma = 1, learned = FALSE)
   if (is.null(prior)) return(d)
   if (!is.list(prior)) stop("prior must be a list (see gwas()).", call. = FALSE)
   bad <- setdiff(names(prior), names(d))
@@ -18,6 +19,8 @@
     stop("prior$weights must be non-negative, one per grid component.", call. = FALSE)
   d$weights <- d$weights / sum(d$weights)
   if (!(d$wide_weight >= 0 && d$wide_weight < 1)) stop("prior$wide_weight must be in [0, 1).", call. = FALSE)
+  if (!(d$int_weight >= 0 && d$int_wide_weight >= 0 && d$int_weight + d$int_wide_weight < 1))
+    stop("prior$int_weight + prior$int_wide_weight must be in [0, 1).", call. = FALSE)
   d
 }
 
@@ -54,8 +57,8 @@
 # 1 / info_carrier) where it was computed, else the one-step (BETA, SE^2).
 .rv_shrink <- function(out, res, prior) {
   bh <- out$BETA; s2 <- out$SE^2
-  k <- which(!is.na(res$beta_carrier))
-  bh[k] <- res$beta_carrier[k]; s2[k] <- 1 / res$info_carrier[k]
+  k <- which(!is.na(res$score_carrier[, 1L]))
+  bh[k] <- res$score_carrier[k, 1L] / res$info_carrier[k, 1L]; s2[k] <- 1 / res$info_carrier[k, 1L]
   maf <- pmin(out$A1_FREQ, 1 - out$A1_FREQ)
   ps <- .rv_prior_sd(prior, maf)
   pm <- .post_mix(bh, s2, ps$sd, ps$w)
@@ -139,4 +142,28 @@
   }
   prior$learned <- info$hits >= min_hits || info$random >= min_blocks
   c(prior, list(learn = info))
+}
+
+# BETA_POST_<term> / SE_POST_<term> of a logistic gxe() result (sec. 15): the S coefficients (G and its interaction
+# terms) jointly, prior N(0, D C D) per pair of a main-effect component (the gwas() mixture) and an interaction
+# component (null; variance int_ratio * sigma0sq * (2pq)^alpha with weight int_weight; the wide N(0, wide_sd^2) with
+# weight int_wide_weight), C the shape of the information matrix. The likelihood is the carrier step's where it was
+# computed, else the one-step score and information.
+.rv_shrink_gxe <- function(out, res, prior, nm, threads) {
+  u <- res$score; I <- res$info
+  k <- which(!is.na(res$score_carrier[, 1L]))
+  u[k, ] <- res$score_carrier[k, , drop = FALSE]; I[k, ] <- res$info_carrier[k, , drop = FALSE]
+  maf <- pmin(out$A1_FREQ, 1 - out$A1_FREQ)
+  base <- prior$sigma0sq * (2 * maf * (1 - maf))^prior$alpha
+  ww <- prior$wide_weight; iw <- prior$int_weight; iww <- prior$int_wide_weight
+  pm <- post_mix_mv_cpp(u, I, base,
+                        m_scaled = c(prior$grid, 0), m_abs = c(prior$grid * 0, prior$wide_sd^2),
+                        m_w = c(prior$weights * (1 - ww), ww),
+                        i_scaled = c(0, prior$int_ratio, 0), i_abs = c(0, 0, prior$wide_sd^2),
+                        i_w = c(1 - iw - iww, iw, iww), gamma = prior$gamma, threads = threads)
+  for (q in seq_along(nm)) {
+    out[, (paste0("BETA_POST_", nm[q])) := pm$mean[, q]]
+    out[, (paste0("SE_POST_", nm[q])) := pm$sd[, q]]
+  }
+  invisible(out)
 }

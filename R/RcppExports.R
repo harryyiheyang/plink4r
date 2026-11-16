@@ -93,6 +93,10 @@ pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
     .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 }
 
+post_mix_mv_cpp <- function(score, info, base, m_scaled, m_abs, m_w, i_scaled, i_abs, i_w, gamma, threads) {
+    .Call(`_plink4r_post_mix_mv_cpp`, score, info, base, m_scaled, m_abs, m_w, i_scaled, i_abs, i_w, gamma, threads)
+}
+
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
     .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
 }

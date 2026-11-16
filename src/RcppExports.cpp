@@ -385,6 +385,27 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// post_mix_mv_cpp
+Rcpp::List post_mix_mv_cpp(Rcpp::NumericMatrix score, Rcpp::NumericMatrix info, Rcpp::NumericVector base, Rcpp::NumericVector m_scaled, Rcpp::NumericVector m_abs, Rcpp::NumericVector m_w, Rcpp::NumericVector i_scaled, Rcpp::NumericVector i_abs, Rcpp::NumericVector i_w, double gamma, int threads);
+RcppExport SEXP _plink4r_post_mix_mv_cpp(SEXP scoreSEXP, SEXP infoSEXP, SEXP baseSEXP, SEXP m_scaledSEXP, SEXP m_absSEXP, SEXP m_wSEXP, SEXP i_scaledSEXP, SEXP i_absSEXP, SEXP i_wSEXP, SEXP gammaSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type score(scoreSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type info(infoSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type base(baseSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type m_scaled(m_scaledSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type m_abs(m_absSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type m_w(m_wSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type i_scaled(i_scaledSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type i_abs(i_absSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type i_w(i_wSEXP);
+    Rcpp::traits::input_parameter< double >::type gamma(gammaSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(post_mix_mv_cpp(score, info, base, m_scaled, m_abs, m_w, i_scaled, i_abs, i_w, gamma, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // sumstat_impute_cpp
 Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z, double thresh, double delta, int threads);
 RcppExport SEXP _plink4r_sumstat_impute_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP typed_indexSEXP, SEXP zSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP threadsSEXP) {
@@ -427,6 +448,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 16},
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
+    {"_plink4r_post_mix_mv_cpp", (DL_FUNC) &_plink4r_post_mix_mv_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
 };
