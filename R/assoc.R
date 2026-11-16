@@ -110,8 +110,9 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #'
 #' Reported per variant: the marginal effect from the model without interactions (`BETA_MARGINAL`,
 #' `SE_MARGINAL`, `P_MARGINAL`, as [gwas()]); the main effect `BETA_G`, `SE_G` and every interaction
-#' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the Wald test
-#' of all exposure interactions (`df` = number of exposure terms), and `P_JOINT`, of `g` and those interactions
+#' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the test of all
+#' exposure interactions (`df` = number of exposure terms; with two or more, a Cauchy combination of the single-term
+#' and variance-component tests, see `int_test`; with one, the Wald test), and `P_JOINT` (Wald), of `g` and those interactions
 #' together (`df` + 1). Linear: model-based variances use the full-model residual variance (`lm`), `robust` (default
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
 #' Logistic: one Newton step from the null model (score-based), no robust SE; `P_MARGINAL` is the saddlepoint P of
@@ -134,6 +135,12 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
 #' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
+#' @param int_test With two or more exposure terms, how `P_INT` (and `P_INT_ROBUST`) combine them: `"cauchy"`
+#'   (default) is the Cauchy combination of the single-term P values (half of the weight, shared equally) and a
+#'   variance-component test (the other half: the sum of the squared term z values, referred to its weighted
+#'   chi-square null by saddlepoint); `"chisq"` is the Wald chi-square on `df` degrees of freedom as before.
+#'   The single-term P values are those of the one-degree-of-freedom tests (t for the linear model, the
+#'   small-count `F(1, M - 1)` reference for robust ones when `mac_adjust`, normal for logistic).
 #' @param shrink,prior,carrier_max,blocks Logistic only, as [gwas()]; `prior` also takes `int_ratio`, `int_weight`,
 #'   `int_wide_weight` and `gamma` (see Details).
 #' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
@@ -141,8 +148,9 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
                 snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
-                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38) {
+                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, int_test = c("cauchy", "chisq")) {
   family <- match.arg(family)
+  int_test <- match.arg(int_test)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
@@ -178,6 +186,18 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     out[, `:=`(P_INT_ROBUST = if (ne == 1L) .p_robust_1df(res$chisq_int_robust, N, A1_FREQ, mac_adjust) else
                                 stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
                P_JOINT_ROBUST = stats::pchisq(res$chisq_joint_robust, ne + 1L, lower.tail = FALSE))]
+  if (ne >= 2L && int_test == "cauchy") {
+    ki <- 1L + seq_len(ne)
+    bi <- res$beta[, ki, drop = FALSE]
+    z <- bi / res$se[, ki, drop = FALSE]
+    p1 <- if (lin) 2 * stats::pt(-abs(z), res$df) else 2 * stats::pnorm(-abs(z))
+    out[, P_INT := int_cauchy_cpp(bi, res$v_int, matrix(p1, ncol = ne), r$info$threads)]
+    if (robust) {
+      zr <- bi / res$se_robust[, ki, drop = FALSE]
+      p1r <- vapply(seq_len(ne), function(q) .p_robust_1df(zr[, q]^2, out$N, out$A1_FREQ, mac_adjust), numeric(nrow(out)))
+      out[, P_INT_ROBUST := int_cauchy_cpp(bi, res$v_int_robust, matrix(p1r, ncol = ne), r$info$threads)]
+    }
+  }
   data.table::setattr(out, "info", c(r$info, list(exposure_terms = terms[seq_len(ne)],
                                                   int_covar_terms = terms[-seq_len(ne)])))
   out[]

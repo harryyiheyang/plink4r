@@ -406,6 +406,20 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// int_cauchy_cpp
+Rcpp::NumericVector int_cauchy_cpp(Rcpp::NumericMatrix b, Rcpp::NumericMatrix v, Rcpp::NumericMatrix p1, int threads);
+RcppExport SEXP _plink4r_int_cauchy_cpp(SEXP bSEXP, SEXP vSEXP, SEXP p1SEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type b(bSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type v(vSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type p1(p1SEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(int_cauchy_cpp(b, v, p1, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // sumstat_impute_cpp
 Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z, double thresh, double delta, int threads);
 RcppExport SEXP _plink4r_sumstat_impute_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP typed_indexSEXP, SEXP zSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP threadsSEXP) {
@@ -449,6 +463,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_post_mix_mv_cpp", (DL_FUNC) &_plink4r_post_mix_mv_cpp, 11},
+    {"_plink4r_int_cauchy_cpp", (DL_FUNC) &_plink4r_int_cauchy_cpp, 4},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
 };

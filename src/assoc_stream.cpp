@@ -494,6 +494,10 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   Rcpp::NumericMatrix u_c(keep ? p : 0, S), i_c(keep ? p : 0, S * S), u_1(keep && S > 1 ? p : 0, S),
       i_1(keep && S > 1 ? p : 0, S * S);
   std::fill(u_c.begin(), u_c.end(), NA_REAL); std::fill(i_c.begin(), i_c.end(), NA_REAL);
+  // covariance of the exposure-interaction estimates (n_exp >= 2; model-based and robust), ne^2 columns
+  const int ne2 = n_exp >= 2 ? n_exp * n_exp : 0;
+  Rcpp::NumericMatrix v_int(ne2 ? p : 0, ne2), v_int_rob(ne2 && robust ? p : 0, ne2);
+  std::fill(v_int.begin(), v_int.end(), NA_REAL); std::fill(v_int_rob.begin(), v_int_rob.end(), NA_REAL);
   Rcpp::NumericVector beta_m(p), se_m(p), se_m_rob(p), chi_int(p), chi_joint(p), chi_int_rob(p), chi_joint_rob(p);
   std::fill(beta.begin(), beta.end(), NA_REAL); std::fill(se.begin(), se.end(), NA_REAL);
   std::fill(se_rob.begin(), se_rob.end(), NA_REAL);
@@ -607,6 +611,9 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
           const Eigen::VectorXd bi = bt.segment(1, ne), bj = bt.head(ne + 1);
           chi_int[j] = bi.dot(Vm.block(1, 1, ne, ne).ldlt().solve(bi));
           chi_joint[j] = bj.dot(Vm.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
+          for (int q = 0; q < ne2; ++q) v_int(j, q) = Vm(1 + q % ne, 1 + q / ne);
+          if (robust)
+            for (int q = 0; q < ne2; ++q) v_int_rob(j, q) = Vr(1 + q % ne, 1 + q / ne);
           if (robust) {
             chi_int_rob[j] = bi.dot(Vr.block(1, 1, ne, ne).ldlt().solve(bi));
             chi_joint_rob[j] = bj.dot(Vr.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
@@ -621,6 +628,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
 
   Rcpp::List out;
   out["p_spa"] = p_spa; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
+  out["v_int"] = v_int; out["v_int_robust"] = v_int_rob;
   out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
   out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;
   out["se_marginal_robust"] = se_m_rob; out["chisq_int"] = chi_int; out["chisq_joint"] = chi_joint;

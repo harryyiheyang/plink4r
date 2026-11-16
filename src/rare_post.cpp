@@ -96,3 +96,85 @@ Rcpp::List post_mix_mv_cpp(Rcpp::NumericMatrix score, Rcpp::NumericMatrix info, 
   }
   return Rcpp::List::create(Rcpp::Named("mean") = mean, Rcpp::Named("sd") = sd);
 }
+
+// int_cauchy_cpp: multi-exposure interaction P of every variant. Single-exposure P values (p1, p x q) carry half
+// of the weight, equally; the variance-component test carries the other half: Q = z'z, z_j = b_j / se_j, whose
+// null law is sum_k lambda_k chi^2_1 with lambda the eigenvalues of the correlation of the q estimates; its upper
+// tail by saddlepoint (Lugannani-Rice; K(t) = -sum log(1 - 2 lambda t) / 2). Cauchy combination
+// T = sum w_i tan((1/2 - p_i) pi), P = 1/2 - atan(T) / pi (tan(.) ~ 1 / (p pi) for p < 1e-15).
+namespace {
+
+double wchisq_spa(double Q, const Eigen::VectorXd& lam) {
+  const double mu = lam.sum(), var = 2.0 * lam.squaredNorm(), lmax = lam.maxCoeff();
+  if (!(lmax > 0)) return NA_REAL;
+  auto K = [&](double t, double& k0, double& k1, double& k2) {
+    k0 = k1 = k2 = 0.0;
+    for (int i = 0; i < lam.size(); ++i) {
+      const double a = 1.0 - 2.0 * lam[i] * t;
+      k0 -= 0.5 * std::log(a); k1 += lam[i] / a; k2 += 2.0 * lam[i] * lam[i] / (a * a);
+    }
+  };
+  if (std::fabs(Q - mu) < 1e-3 * std::sqrt(var)) return 0.5 * std::erfc((Q - mu) / std::sqrt(2.0 * var));
+  double lo = Q > mu ? 0.0 : -1e300, hi = Q > mu ? 0.5 / lmax : 0.0;
+  if (Q <= mu) lo = -(1.0 / (2.0 * lmax)) * 1e8;
+  double t = Q > mu ? 0.5 * hi : -1.0, k0, k1, k2;
+  for (int it = 0; it < 200; ++it) {
+    K(t, k0, k1, k2);
+    const double f = k1 - Q;
+    if (f > 0) hi = t; else lo = t;
+    if (std::fabs(f) <= 1e-12 * std::max(1.0, Q)) break;
+    double tn = t - f / k2;
+    if (!(tn > lo && tn < hi)) tn = 0.5 * (lo + hi);
+    t = tn;
+  }
+  K(t, k0, k1, k2);
+  const double w2 = 2.0 * (t * Q - k0);
+  if (!(w2 > 0)) return 0.5 * std::erfc((Q - mu) / std::sqrt(2.0 * var));
+  const double w = (t > 0 ? 1.0 : -1.0) * std::sqrt(w2), u = t * std::sqrt(k2);
+  const double p = 0.5 * std::erfc(w / std::sqrt(2.0)) + std::exp(-0.5 * w * w) * 0.3989422804014327 * (1.0 / u - 1.0 / w);
+  return std::min(1.0, std::max(0.0, p));
+}
+
+double cauchy_term(double p) {
+  if (p < 1e-15) return 1.0 / (p * M_PI);
+  return std::tan((0.5 - p) * M_PI);
+}
+
+}  // namespace
+
+// [[Rcpp::export]]
+Rcpp::NumericVector int_cauchy_cpp(Rcpp::NumericMatrix b, Rcpp::NumericMatrix v, Rcpp::NumericMatrix p1, int threads) {
+  const int p = b.nrow(), q = b.ncol();
+  if (v.nrow() != p || v.ncol() != q * q || p1.nrow() != p || p1.ncol() != q) Rcpp::stop("b / v / p1 do not match");
+  const int T = plink4r::resolve_threads(threads);
+  Rcpp::NumericVector out(p, NA_REAL);
+  const double* B = b.begin();
+  const double* V = v.begin();
+  const double* P1 = p1.begin();
+  double* O = out.begin();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1024) num_threads(T)
+#endif
+  for (int j = 0; j < p; ++j) {
+    Eigen::MatrixXd C(q, q);
+    Eigen::VectorXd z(q);
+    bool ok = true;
+    for (int a = 0; a < q * q && ok; ++a) { C(a % q, a / q) = V[j + (std::size_t)a * p]; ok = std::isfinite(C(a % q, a / q)); }
+    for (int a = 0; a < q && ok; ++a) {
+      ok = std::isfinite(B[j + (std::size_t)a * p]) && C(a, a) > 0 && std::isfinite(P1[j + (std::size_t)a * p]);
+      if (ok) z[a] = B[j + (std::size_t)a * p] / std::sqrt(C(a, a));
+    }
+    if (!ok) continue;
+    const Eigen::VectorXd d = C.diagonal().cwiseSqrt().cwiseInverse();
+    const Eigen::MatrixXd R = d.asDiagonal() * (0.5 * (C + C.transpose())) * d.asDiagonal();
+    const Eigen::VectorXd lam = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(R, Eigen::EigenvaluesOnly)
+                                    .eigenvalues().cwiseMax(0.0);
+    const double pvc = wchisq_spa(z.squaredNorm(), lam);
+    if (ISNAN(pvc)) continue;
+    double Tst = 0.5 * cauchy_term(std::max(pvc, 1e-300));
+    for (int a = 0; a < q; ++a) Tst += 0.5 / q * cauchy_term(std::max(P1[j + (std::size_t)a * p], 1e-300));
+    const double pc = Tst > 1e15 ? 1.0 / (Tst * M_PI) : 0.5 - std::atan(Tst) / M_PI;
+    O[j] = std::min(1.0, std::max(pc, 0.0));
+  }
+  return out;
+}
