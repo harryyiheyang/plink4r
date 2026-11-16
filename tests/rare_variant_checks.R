@@ -34,4 +34,21 @@ stopifnot(max(abs(r1$mean - r2$mean)) < 1e-10, max(abs(r1$sd - r2$sd)) < 1e-10)
 pm <- c(0.3, 0.02, 0.5)
 stopifnot(identical(f(c(4, 9, 1), N, c(2, 4, 50) / (2 * N), TRUE, pm, 5)[1:2], pm[1:2]),
           f(1, N, 50 / (2 * N), TRUE, pm[3], 5) != pm[3])
+# 5. default reporting floors on a tiny BED: GWAS P only for MAC > 20, interaction P only for MAF >= min_maf_int
+td <- tempfile("p4r"); dir.create(td); pre <- file.path(td, "t")
+n <- 2000; macs <- c(10, 20, 21, 40)
+G <- sapply(macs, function(m) { g <- integer(n); g[seq_len(m) * 7L] <- 1L; g })
+code <- matrix(c(3L, 2L, 0L)[G + 1L], n)                        # BED: 11 = 0 copies of A1, 10 = 1, 00 = 2
+cm <- array(code, c(4L, n / 4L, length(macs)))
+con <- file(paste0(pre, ".bed"), "wb"); writeBin(as.raw(c(0x6c, 0x1b, 0x01)), con)
+writeBin(as.raw(as.vector(cm[1, , ] + 4L * cm[2, , ] + 16L * cm[3, , ] + 64L * cm[4, , ])), con); close(con)
+writeLines(sprintf("1\tv%d\t0\t%d\tA\tG", seq_along(macs), seq_along(macs)), paste0(pre, ".bim"))
+writeLines(sprintf("i%d\ti%d\t0\t0\t0\t-9", 1:n, 1:n), paste0(pre, ".fam"))
+set.seed(2); d <- data.frame(IID = paste0("i", 1:n), c1 = rnorm(n), e = rnorm(n), y = rnorm(n))
+a <- gwas(bfile = pre, data = d, pheno = "y", covar = "c1", robust = TRUE, threads = 1)
+stopifnot(identical(is.na(a$P), macs <= 20), identical(is.na(a$P_ROBUST), macs <= 20), !anyNA(a$BETA))
+b <- gxe(bfile = pre, data = d, pheno = "y", exposure = "e", threads = 1, min_maf_int = 30 / (2 * n))
+stopifnot(identical(is.na(b$P_INT_ROBUST), macs < 30), identical(is.na(b$P_MARGINAL_ROBUST), macs <= 20))
+b <- gxe(bfile = pre, data = d, pheno = "y", exposure = "e", threads = 1)   # default MAF 0.001 = MAC 4 here
+stopifnot(!anyNA(b$P_INT_ROBUST))
 cat("rare-variant checks passed\n")

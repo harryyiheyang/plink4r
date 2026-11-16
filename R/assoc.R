@@ -57,9 +57,10 @@
 #' @param robust_min_mac With `mac_adjust`, `P_ROBUST` is the model-based `P` for variants whose minor allele count
 #'   `2 N p` is below this (default 5): the sandwich variance carries no information there (real data: lambda 2.2
 #'   at MAC 1-5 against 1.08 for the model P). Those rows are recognisable from `N` and `A1_FREQ`.
-#' @param min_mac `P` (and `P_ROBUST`) are `NA` for variants whose minor allele count `2 N p` is below this (e.g.
-#'   dosage-only variants with MAC < 1, where neither the normal nor the saddlepoint reference is reliable); 0 =
-#'   never.
+#' @param min_mac `P` (and `P_ROBUST`) are `NA` for variants whose minor allele count `2 N p` is not above this
+#'   (default 20: P reported for MAC > 20); `BETA`, `SE`, the posterior columns and the frequencies are always
+#'   reported. 0 = never. With the default, the small-count rules below 20 (`robust_min_mac`, the MAC-5 floor of
+#'   the F reference) no longer bite; they apply when `min_mac` is lowered.
 #' @param blocks Logistic with `shrink`: LD blocks for prior learning, 38 or 37 ([ld_blocks_default()]) or a block
 #'   file (header, then chr start stop).
 #' @param carrier_max Logistic only: refine the likelihood over the carriers for variants with at most this many
@@ -79,7 +80,7 @@
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
                  mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000,
-                 blocks = 38, min_mac = 1, robust_min_mac = 5) {
+                 blocks = 38, min_mac = 20, robust_min_mac = 5) {
   family <- match.arg(family)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
@@ -102,7 +103,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
     out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust, P, robust_min_mac)]
   }
   if (min_mac > 0) {
-    lowp <- which(!(2 * out$N * pmin(out$A1_FREQ, 1 - out$A1_FREQ) >= min_mac))
+    lowp <- which(!(2 * out$N * pmin(out$A1_FREQ, 1 - out$A1_FREQ) > min_mac))
     if (length(lowp)) for (cl in grep("^P($|_)", names(out), value = TRUE)) data.table::set(out, lowp, cl, NA_real_)
   }
   data.table::setattr(out, "info", r$info)
@@ -152,19 +153,23 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
 #' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
-#' @param min_mac Every P column is `NA` for variants whose minor allele count `2 N p` is below this (e.g.
-#'   dosage-only variants with MAC < 1, where no reference distribution is reliable); 0 = never.
-#' @param min_mac_int Interaction tests are `NA` below this minor allele count: for the linear model all of them
-#'   (default 10), for the logistic model the Wald chi-square ones that have no saddlepoint version (`P_INT` with two
-#'   or more exposure terms, `P_JOINT`; default 100, as they were seen at 1e-12 to 1e-52 under the null up to MAC
-#'   1000 in real data). **With a logistic model and two or more exposure terms, use `P_INT_CAUCHY`**, which is
-#'   built from saddlepoint P values and stays calibrated at low counts.
+#' @param min_mac The marginal P columns (`P_MARGINAL`, `P_MARGINAL_ROBUST`) are `NA` for variants whose minor
+#'   allele count `2 N p` is not above this (default 20, as [gwas()]); interaction tests follow `min_maf_int`;
+#'   estimates are always reported. 0 = never.
+#' @param min_maf_int Every interaction and joint test (`P_INT`, `P_JOINT`, their robust and Cauchy versions) is `NA`
+#'   for variants whose minor allele frequency is below this (default 0.001). This is the default floor for
+#'   interactions; `min_mac_int` / `min_mac_int_spa` add count-based floors when given.
+#' @param min_mac_int Optional (default `NULL` = not used): interaction tests are also `NA` below this minor allele
+#'   count, for the linear model all of them, for the logistic model the Wald chi-square ones that have no
+#'   saddlepoint version (`P_INT` with two or more exposure terms, `P_JOINT`; real data showed them at 1e-12 to
+#'   1e-52 under the null up to MAC 1000). **With a logistic model and two or more exposure terms, use
+#'   `P_INT_CAUCHY`**, which is built from saddlepoint P values and stays calibrated at low counts.
 #'   Note that the logistic interaction estimates are one Newton step from the null: at moderate counts a Wald
 #'   chi-square can still be extreme (real data: MAC 161, `P_INT` 2.8e-12 with `BETA_GxE` -41 and a posterior near
 #'   0). For logistic interactions trust `P_INT_CAUCHY` and the posterior columns over the Wald `P_INT` /
 #'   `P_JOINT`.
-#' @param min_mac_int_spa Logistic only: floor for the saddlepoint-based interaction tests (`P_INT` with one term,
-#'   `P_INT_CAUCHY`), default 10 (real data: P down to 6e-14 at MAC 1-5).
+#' @param min_mac_int_spa Optional (default `NULL` = not used), logistic only: count floor for the saddlepoint-based
+#'   interaction tests (`P_INT` with one term, `P_INT_CAUCHY`; real data: P down to 6e-14 at MAC 1-5).
 #' @param robust_min_mac As [gwas()], for `P_MARGINAL_ROBUST` and the one-df `P_INT_ROBUST`.
 #' @param eig_tol Interaction and joint tests are `NA` when the information matrix of G and its interactions,
 #'   scaled to unit diagonal, has its smallest eigenvalue below this (near singular: the carriers barely vary in
@@ -176,10 +181,9 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
                 snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
-                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 1, min_mac_int = NULL,
-                robust_min_mac = 5, eig_tol = 1e-6, min_mac_int_spa = 10) {
+                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 20, min_maf_int = 0.001,
+                min_mac_int = NULL, min_mac_int_spa = NULL, robust_min_mac = 5, eig_tol = 1e-6) {
   family <- match.arg(family)
-  if (is.null(min_mac_int)) min_mac_int <- if (family == "binomial") 100 else 10
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
@@ -236,25 +240,28 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     if (robust)
       out[, P_INT_ROBUST_CAUCHY := int_cauchy_cpp(cz(p1r, res$v_int_robust), res$v_int_robust, p1r, r$info$threads)]
   }
-  # Interaction tests not reported (NA): (a) below min_mac_int, every chi-square (Wald) interaction / joint test,
-  # and for the linear model also the one-df and Cauchy interaction tests (logistic one-df and Cauchy tests use the
-  # saddlepoint and are kept); (b) the information matrix of (G, interactions) near singular: smallest eigenvalue of
-  # its unit-diagonal scaling below eig_tol, every interaction / joint test.
+  # Interaction tests not reported (NA): (a) MAF below min_maf_int, every interaction / joint test; (b) optional
+  # count floors: below min_mac_int every chi-square (Wald) interaction / joint test, and for the linear model all of
+  # them; below min_mac_int_spa the logistic saddlepoint-based ones; (c) the information matrix of
+  # (G, interactions) near singular: smallest eigenvalue of its unit-diagonal scaling below eig_tol, every
+  # interaction / joint test.
   ic <- intersect(c("P_INT", "P_JOINT", "P_INT_ROBUST", "P_JOINT_ROBUST", "P_INT_CAUCHY", "P_INT_ROBUST_CAUCHY"),
                   names(out))
   chi <- c("P_JOINT", "P_JOINT_ROBUST", if (ne >= 2L) c("P_INT", "P_INT_ROBUST"))
-  lowc <- which(!(mac >= min_mac_int))
+  lowf <- which(!(pmin(out$A1_FREQ, 1 - out$A1_FREQ) >= min_maf_int))
+  if (length(lowf)) for (cl in ic) data.table::set(out, lowf, cl, NA_real_)
+  lowc <- if (is.null(min_mac_int)) integer(0) else which(!(mac >= min_mac_int))
   if (length(lowc)) for (cl in if (lin) ic else intersect(chi, ic)) data.table::set(out, lowc, cl, NA_real_)
-  if (!lin) {  # the saddlepoint-based logistic interaction tests have their own, lower floor
+  if (!lin && !is.null(min_mac_int_spa)) {
     lows <- which(!(mac >= min_mac_int_spa))
     if (length(lows)) for (cl in setdiff(ic, chi)) data.table::set(out, lows, cl, NA_real_)
   }
   sing <- which(!(res$eig_min >= eig_tol))
   if (length(sing)) for (cl in ic) data.table::set(out, sing, cl, NA_real_)
-  r$info$int_low_mac <- length(lowc); r$info$int_singular <- length(sing); r$info$eig_min <- res$eig_min
-  if (min_mac > 0) {
-    pc <- grep("^P_", names(out), value = TRUE)
-    lowp <- which(!(mac >= min_mac))
+  r$info$int_low_maf <- length(lowf); r$info$int_singular <- length(sing)
+  if (min_mac > 0) {  # the GWAS-type floor applies to the marginal tests; interactions follow min_maf_int
+    pc <- grep("^P_MARGINAL", names(out), value = TRUE)
+    lowp <- which(!(mac > min_mac))
     if (length(lowp)) for (cl in pc) data.table::set(out, lowp, cl, NA_real_)
   }
   data.table::setattr(out, "info", c(r$info, list(exposure_terms = terms[seq_len(ne)],
