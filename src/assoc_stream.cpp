@@ -257,7 +257,7 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA, doub
 // Two-sided saddlepoint P of the marginal score of slot s (column 0: c0 = gt'r, a00 = gt'W gt). Exact CGF over the
 // samples carrying the minor allele (dosage >= kSpaDos of it) or with a missing call, normal over the rest.
 // mu_i is recovered from the residual of a 0/1 phenotype: r = y - mu, so mu = -r (y = 0) or 1 - r (y = 1).
-double spa_marginal(const Pre& pre, Worker& wk, int s, const double* M, double c0, double a00);
+double spa_score(const Pre& pre, Worker& wk, int s, const double* M, const double* a, double c0, double a00);
 
 // Saddlepoint P (two-sided) of the logistic score s = sum_i gt_i (y_i - mu_i) under H0 (fastSPA, Dey et al. 2017):
 // the cumulant generating function is exact over the m samples given in gt / mu (carriers of the minor allele and
@@ -318,16 +318,22 @@ struct Cgf {
 
 constexpr double kSpaDos = 0.05;
 
-double spa_marginal(const Pre& pre, Worker& wk, int s, const double* M, double c0, double a00) {
-  const int n = pre.n, k = pre.k;
+// a: contrast of the S columns of Z (nullptr = column 0 only): the score is a'c (c0 here), its variance a'Aa (a00),
+// and the per-sample term sum_j a_j zt_ij, zt_ij = (g_i - mean) e_ij - (V M_j)_i.
+double spa_score(const Pre& pre, Worker& wk, int s, const double* M, const double* a, double c0, double a00) {
+  const int n = pre.n, k = pre.k, S = a ? pre.S : 1;
   const std::size_t N = n;
   const double mean = wk.mean[s];
   const bool flip = mean > 1.0;  // A1 is the major allele: carriers of the minor allele have count < 2
   wk.sg.clear(); wk.smu.clear();
   double ex = 0.0;
   auto add = [&](int i, double gc) {
-    double gt = gc;
-    for (int c = 0; c < k; ++c) gt -= pre.V[c * N + i] * M[c];
+    double gt = 0.0;
+    for (int j = 0; j < S; ++j) {
+      double zt = gc * pre.E[j * N + i];
+      for (int c = 0; c < k; ++c) zt -= pre.V[c * N + i] * M[j * k + c];
+      gt += (a ? a[j] : 1.0) * zt;
+    }
     const double r = pre.r[i], mu = r < 0 ? -r : 1.0 - r;
     wk.sg.push_back(gt); wk.smu.push_back(mu);
     ex += gt * gt * mu * (1.0 - mu);
@@ -488,6 +494,8 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   Rcpp::IntegerVector status(p);
   Rcpp::NumericMatrix beta(p, S), se(p, S), se_rob(p, robust ? S : 0);
   Rcpp::NumericVector p_spa(p, NA_REAL);
+  Rcpp::NumericMatrix p_spa_int(w.size() ? p : 0, n_exp);  // SPA P of each exposure interaction (logistic)
+  std::fill(p_spa_int.begin(), p_spa_int.end(), NA_REAL);
   // logistic effect-size summaries (carrier_max > 0): score c and information A of every variant, and the carrier
   // step's score / information where it was done; S x S matrices as S^2 columns (column-major)
   const bool keep = pre.logistic && carrier_max > 0;
@@ -577,7 +585,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
         if (robust) se_m_rob[j] = std::sqrt(BB[static_cast<std::size_t>(s) * S * S] / (a00 * a00));
         if (pre.logistic && spa_cut > 0 && a00 > 0 &&
             std::erfc(std::fabs(c0v) / std::sqrt(2.0 * a00)) < spa_cut)
-          p_spa[j] = spa_marginal(pre, W, s, &W.C1[static_cast<std::size_t>(s) * pre.m1], c0v, a00);
+          p_spa[j] = spa_score(pre, W, s, &W.C1[static_cast<std::size_t>(s) * pre.m1], nullptr, c0v, a00);
         if (keep && S > 1) {
           for (int q = 0; q < S; ++q) u_1(j, q) = c[q];
           for (int q = 0; q < S * S; ++q) i_1(j, q) = A(q % S, q / S);
@@ -612,6 +620,26 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
           chi_int[j] = bi.dot(Vm.block(1, 1, ne, ne).ldlt().solve(bi));
           chi_joint[j] = bj.dot(Vm.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
           for (int q = 0; q < ne2; ++q) v_int(j, q) = Vm(1 + q % ne, 1 + q / ne);
+          if (pre.logistic && spa_cut > 0)  // efficient score of each exposure interaction given the other terms
+            for (int t = 1; t <= ne; ++t) {
+              Eigen::VectorXd av = Eigen::VectorXd::Zero(S);
+              av[t] = 1.0;
+              if (S > 1) {
+                std::vector<int> o;
+                for (int u = 0; u < S; ++u) if (u != t) o.push_back(u);
+                Eigen::MatrixXd Aoo(S - 1, S - 1);
+                Eigen::VectorXd Aot(S - 1);
+                for (int u = 0; u < S - 1; ++u) {
+                  Aot[u] = A(o[u], t);
+                  for (int v2 = 0; v2 < S - 1; ++v2) Aoo(u, v2) = A(o[u], o[v2]);
+                }
+                const Eigen::VectorXd h = Aoo.ldlt().solve(Aot);
+                for (int u = 0; u < S - 1; ++u) av[o[u]] = -h[u];
+              }
+              const double sc = av.dot(c), va = av.dot(A * av);
+              if (va > 0 && std::erfc(std::fabs(sc) / std::sqrt(2.0 * va)) < spa_cut)
+                p_spa_int(j, t - 1) = spa_score(pre, W, s, &W.C1[static_cast<std::size_t>(s) * pre.m1], av.data(), sc, va);
+            }
           if (robust)
             for (int q = 0; q < ne2; ++q) v_int_rob(j, q) = Vr(1 + q % ne, 1 + q / ne);
           if (robust) {
@@ -627,7 +655,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   }
 
   Rcpp::List out;
-  out["p_spa"] = p_spa; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
+  out["p_spa"] = p_spa; out["p_spa_int"] = p_spa_int; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
   out["v_int"] = v_int; out["v_int_robust"] = v_int_rob;
   out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
   out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;

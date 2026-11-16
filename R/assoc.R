@@ -16,9 +16,10 @@
 #' `A^-1 B A^-1` with `B` from the null-model residuals, as GEM. With `mac_adjust = TRUE` (default) `P_ROBUST` is
 #' the small-count version: `T^2 = (BETA / SE_ROBUST)^2` is mapped to `H = (M - 1) T^2 / (M - T^2)` and referred
 #' to `F(1, M - 1)`, where `M = N (1 - (1 - p)^2)` is the expected number of carriers under Hardy-Weinberg
-#' (`p` the minor allele frequency; hard calls and dosages alike). This removes the inflated median and the
-#' conservative tail of the normal P at low minor-allele counts; when the minor allele count `2 N p` is below 5,
-#' or with `mac_adjust = FALSE`, `P_ROBUST` is the normal P as before. Logistic: one Newton step from the null model,
+#' (`p` the minor allele frequency; hard calls and dosages alike), and `P_ROBUST` is the larger of that P and the
+#' normal one. This removes the inflated median of the normal P at low minor-allele counts without making any P
+#' smaller than before (the tail keeps the normal P, which is conservative there); when the minor allele count
+#' `2 N p` is below 5, or with `mac_adjust = FALSE`, `P_ROBUST` is the normal P. Logistic: one Newton step from the null model,
 #' `BETA = U / I`, `SE = I^-1/2` (`U`, `I` the score and information of `g` given the covariates), `Z = BETA / SE`
 #' (`Z^2` is the score test) and `P`. For variants whose normal P is below `spa_cut`, `P` is the saddlepoint P of
 #' the score (fastSPA: the cumulant generating function is exact over the carriers of the minor allele, dosage at
@@ -53,6 +54,9 @@
 #'   hits' variance), the weights by EM over one random common variant per block. With fewer than 10 hits or 50
 #'   blocks the corresponding defaults are kept (sd 0.05 at MAF 0.25; weights 0.7, 0.15, 0.1, 0.05); the prior used
 #'   is in `info$prior`. The carrier step uses the ridge penalty `1 / wide_sd^2`.
+#' @param min_mac `P` (and `P_ROBUST`) are `NA` for variants whose minor allele count `2 N p` is below this (e.g.
+#'   dosage-only variants with MAC < 1, where neither the normal nor the saddlepoint reference is reliable); 0 =
+#'   never.
 #' @param blocks Logistic with `shrink`: LD blocks for prior learning, 38 or 37 ([ld_blocks_default()]) or a block
 #'   file (header, then chr start stop).
 #' @param carrier_max Logistic only: refine the likelihood over the carriers for variants with at most this many
@@ -72,7 +76,7 @@
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
                  mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000,
-                 blocks = 38) {
+                 blocks = 38, min_mac = 1) {
   family <- match.arg(family)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
@@ -94,6 +98,10 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
     out[, SE_ROBUST := res$se_robust[, 1L]]
     out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust)]
   }
+  if (min_mac > 0) {
+    lowp <- which(!(2 * out$N * pmin(out$A1_FREQ, 1 - out$A1_FREQ) >= min_mac))
+    if (length(lowp)) for (cl in grep("^P($|_)", names(out), value = TRUE)) data.table::set(out, lowp, cl, NA_real_)
+  }
   data.table::setattr(out, "info", r$info)
   out[]
 }
@@ -110,11 +118,17 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #'
 #' Reported per variant: the marginal effect from the model without interactions (`BETA_MARGINAL`,
 #' `SE_MARGINAL`, `P_MARGINAL`, as [gwas()]); the main effect `BETA_G`, `SE_G` and every interaction
-#' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the test of all
-#' exposure interactions (`df` = number of exposure terms; with two or more, a Cauchy combination of the single-term
-#' and variance-component tests, see `int_test`; with one, the Wald test), and `P_JOINT` (Wald), of `g` and those interactions
+#' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the Wald test of
+#' all exposure interactions (`df` = number of exposure terms; with one term and a logistic model, the saddlepoint
+#' P of its efficient score below `spa_cut`), and `P_JOINT`, of `g` and those interactions
 #' together (`df` + 1). Linear: model-based variances use the full-model residual variance (`lm`), `robust` (default
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
+#' With two or more exposure terms, `P_INT_CAUCHY` (and `P_INT_ROBUST_CAUCHY`) is an additional test: the Cauchy
+#' combination of the single-term P values (half of the weight, shared equally; t, the small-count robust
+#' reference, or the logistic saddlepoint P) and a variance-component test (the other half: the sum of the squared
+#' single-term z values, weighted chi-square null by saddlepoint). It gains power when the effect is spread over
+#' terms but loses it when the exposure terms are strongly correlated (e.g. BMI and BMI^2), where the Wald `P_INT`
+#' is the better test; both are reported.
 #' Logistic: one Newton step from the null model (score-based), no robust SE; `P_MARGINAL` is the saddlepoint P of
 #' [gwas()] below `spa_cut`. With `shrink = TRUE` (default) the logistic result also has `BETA_POST_G`, `SE_POST_G`,
 #' `BETA_POST_GxE_<term>` and `SE_POST_GxE_<term>`: the joint posterior of the S coefficients, each pair of a
@@ -135,12 +149,10 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
 #' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
-#' @param int_test With two or more exposure terms, how `P_INT` (and `P_INT_ROBUST`) combine them: `"cauchy"`
-#'   (default) is the Cauchy combination of the single-term P values (half of the weight, shared equally) and a
-#'   variance-component test (the other half: the sum of the squared term z values, referred to its weighted
-#'   chi-square null by saddlepoint); `"chisq"` is the Wald chi-square on `df` degrees of freedom as before.
-#'   The single-term P values are those of the one-degree-of-freedom tests (t for the linear model, the
-#'   small-count `F(1, M - 1)` reference for robust ones when `mac_adjust`, normal for logistic).
+#' @param min_mac Every P column is `NA` for variants whose minor allele count `2 N p` is below this (e.g.
+#'   dosage-only variants with MAC < 1, where no reference distribution is reliable); 0 = never.
+#' @param min_mac_int Logistic only: the Wald chi-square interaction tests that have no saddlepoint version
+#'   (`P_INT` with two or more exposure terms, `P_JOINT`) are `NA` below this minor allele count.
 #' @param shrink,prior,carrier_max,blocks Logistic only, as [gwas()]; `prior` also takes `int_ratio`, `int_weight`,
 #'   `int_wide_weight` and `gamma` (see Details).
 #' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
@@ -148,9 +160,8 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
                 snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
-                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, int_test = c("cauchy", "chisq")) {
+                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 1, min_mac_int = 10) {
   family <- match.arg(family)
-  int_test <- match.arg(int_test)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
@@ -180,23 +191,41 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     .rv_shrink_gxe(out, res, pr, nm, r$info$threads)
     r$info$prior <- pr
   }
-  out[, `:=`(P_INT = stats::pchisq(res$chisq_int, ne, lower.tail = FALSE),
-             P_JOINT = stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE))]
-  if (robust)
-    out[, `:=`(P_INT_ROBUST = if (ne == 1L) .p_robust_1df(res$chisq_int_robust, N, A1_FREQ, mac_adjust) else
-                                stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
+  mac <- 2 * out$N * pmin(out$A1_FREQ, 1 - out$A1_FREQ)
+  p_int <- stats::pchisq(res$chisq_int, ne, lower.tail = FALSE)
+  p_joint <- stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE)
+  ki <- 1L + seq_len(ne)
+  # single-term P of the exposure interactions: t (linear), saddlepoint below spa_cut else normal (logistic)
+  z1 <- res$beta[, ki, drop = FALSE] / res$se[, ki, drop = FALSE]
+  p1 <- if (lin) 2 * stats::pt(-abs(z1), res$df) else 2 * stats::pnorm(-abs(z1))
+  if (!lin) { k <- !is.na(res$p_spa_int); p1[k] <- res$p_spa_int[k] }
+  if (!lin) {
+    if (ne == 1L) p_int <- p1[, 1L]
+    # Wald chi-squares of logistic interactions have no saddlepoint version: not reported at low counts
+    low <- mac < min_mac_int
+    if (ne >= 2L) p_int[low] <- NA_real_
+    p_joint[low] <- NA_real_
+  }
+  out[, `:=`(P_INT = p_int, P_JOINT = p_joint)]
+  if (robust) {
+    p1r <- vapply(seq_len(ne), function(q) .p_robust_1df((res$beta[, 1L + q] / res$se_robust[, 1L + q])^2, out$N,
+                                                          out$A1_FREQ, mac_adjust), numeric(nrow(out)))
+    p1r <- matrix(p1r, ncol = ne)
+    out[, `:=`(P_INT_ROBUST = if (ne == 1L) p1r[, 1L] else stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
                P_JOINT_ROBUST = stats::pchisq(res$chisq_joint_robust, ne + 1L, lower.tail = FALSE))]
-  if (ne >= 2L && int_test == "cauchy") {
-    ki <- 1L + seq_len(ne)
-    bi <- res$beta[, ki, drop = FALSE]
-    z <- bi / res$se[, ki, drop = FALSE]
-    p1 <- if (lin) 2 * stats::pt(-abs(z), res$df) else 2 * stats::pnorm(-abs(z))
-    out[, P_INT := int_cauchy_cpp(bi, res$v_int, matrix(p1, ncol = ne), r$info$threads)]
-    if (robust) {
-      zr <- bi / res$se_robust[, ki, drop = FALSE]
-      p1r <- vapply(seq_len(ne), function(q) .p_robust_1df(zr[, q]^2, out$N, out$A1_FREQ, mac_adjust), numeric(nrow(out)))
-      out[, P_INT_ROBUST := int_cauchy_cpp(bi, res$v_int_robust, matrix(p1r, ncol = ne), r$info$threads)]
-    }
+  }
+  if (ne >= 2L) {
+    # z values carried by the single-term P (so the VC part sees the same calibration as the single terms)
+    cz <- function(pp, V) { zz <- stats::qnorm(pmax(pp, 1e-300) / 2, lower.tail = FALSE) * sign(z1)
+      zz * sqrt(pmax(V[, (ki - 2L) * ne + (ki - 1L), drop = FALSE], 0)) }
+    out[, P_INT_CAUCHY := int_cauchy_cpp(cz(p1, res$v_int), res$v_int, p1, r$info$threads)]
+    if (robust)
+      out[, P_INT_ROBUST_CAUCHY := int_cauchy_cpp(cz(p1r, res$v_int_robust), res$v_int_robust, p1r, r$info$threads)]
+  }
+  if (min_mac > 0) {
+    pc <- grep("^P_", names(out), value = TRUE)
+    lowp <- which(!(mac >= min_mac))
+    if (length(lowp)) for (cl in pc) data.table::set(out, lowp, cl, NA_real_)
   }
   data.table::setattr(out, "info", c(r$info, list(exposure_terms = terms[seq_len(ne)],
                                                   int_covar_terms = terms[-seq_len(ne)])))
@@ -204,19 +233,23 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 }
 
 # P of a one-df robust Wald statistic W (= T^2). Small-count reference (rare_variant_calibration.md, sec. 10):
-# M = N (1 - (1 - p)^2), the HWE-expected carrier count from the minor allele frequency p; W is capped just below
-# M, mapped to H = (M - 1) W / (M - W) and referred to F(1, M - 1). The "M >= 5" floor is applied to the minor
-# allele count 2 N p (M = MAC - MAC^2 / 4N falls a hair below 5 at MAC = 5); below it, or with adjust = FALSE,
-# chi-square(1) as before.
+# M = N (1 - (1 - p)^2), the HWE-expected carrier count from the minor allele frequency p; W is mapped to
+# H = (M - 1) W / (M - W) and referred to F(1, M - 1). The mapping is only used to make a P larger, never smaller:
+# P = max(P_F, P_normal). Its job is the inflated median of the normal P at low counts (W < 1); in the tail it
+# would shrink P, which real data showed to be unsafe (dosages and non-HWE counts give W near or above M, where
+# H -> infinity: a MAC-5 dosage variant went from 0.02 to 1e-19), so the tail keeps the normal P, which the
+# simulations found conservative there. W >= M therefore gives the normal P, and a non-integer M is fine (F with
+# real df). The floor "M >= 5" is checked on the minor allele count 2 N p (M = MAC - MAC^2 / 4N is a hair below 5
+# at MAC 5); below it, or with adjust = FALSE, chi-square(1) as before.
 .p_robust_1df <- function(W, N, freq, adjust = TRUE) {
   p <- stats::pchisq(W, 1, lower.tail = FALSE)
   if (!adjust) return(p)
-  maf <- pmin(freq, 1 - freq)
+  maf <- rep_len(pmin(freq, 1 - freq), length(W)); N <- rep_len(N, length(W))
   M <- N * (1 - (1 - maf)^2)
-  k <- which(is.finite(W) & is.finite(M) & 2 * N * maf >= 5 - 1e-8)
+  k <- which(is.finite(W) & is.finite(M) & 2 * N * maf >= 5 - 1e-8 & W < M)
   if (length(k)) {
-    Mk <- M[k]; Wk <- pmin(W[k], Mk * (1 - 1e-9))
-    p[k] <- stats::pf((Mk - 1) * Wk / (Mk - Wk), 1, Mk - 1, lower.tail = FALSE)
+    Mk <- M[k]; Wk <- W[k]
+    p[k] <- pmax(p[k], stats::pf((Mk - 1) * Wk / (Mk - Wk), 1, Mk - 1, lower.tail = FALSE))
   }
   p
 }
