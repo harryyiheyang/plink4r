@@ -159,6 +159,12 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #'   or more exposure terms, `P_JOINT`; default 100, as they were seen at 1e-12 to 1e-52 under the null up to MAC
 #'   1000 in real data). **With a logistic model and two or more exposure terms, use `P_INT_CAUCHY`**, which is
 #'   built from saddlepoint P values and stays calibrated at low counts.
+#'   Note that the logistic interaction estimates are one Newton step from the null: at moderate counts a Wald
+#'   chi-square can still be extreme (real data: MAC 161, `P_INT` 2.8e-12 with `BETA_GxE` -41 and a posterior near
+#'   0). For logistic interactions trust `P_INT_CAUCHY` and the posterior columns over the Wald `P_INT` /
+#'   `P_JOINT`.
+#' @param min_mac_int_spa Logistic only: floor for the saddlepoint-based interaction tests (`P_INT` with one term,
+#'   `P_INT_CAUCHY`), default 10 (real data: P down to 6e-14 at MAC 1-5).
 #' @param robust_min_mac As [gwas()], for `P_MARGINAL_ROBUST` and the one-df `P_INT_ROBUST`.
 #' @param eig_tol Interaction and joint tests are `NA` when the information matrix of G and its interactions,
 #'   scaled to unit diagonal, has its smallest eigenvalue below this (near singular: the carriers barely vary in
@@ -171,7 +177,7 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
                 snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
                 shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 1, min_mac_int = NULL,
-                robust_min_mac = 5, eig_tol = 1e-6) {
+                robust_min_mac = 5, eig_tol = 1e-6, min_mac_int_spa = 10) {
   family <- match.arg(family)
   if (is.null(min_mac_int)) min_mac_int <- if (family == "binomial") 100 else 10
   shrink <- family == "binomial" && shrink
@@ -239,6 +245,10 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   chi <- c("P_JOINT", "P_JOINT_ROBUST", if (ne >= 2L) c("P_INT", "P_INT_ROBUST"))
   lowc <- which(!(mac >= min_mac_int))
   if (length(lowc)) for (cl in if (lin) ic else intersect(chi, ic)) data.table::set(out, lowc, cl, NA_real_)
+  if (!lin) {  # the saddlepoint-based logistic interaction tests have their own, lower floor
+    lows <- which(!(mac >= min_mac_int_spa))
+    if (length(lows)) for (cl in setdiff(ic, chi)) data.table::set(out, lows, cl, NA_real_)
+  }
   sing <- which(!(res$eig_min >= eig_tol))
   if (length(sing)) for (cl in ic) data.table::set(out, sing, cl, NA_real_)
   r$info$int_low_mac <- length(lowc); r$info$int_singular <- length(sing); r$info$eig_min <- res$eig_min
