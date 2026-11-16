@@ -141,7 +141,7 @@ struct Worker {
   std::size_t sb = 0;
   std::vector<unsigned char> g8;   // cap x sb: 2-bit codes (0/1/2 = count, 3 = missing)
   std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
-  std::vector<double> mean, G, G2, C1, C2, z, Z, Zt;
+  std::vector<double> mean, G, G2, C1, C2, z, Z, Zt, sg, smu;  // sg, smu: SPA scratch
   std::vector<int> mono;
   void init(const Pre& pre, int capacity, bool dos) {
     cap = capacity; n = pre.n; dosage = dos;
@@ -253,18 +253,120 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA, doub
   return nexp;
 }
 
+// Two-sided saddlepoint P of the marginal score of slot s (column 0: c0 = gt'r, a00 = gt'W gt). Exact CGF over the
+// samples carrying the minor allele (dosage >= kSpaDos of it) or with a missing call, normal over the rest.
+// mu_i is recovered from the residual of a 0/1 phenotype: r = y - mu, so mu = -r (y = 0) or 1 - r (y = 1).
+double spa_marginal(const Pre& pre, Worker& wk, int s, const double* M, double c0, double a00);
+
+// Saddlepoint P (two-sided) of the logistic score s = sum_i gt_i (y_i - mu_i) under H0 (fastSPA, Dey et al. 2017):
+// the cumulant generating function is exact over the m samples given in gt / mu (carriers of the minor allele and
+// missing calls) and normal, K(t) = v t^2 / 2, over the rest (v = their share of Var(s) = gt'W gt). K'(t) = q is
+// solved by a safeguarded Newton iteration (at most kSpaIter steps) and the tail by Lugannani-Rice.
+constexpr int kSpaIter = 40;
+
+struct Cgf {
+  const double* g; const double* mu; int m; double v;
+  // K, K', K'' at t
+  void eval(double t, double& K, double& K1, double& K2) const {
+    K = 0.5 * v * t * t; K1 = v * t; K2 = v;
+    for (int i = 0; i < m; ++i) {
+      const double gi = g[i], u = mu[i], a = t * gi;
+      // log(1 - u + u e^a) computed stably; p1 = u e^a / (1 - u + u e^a)
+      double lse, p1;
+      if (a > 0) { const double e = std::exp(-a); lse = a + std::log((1 - u) * e + u); p1 = u / ((1 - u) * e + u); }
+      else { const double e = std::exp(a); lse = std::log1p(u * (e - 1)); p1 = u * e / (1 - u + u * e); }
+      K += lse - a * u;
+      K1 += gi * (p1 - u);
+      K2 += gi * gi * p1 * (1 - p1);
+    }
+  }
+  // root of K'(t) = q
+  double root(double q) const {
+    double K, K1, K2, t = 0.0, lo = -1e300, hi = 1e300;
+    eval(0.0, K, K1, K2);
+    if (K2 > 0) t = q / K2;
+    for (int it = 0; it < kSpaIter; ++it) {
+      eval(t, K, K1, K2);
+      const double f = K1 - q;
+      if (f > 0) hi = std::min(hi, t); else lo = std::max(lo, t);
+      if (std::fabs(f) <= 1e-10 * std::max(1.0, std::fabs(q))) break;
+      double tn = K2 > 0 ? t - f / K2 : t;
+      if (!(tn > lo && tn < hi) || !std::isfinite(tn)) {  // Newton left the bracket: bisect (or expand)
+        if (lo > -1e300 && hi < 1e300) tn = 0.5 * (lo + hi);
+        else tn = (hi < 1e300) ? (t < 0 ? 2 * t - 1 : -1.0) : (t > 0 ? 2 * t + 1 : 1.0);
+      }
+      t = tn;
+    }
+    return t;
+  }
+  // P(s >= q) for q > 0 (upper = true) or P(s <= q) for q < 0
+  double tail(double q) const {
+    const double t = root(q);
+    double K, K1, K2;
+    eval(t, K, K1, K2);
+    const double w2 = 2.0 * (t * q - K);
+    if (!(w2 > 0) || !(K2 > 0)) return NA_REAL;
+    const double w = (t > 0 ? 1.0 : -1.0) * std::sqrt(w2), u = t * std::sqrt(K2);
+    const double phi = std::exp(-0.5 * w * w) * 0.3989422804014327;
+    const double c = phi * (1.0 / u - 1.0 / w);
+    const double p = t > 0 ? 0.5 * std::erfc(w / std::sqrt(2.0)) + c    // P(s >= q)
+                           : 0.5 * std::erfc(-w / std::sqrt(2.0)) - c;  // P(s <= q)
+    return std::min(1.0, std::max(0.0, p));
+  }
+};
+
+constexpr double kSpaDos = 0.05;
+
+double spa_marginal(const Pre& pre, Worker& wk, int s, const double* M, double c0, double a00) {
+  const int n = pre.n, k = pre.k;
+  const std::size_t N = n;
+  const double mean = wk.mean[s];
+  const bool flip = mean > 1.0;  // A1 is the major allele: carriers of the minor allele have count < 2
+  wk.sg.clear(); wk.smu.clear();
+  double ex = 0.0;
+  auto add = [&](int i, double gc) {
+    double gt = gc;
+    for (int c = 0; c < k; ++c) gt -= pre.V[c * N + i] * M[c];
+    const double r = pre.r[i], mu = r < 0 ? -r : 1.0 - r;
+    wk.sg.push_back(gt); wk.smu.push_back(mu);
+    ex += gt * gt * mu * (1.0 - mu);
+  };
+  if (wk.dosage) {
+    const std::uint16_t* d = &wk.g16[static_cast<std::size_t>(s) * n];
+    for (int i = 0; i < n; ++i) {
+      if (d[i] == kDosMiss) { add(i, 0.0); continue; }
+      const double x = d[i] * (1.0 / 16384.0);
+      if ((flip ? 2.0 - x : x) >= kSpaDos) add(i, x - mean);
+    }
+  } else {
+    const unsigned char* p = &wk.g8[s * wk.sb];
+    const int skip = flip ? 2 : 0;
+    for (int i = 0; i < n; ++i) {
+      const int code = (p[i >> 2] >> ((i & 3) << 1)) & 3;
+      if (code == skip) continue;
+      add(i, code == 3 ? 0.0 : code - mean);
+    }
+  }
+  const Cgf K{wk.sg.data(), wk.smu.data(), static_cast<int>(wk.sg.size()), std::max(0.0, a00 - ex)};
+  const double q = std::fabs(c0);
+  const double up = K.tail(q), lo = K.tail(-q);
+  if (ISNAN(up) || ISNAN(lo)) return NA_REAL;
+  return std::min(1.0, up + lo);
+}
+
 }  // namespace
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
 // var_idx, sample_idx: 0-based file rows. X: n x kX covariates, columns 0..S-1 = intercept and the
 // interaction variables (the n_exp exposures first, then the interaction covariates). resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
-// block: variants per thread (0 = from mem_gb). Returns per variant (rows) the statistics below; beta, se in
+// block: variants per thread (0 = from mem_gb). spa_cut (logistic): saddlepoint P of the marginal score for the
+// variants whose normal P is below it (p_spa, NA elsewhere); 0 = none. Returns per variant (rows) the statistics below; beta, se in
 // columns of Z = [g, g e_1, ...]; status 0 ok, 1 monomorphic / all missing.
 // [[Rcpp::export]]
 Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
                             Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X,
                             int S, int n_exp, Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust,
-                            int threads, double mem_gb, int block) {
+                            int threads, double mem_gb, int block, double spa_cut) {
   const int T = plink4r::resolve_threads(threads);
   mem_gb = plink4r::resolve_mem_gb(mem_gb, T);
   const int p = var_idx.size(), ns = sample_idx.size();
@@ -312,6 +414,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   Rcpp::NumericVector nobs(p), asum(p);
   Rcpp::IntegerVector status(p);
   Rcpp::NumericMatrix beta(p, S), se(p, S), se_rob(p, robust ? S : 0);
+  Rcpp::NumericVector p_spa(p, NA_REAL);
   Rcpp::NumericVector beta_m(p), se_m(p), se_m_rob(p), chi_int(p), chi_joint(p), chi_int_rob(p), chi_joint_rob(p);
   std::fill(beta.begin(), beta.end(), NA_REAL); std::fill(se.begin(), se.end(), NA_REAL);
   std::fill(se_rob.begin(), se_rob.end(), NA_REAL);
@@ -389,6 +492,9 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
         if (pre.logistic) se_m[j] = std::sqrt(1.0 / a00);
         else se_m[j] = std::sqrt(std::max(0.0, rr - c0v * c0v / a00) / df_m / a00);
         if (robust) se_m_rob[j] = std::sqrt(BB[static_cast<std::size_t>(s) * S * S] / (a00 * a00));
+        if (pre.logistic && spa_cut > 0 && a00 > 0 &&
+            std::erfc(std::fabs(c0v) / std::sqrt(2.0 * a00)) < spa_cut)
+          p_spa[j] = spa_marginal(pre, W, s, &W.C1[static_cast<std::size_t>(s) * pre.m1], c0v, a00);
         Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
         if (ldlt.info() != Eigen::Success) { status[j] = 2; continue; }
         const Eigen::MatrixXd Ainv = ldlt.solve(Eigen::MatrixXd::Identity(S, S));
@@ -420,6 +526,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   }
 
   Rcpp::List out;
+  out["p_spa"] = p_spa;
   out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
   out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;
   out["se_marginal_robust"] = se_m_rob; out["chisq_int"] = chi_int; out["chisq_joint"] = chi_joint;

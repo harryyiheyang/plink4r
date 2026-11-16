@@ -12,8 +12,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // assoc_stream_cpp
-Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, int S, int n_exp, Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust, int threads, double mem_gb, int block);
-RcppExport SEXP _plink4r_assoc_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP SSEXP, SEXP n_expSEXP, SEXP residSEXP, SEXP wSEXP, SEXP robustSEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
+Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, int S, int n_exp, Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust, int threads, double mem_gb, int block, double spa_cut);
+RcppExport SEXP _plink4r_assoc_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP SSEXP, SEXP n_expSEXP, SEXP residSEXP, SEXP wSEXP, SEXP robustSEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP, SEXP spa_cutSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -32,7 +32,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
     Rcpp::traits::input_parameter< int >::type block(blockSEXP);
-    rcpp_result_gen = Rcpp::wrap(assoc_stream_cpp(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block));
+    Rcpp::traits::input_parameter< double >::type spa_cut(spa_cutSEXP);
+    rcpp_result_gen = Rcpp::wrap(assoc_stream_cpp(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block, spa_cut));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -401,7 +402,7 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 15},
+    {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 16},
     {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 7},
     {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 7},
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},

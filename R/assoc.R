@@ -19,8 +19,11 @@
 #' (`p` the minor allele frequency; hard calls and dosages alike). This removes the inflated median and the
 #' conservative tail of the normal P at low minor-allele counts; when the minor allele count `2 N p` is below 5,
 #' or with `mac_adjust = FALSE`, `P_ROBUST` is the normal P as before. Logistic: one Newton step from the null model,
-#' `BETA = U / I`, `SE = I^-1/2` (`U`, `I` the score and information of `g` given the covariates), `Z` and its
-#' normal `P`; `Z^2` is the score test. No robust SE for the logistic model.
+#' `BETA = U / I`, `SE = I^-1/2` (`U`, `I` the score and information of `g` given the covariates), `Z = BETA / SE`
+#' (`Z^2` is the score test) and `P`. For variants whose normal P is below `spa_cut`, `P` is the saddlepoint P of
+#' the score (fastSPA: the cumulant generating function is exact over the carriers of the minor allele, dosage at
+#' least 0.05, and normal over the other samples), which keeps rare variants and unbalanced case-control ratios
+#' calibrated; elsewhere it is the normal P. No robust SE for the logistic model.
 #'
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
@@ -34,6 +37,8 @@
 #' @param robust Linear only: add sandwich standard errors.
 #' @param mac_adjust Refer one-degree-of-freedom robust tests to `F(1, M - 1)` with `M` the expected carrier
 #'   count (see Details); `FALSE` keeps the normal (chi-square) P.
+#' @param spa_cut Logistic only: saddlepoint P for the variants whose normal P is below this; 0 = normal P
+#'   throughout.
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param mem_gb Memory budget in GB that sets the block size; 0 takes it from [plink4r_resources()].
 #' @param block Variants per thread and block; 0 = the largest that fits `mem_gb` (at most 4096).
@@ -46,15 +51,16 @@
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
-                 mac_adjust = TRUE) {
+                 mac_adjust = TRUE, spa_cut = 0.05) {
   family <- match.arg(family)
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
-                  robust, center = FALSE, threads, mem_gb, block)
+                  robust, center = FALSE, threads, mem_gb, block, spa_cut)
   res <- r$res; out <- r$out
   stat <- if (family == "gaussian") "T" else "Z"
   out[, `:=`(BETA = res$beta[, 1L], SE = res$se[, 1L])]
   out[, (stat) := BETA / SE]
-  out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else 2 * stats::pnorm(-abs(get(stat)))]
+  out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else
+    data.table::fifelse(is.na(res$p_spa), 2 * stats::pnorm(-abs(get(stat))), res$p_spa)]
   if (robust) {
     out[, SE_ROBUST := res$se_robust[, 1L]]
     out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust)]
@@ -79,7 +85,8 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' of all exposure interactions (`df` = number of exposure terms), and `P_JOINT`, of `g` and those interactions
 #' together (`df` + 1). Linear: model-based variances use the full-model residual variance (`lm`), `robust` (default
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
-#' Logistic: one Newton step from the null model (score-based), no robust SE. Chi-square tests throughout, except
+#' Logistic: one Newton step from the null model (score-based), no robust SE; `P_MARGINAL` is the saddlepoint P of
+#' [gwas()] below `spa_cut`. Chi-square tests throughout, except
 #' that with `mac_adjust = TRUE` the one-degree-of-freedom robust tests (`P_MARGINAL_ROBUST`, and `P_INT_ROBUST`
 #' when there is one exposure term) use the small-count `F(1, M - 1)` reference of [gwas()]; tests with two or more
 #' degrees of freedom keep the chi-square.
@@ -93,17 +100,18 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @export
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE) {
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05) {
   family <- match.arg(family)
   if (is.null(robust)) robust <- family == "gaussian"
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust, center,
-                  threads, mem_gb, block)
+                  threads, mem_gb, block, spa_cut)
   res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp
   lin <- family == "gaussian"
   pz <- function(b, s) if (lin) 2 * stats::pt(-abs(b / s), res$df_marginal) else 2 * stats::pnorm(-abs(b / s))
   out[, `:=`(BETA_MARGINAL = res$beta_marginal, SE_MARGINAL = res$se_marginal)]
   out[, P_MARGINAL := pz(BETA_MARGINAL, SE_MARGINAL)]
+  if (!lin) out[!is.na(res$p_spa), P_MARGINAL := res$p_spa[!is.na(res$p_spa)]]
   if (robust) {
     out[, SE_MARGINAL_ROBUST := res$se_marginal_robust]
     out[, P_MARGINAL_ROBUST := .p_robust_1df((BETA_MARGINAL / SE_MARGINAL_ROBUST)^2, N, A1_FREQ, mac_adjust)]
@@ -145,7 +153,7 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 
 # Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
 .assoc_run <- function(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust,
-                       center, threads, mem_gb, block) {
+                       center, threads, mem_gb, block, spa_cut = 0) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
   if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
@@ -232,12 +240,12 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 
   res <- assoc_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
                           as.integer(srow - 1L), X, S, length(ie), resid, w, robust, threads, mem_gb,
-                          as.integer(block))
+                          as.integer(block), if (family == "binomial") as.numeric(spa_cut) else 0)
   out <- var[vrow, list(CHR, POS, ID, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
   info <- list(samples = n, covariate_rank = res$rank, null_converged = fit$converged, block = res$block,
                threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
-               explicit_projection = res$explicit, monomorphic = sum(res$status == 1L),
+               explicit_projection = res$explicit, spa = sum(!is.na(res$p_spa)), monomorphic = sum(res$status == 1L),
                singular = sum(res$status == 2L),
                skipped_multiallelic = skipped)
   list(res = res, out = out, info = info, terms = terms, n_exp = length(ie))
