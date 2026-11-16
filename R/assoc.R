@@ -12,8 +12,13 @@
 #'
 #' Linear: `BETA`, `SE`, `T` and `P` are those of `lm(y ~ covar + g)` (t distribution, `n - k - 1` degrees of
 #' freedom, `k` the rank of the covariates with the intercept), with a missing call replaced by the variant's
-#' mean among the analysed samples. `robust = TRUE` adds `SE_ROBUST` and `P_ROBUST` (normal), the sandwich
-#' `A^-1 B A^-1` with `B` from the null-model residuals, as GEM. Logistic: one Newton step from the null model,
+#' mean among the analysed samples. `robust = TRUE` adds `SE_ROBUST` and `P_ROBUST`, the sandwich
+#' `A^-1 B A^-1` with `B` from the null-model residuals, as GEM. With `mac_adjust = TRUE` (default) `P_ROBUST` is
+#' the small-count version: `T^2 = (BETA / SE_ROBUST)^2` is mapped to `H = (M - 1) T^2 / (M - T^2)` and referred
+#' to `F(1, M - 1)`, where `M = N (1 - (1 - p)^2)` is the expected number of carriers under Hardy-Weinberg
+#' (`p` the minor allele frequency; hard calls and dosages alike). This removes the inflated median and the
+#' conservative tail of the normal P at low minor-allele counts; when the minor allele count `2 N p` is below 5,
+#' or with `mac_adjust = FALSE`, `P_ROBUST` is the normal P as before. Logistic: one Newton step from the null model,
 #' `BETA = U / I`, `SE = I^-1/2` (`U`, `I` the score and information of `g` given the covariates), `Z` and its
 #' normal `P`; `Z^2` is the score test. No robust SE for the logistic model.
 #'
@@ -27,6 +32,8 @@
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors.
+#' @param mac_adjust Refer one-degree-of-freedom robust tests to `F(1, M - 1)` with `M` the expected carrier
+#'   count (see Details); `FALSE` keeps the normal (chi-square) P.
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param mem_gb Memory budget in GB that sets the block size; 0 takes it from [plink4r_resources()].
 #' @param block Variants per thread and block; 0 = the largest that fits `mem_gb` (at most 4096).
@@ -38,7 +45,8 @@
 #'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
-                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L) {
+                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
+                 mac_adjust = TRUE) {
   family <- match.arg(family)
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
                   robust, center = FALSE, threads, mem_gb, block)
@@ -49,7 +57,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
   out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else 2 * stats::pnorm(-abs(get(stat)))]
   if (robust) {
     out[, SE_ROBUST := res$se_robust[, 1L]]
-    out[, P_ROBUST := 2 * stats::pnorm(-abs(BETA / SE_ROBUST))]
+    out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust)]
   }
   data.table::setattr(out, "info", r$info)
   out[]
@@ -71,7 +79,10 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' of all exposure interactions (`df` = number of exposure terms), and `P_JOINT`, of `g` and those interactions
 #' together (`df` + 1). Linear: model-based variances use the full-model residual variance (`lm`), `robust` (default
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
-#' Logistic: one Newton step from the null model (score-based), no robust SE. Chi-square tests throughout.
+#' Logistic: one Newton step from the null model (score-based), no robust SE. Chi-square tests throughout, except
+#' that with `mac_adjust = TRUE` the one-degree-of-freedom robust tests (`P_MARGINAL_ROBUST`, and `P_INT_ROBUST`
+#' when there is one exposure term) use the small-count `F(1, M - 1)` reference of [gwas()]; tests with two or more
+#' degrees of freedom keep the chi-square.
 #'
 #' @inheritParams gwas
 #' @param exposure Names of the exposure columns of `data` (one or more).
@@ -82,7 +93,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @export
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L) {
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE) {
   family <- match.arg(family)
   if (is.null(robust)) robust <- family == "gaussian"
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
@@ -95,7 +106,7 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   out[, P_MARGINAL := pz(BETA_MARGINAL, SE_MARGINAL)]
   if (robust) {
     out[, SE_MARGINAL_ROBUST := res$se_marginal_robust]
-    out[, P_MARGINAL_ROBUST := 2 * stats::pnorm(-abs(BETA_MARGINAL / SE_MARGINAL_ROBUST))]
+    out[, P_MARGINAL_ROBUST := .p_robust_1df((BETA_MARGINAL / SE_MARGINAL_ROBUST)^2, N, A1_FREQ, mac_adjust)]
   }
   nm <- c("G", paste0("GxE_", terms))
   for (q in seq_along(nm)) {
@@ -106,11 +117,30 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   out[, `:=`(P_INT = stats::pchisq(res$chisq_int, ne, lower.tail = FALSE),
              P_JOINT = stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE))]
   if (robust)
-    out[, `:=`(P_INT_ROBUST = stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
+    out[, `:=`(P_INT_ROBUST = if (ne == 1L) .p_robust_1df(res$chisq_int_robust, N, A1_FREQ, mac_adjust) else
+                                stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
                P_JOINT_ROBUST = stats::pchisq(res$chisq_joint_robust, ne + 1L, lower.tail = FALSE))]
   data.table::setattr(out, "info", c(r$info, list(exposure_terms = terms[seq_len(ne)],
                                                   int_covar_terms = terms[-seq_len(ne)])))
   out[]
+}
+
+# P of a one-df robust Wald statistic W (= T^2). Small-count reference (rare_variant_calibration.md, sec. 10):
+# M = N (1 - (1 - p)^2), the HWE-expected carrier count from the minor allele frequency p; W is capped just below
+# M, mapped to H = (M - 1) W / (M - W) and referred to F(1, M - 1). The "M >= 5" floor is applied to the minor
+# allele count 2 N p (M = MAC - MAC^2 / 4N falls a hair below 5 at MAC = 5); below it, or with adjust = FALSE,
+# chi-square(1) as before.
+.p_robust_1df <- function(W, N, freq, adjust = TRUE) {
+  p <- stats::pchisq(W, 1, lower.tail = FALSE)
+  if (!adjust) return(p)
+  maf <- pmin(freq, 1 - freq)
+  M <- N * (1 - (1 - maf)^2)
+  k <- which(is.finite(W) & is.finite(M) & 2 * N * maf >= 5 - 1e-8)
+  if (length(k)) {
+    Mk <- M[k]; Wk <- pmin(W[k], Mk * (1 - 1e-9))
+    p[k] <- stats::pf((Mk - 1) * Wk / (Mk - Wk), 1, Mk - 1, lower.tail = FALSE)
+  }
+  p
 }
 
 # Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
