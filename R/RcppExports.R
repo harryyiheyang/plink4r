@@ -93,6 +93,10 @@ pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
     .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 }
 
+genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
+    .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+}
+
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
     .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
 }

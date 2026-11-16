@@ -93,6 +93,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   }
   lab <- if (!is.null(cl)) "custom" else if (!is.null(ld)) "ld" else if (any(is.finite(const))) "custom" else
     if (any(is.finite(af))) "af" else "mean"
+  ld_write <- NULL
   if (!is.null(ld) && any(x$n_miss > 0)) {
     P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
     .check_delta(P$delta)
@@ -103,23 +104,24 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     use <- sort(intersect(al$vi + 1L, which(sel & x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
     if (length(use)) {
       a <- if (!is.null(af)) { ua <- which(is.finite(af)); stats::setNames(af[ua], x$snp[ua]) }
-      gi <- genotype_impute(x, pan, ld$dir, snps = x$snp[use], flank = P$flank, delta = P$delta,
-                            anchor_min_miss = P$anchor_min_miss, thresh = P$thresh, threads = P$threads,
-                            mem_gb = P$mem_gb, af = a, cond = if (!all(sel)) x$snp[sel] else P$cond)
-      lc <- data.frame(j = gi$fill$j, IID = gi$fill$IID, g = gi$fill$g, i = gi$fill$i)
-      if (!is.null(cl)) cl$i <- NA_integer_
-      cl <- if (is.null(cl)) lc else rbind(cl, lc)  # user cells first: they win
+      cond <- if (!all(sel)) x$snp[sel] else P$cond
+      # the kernel writes the LD fills straight into the new object (no per-cell table in R)
+      ld_write <- function(ptr) .genotype_impute(x, pan, ld$dir, NULL, x$snp[use], P$flank, NULL, P$delta,
+                                                 P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb, a, cond,
+                                                 write_ptr = ptr)
     }
   }
   .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
-               default = "mean", inplace = FALSE, impute = lab, threads = P$threads, cols = if (!all(sel)) sel)
+               default = "mean", inplace = FALSE, impute = lab, threads = P$threads, cols = if (!all(sel)) sel,
+               ld_write = ld_write)
 }
 
 # Refill the missing cells of X through geno_fill_cpp. Per column f = default ("mean": observed mean, 0 when
 # every cell is missing; "keep": the current fill), then af (anchored), then const; cells (CSR from
-# .geno_fill_spec) win over all. inplace only for an object nothing else references.
+# .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
+# writes the LD fills into the new store after the per-column values and before the cells (so cells > LD > f).
 .geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, default = c("mean", "keep"), inplace = FALSE,
-                         impute = X$impute, threads = X$threads, cols = NULL) {
+                         impute = X$impute, threads = X$threads, cols = NULL, ld_write = NULL) {
   default <- match.arg(default)
   p <- X$p; n <- X$n
   if (!is.null(af)) {
@@ -141,7 +143,13 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   f[m == 0] <- NaN
   if (!is.null(cols)) f[!cols] <- NaN  # columns outside `cols` keep their current fill
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
-  ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+  if (is.null(ld_write)) {
+    ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+  } else {
+    ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), inplace, .threads(threads))
+    ld_write(ptr)
+    if (length(cells$ptr)) ptr <- geno_fill_cpp(ptr, numeric(0), cells$ptr, cells$i, cells$g, TRUE, .threads(threads))
+  }
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
             threads = X$threads, file = X$file, appended = X$appended)
 }
