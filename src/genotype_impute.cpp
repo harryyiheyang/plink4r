@@ -2,6 +2,7 @@
 // The algorithm (stage 1 conditional mean, stage 2 anchor) lives in impute_kernel.h, shared with geno_score.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -50,7 +51,20 @@ Rcpp::List impute_run(const ImputeJob& J, const plink4r::ImputeLD& L, plink4r::B
   const std::vector<double>& afv = J.afv;
   const std::vector<char>& kr = J.kr;
   const int ns = B.ns;
-  const plink4r::PersonPlanes P = plink4r::build_planes(L, B, T);
+  plink4r::PersonPlanes P = plink4r::build_planes(L, B, T);
+  // People whose missing cells all sit in rows that are not returned (flank rows) need no solve: drop their
+  // lists. Every person with a missing kept cell keeps the full M_i, so the kept fills are unchanged.
+  if (std::find(kr.begin(), kr.end(), 0) != kr.end()) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256) num_threads(T)
+#endif
+    for (int i = 0; i < ns; ++i) {
+      std::vector<int>& M = P.Mi[i];
+      bool any = false;
+      for (int l : M) if (kr[l]) { any = true; break; }
+      if (!any) std::vector<int>().swap(M);
+    }
+  }
   const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
   const auto t2 = std::chrono::steady_clock::now();
   const plink4r::Stage2Result A = plink4r::impute_stage2(R, B.sum_obs, afv, ns, anchor_min_miss);
