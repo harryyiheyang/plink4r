@@ -20,6 +20,7 @@
 #include <Rcpp.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -1176,7 +1177,30 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, std::vector<unsigned c
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
     const std::size_t c = static_cast<std::size_t>(cc), j = static_cast<std::size_t>(cols[c]);
     unsigned char* dst = gs.data() + c * sb;
-    for (std::size_t i = 0; i < n; ++i) dst[i >> 2] |= static_cast<unsigned char>(h_at(g->G, j, i) << (2 * (i & 3u)));
+    // 64 rows per step: code = lo | hi << 1 (h_at: lo wins), i.e. the bits of lo and hi interleaved
+    const u64* lo = g->G.lo(j);
+    const u64* hi = g->G.hi(j);
+    auto spread = [](u64 x) {  // bit t of the low 32 bits -> bit 2t
+      x &= 0xFFFFFFFFull;
+      x = (x | (x << 16)) & 0x0000FFFF0000FFFFull;
+      x = (x | (x << 8)) & 0x00FF00FF00FF00FFull;
+      x = (x | (x << 4)) & 0x0F0F0F0F0F0F0F0Full;
+      x = (x | (x << 2)) & 0x3333333333333333ull;
+      x = (x | (x << 1)) & 0x5555555555555555ull;
+      return x;
+    };
+    const std::size_t nw = (n + 63) / 64;
+    for (std::size_t w = 0; w < nw; ++w) {
+      u64 l = lo[w], h = hi[w] & ~l;
+      const std::size_t rows = std::min<std::size_t>(64, n - 64 * w);
+      if (rows < 64) { const u64 keep = (u64(1) << rows) - 1; l &= keep; h &= keep; }
+      const u64 out[2] = {spread(l) | (spread(h) << 1), spread(l >> 32) | (spread(h >> 32) << 1)};
+      const std::size_t b0 = 16 * w, nbyt = std::min<std::size_t>(16, sb - b0);
+      unsigned char tmp[16];
+      for (int k = 0; k < 2; ++k)
+        for (int b = 0; b < 8; ++b) tmp[8 * k + b] = static_cast<unsigned char>(out[k] >> (8 * b));
+      std::memcpy(dst + b0, tmp, nbyt);
+    }
     std::int64_t s = g->G.s[j];
     for (std::uint32_t i : g->M[j]) {
       s -= h_at(g->G, j, i);

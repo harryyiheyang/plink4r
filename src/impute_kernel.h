@@ -37,6 +37,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <memory>
 #include <vector>
 #include <cstdlib>
 #ifdef _OPENMP
@@ -244,7 +245,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     double acc = 0;
     for (int s = 0; s < ns; ++s) {
       const double q = static_cast<double>(MiA[s].size());
-      const double cost = 4.0 * q * q + 12.0 * q;
+      const double cost = 4.0 * q * q + 36.0 * q;  // S_i, rhs, flat M_i, cell refs
       const bool full = nb_people > 0 ? (s - bstart.back() >= nb_people) : (acc + cost > budget && s > bstart.back());
       if (full) { bstart.push_back(s); acc = 0; }
       acc += cost;
@@ -254,9 +255,20 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   const int nblk = static_cast<int>(bstart.size()) - 1;
   R.n_blocks = nblk;
   R.oi.assign(T, std::vector<int>()); R.oj.assign(T, std::vector<int>()); R.og.assign(T, std::vector<float>());
-  std::vector<int> moff, jcnt(m + 1), jlist_i, jlist_a;
+  // one entry per missing cell in SNP order, carrying everything the rhs loop needs about its person so the
+  // loop reads it sequentially (no dependent loads of the person's list headers)
+  struct CellRef { int i, a, q, mo; long long so; };
+  std::vector<int> moff, jcnt(m + 1);
+  std::unique_ptr<CellRef[]> cref_buf;
+  std::unique_ptr<int[]> mflat_buf;
+  std::size_t cref_cap = 0;
   std::vector<long long> soff;
-  std::vector<float> rhs, S;
+  // rhs and S_i buffers: grown without zero fill (every entry is written before it is read; the first touch
+  // then happens in the parallel rhs loop, not in a serial memset)
+  std::unique_ptr<float[]> rhs_buf, S_buf;
+  std::size_t rhs_cap = 0, S_cap = 0;
+  float* rhs = nullptr;
+  float* S = nullptr;
   for (int bk = 0; bk < nblk; ++bk) {
     const int b0 = bstart[bk], nb = bstart[bk + 1] - b0;
     auto tb = std::chrono::steady_clock::now();
@@ -286,6 +298,15 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
 #pragma omp barrier
 #pragma omp single
 #endif
+        if (static_cast<std::size_t>(moff[nb]) > cref_cap) {
+          cref_cap = moff[nb]; cref_buf.reset(new CellRef[cref_cap]); mflat_buf.reset(new int[cref_cap]);
+        }
+        int* mflat = mflat_buf.get();
+        for (int i = i0; i < i1; ++i) std::copy(Mi[i].begin(), Mi[i].end(), mflat + moff[i]);
+#ifdef _OPENMP
+#pragma omp barrier
+#pragma omp single
+#endif
         {
           jcnt[0] = 0;
           for (int j = 0; j < m; ++j) {
@@ -293,17 +314,21 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
             for (int t = 0; t < T; ++t) { const int v = tcnt[static_cast<std::size_t>(t) * m + j]; tcnt[static_cast<std::size_t>(t) * m + j] = run; run += v; }
             jcnt[j + 1] = run;
           }
-          jlist_i.resize(moff[nb]); jlist_a.resize(moff[nb]);
         }
-        for (int i = i0; i < i1; ++i)
-          for (int a = 0; a < static_cast<int>(Mi[i].size()); ++a) {
+        CellRef* cref = cref_buf.get();
+        for (int i = i0; i < i1; ++i) {
+          const int q = static_cast<int>(Mi[i].size());
+          for (int a = 0; a < q; ++a) {
             const int p = c[Mi[i][a]]++;
-            jlist_i[p] = i; jlist_a[p] = a;
+            cref[p] = CellRef{i, a, q, moff[i], soff[i]};
           }
+        }
       }
     }
-    rhs.resize(moff[nb]);                          // fully overwritten below
-    S.resize(static_cast<std::size_t>(soff[nb]));  // every column of every S_i is written below
+    if (static_cast<std::size_t>(moff[nb]) > rhs_cap) { rhs_cap = moff[nb]; rhs_buf.reset(new float[rhs_cap]); }
+    if (static_cast<std::size_t>(soff[nb]) > S_cap) { S_cap = static_cast<std::size_t>(soff[nb]); S_buf.reset(new float[S_cap]); }
+    rhs = rhs_buf.get();  // fully overwritten below
+    S = S_buf.get();      // every column of every S_i is written below
     R.t_lists += ik::secs(tb); tb = std::chrono::steady_clock::now();
 
     // rhs and C_MM, column by column
@@ -315,21 +340,33 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
       if (e0 == e1) continue;
       const float* aj = Aw.col(j).data();
       const float* cj = C.col(j).data();
+      const CellRef* cref = cref_buf.get();
+      const int* mflat = mflat_buf.get();
+      constexpr int kAhead = 6;  // prefetch the planes, M_i and S_i column of the cell kAhead ahead
       for (int e = e0; e < e1; ++e) {
-        const int i = jlist_i[e], a = jlist_a[e];
-        const std::vector<int>& M = Mi[i];
-        const int q = static_cast<int>(M.size());
+        if (e + kAhead < e1) {
+          const CellRef& cp = cref[e + kAhead];
+          const uint8_t* hp = &het[static_cast<std::size_t>(cp.i) * nbyte];
+          const uint8_t* op = &hom[static_cast<std::size_t>(cp.i) * nbyte];
+          for (int b = 0; b < nbyte; b += 64) { __builtin_prefetch(hp + b); __builtin_prefetch(op + b); }
+          __builtin_prefetch(mflat + cp.mo);
+          __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
+          __builtin_prefetch(&rhs[cp.mo + cp.a], 1);
+        }
+        const CellRef& ce = cref[e];
+        const int i = ce.i, a = ce.a, q = ce.q;
+        const int* M = mflat + ce.mo;
         const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
         const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
         float r = L.Aj[j] + plane_dot(aj, hi, oi_, nbyte);
-        float* Sc = &S[static_cast<std::size_t>(soff[i]) + static_cast<std::size_t>(a) * q];  // column a of S_i
+        float* Sc = &S[static_cast<std::size_t>(ce.so) + static_cast<std::size_t>(a) * q];  // column a of S_i
         for (int bq = 0; bq < q; ++bq) {
           const int l = M[bq];
           r += aj[l] * mu[l];
           Sc[bq] = -cj[l];
         }
         Sc[a] += 1.0f;
-        rhs[moff[i] + a] = r;
+        rhs[ce.mo + a] = r;
       }
     }
     R.t_rhs += ik::secs(tb); tb = std::chrono::steady_clock::now();
