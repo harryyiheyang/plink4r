@@ -47,7 +47,14 @@
 #' @param prior Logistic only: list with any of `sigma0sq` (scale: the per-allele prior variance of component k
 #'   is `sigma0sq * grid[k] * (2 p (1 - p))^alpha`), `weights` (of the `grid` components), `alpha` (default -0.38),
 #'   `grid` (default `c(0, 1, 10, 100)`), `wide_sd` (default 1.5, log-OR, not scaled by MAF) and `wide_weight`
-#'   (default 0.02); fields not given take their defaults. The carrier step uses the ridge penalty `1 / wide_sd^2`.
+#'   (default 0.02). `sigma0sq` and `weights` not given are learned from the common variants (MAF >= 1%) of the
+#'   same run: `sigma0sq` from the strongest variant of each LD block with P < 5e-8 (normal likelihood of the z
+#'   values truncated at the threshold, which removes the winner's curse; the middle grid component is put at the
+#'   hits' variance), the weights by EM over one random common variant per block. With fewer than 10 hits or 50
+#'   blocks the corresponding defaults are kept (sd 0.05 at MAF 0.25; weights 0.7, 0.15, 0.1, 0.05); the prior used
+#'   is in `info$prior`. The carrier step uses the ridge penalty `1 / wide_sd^2`.
+#' @param blocks Logistic with `shrink`: LD blocks for prior learning, 38 or 37 ([ld_blocks_default()]) or a block
+#'   file (header, then chr start stop).
 #' @param carrier_max Logistic only: refine the likelihood over the carriers for variants with at most this many
 #'   expected carriers (0 = never).
 #' @param spa_cut Logistic only: saddlepoint P for the variants whose normal P is below this; 0 = normal P
@@ -64,7 +71,8 @@
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
-                 mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000) {
+                 mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000,
+                 blocks = 38) {
   family <- match.arg(family)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
@@ -78,6 +86,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
   out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else
     data.table::fifelse(is.na(res$p_spa), 2 * stats::pnorm(-abs(get(stat))), res$p_spa)]
   if (shrink) {
+    pr <- .rv_learn(out, pr, names(prior), blocks)
     .rv_shrink(out, res, pr)
     r$info$prior <- pr
   }
