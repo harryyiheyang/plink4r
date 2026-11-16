@@ -30,4 +30,8 @@ r1 <- ns$.post_mix(bh, 1 / I, ps$sd, ps$w)
 r2 <- ns$post_mix_mv_cpp(matrix(bh * I), matrix(I), rep(base, 50), c(pr$grid, 0), c(pr$grid * 0, pr$wide_sd^2),
                          c(pr$weights * (1 - pr$wide_weight), pr$wide_weight), 0, 0, 1, 1, 1L)
 stopifnot(max(abs(r1$mean - r2$mean)) < 1e-10, max(abs(r1$sd - r2$sd)) < 1e-10)
+# 4. below robust_min_mac the model-based P is used
+pm <- c(0.3, 0.02, 0.5)
+stopifnot(identical(f(c(4, 9, 1), N, c(2, 4, 50) / (2 * N), TRUE, pm, 5)[1:2], pm[1:2]),
+          f(1, N, 50 / (2 * N), TRUE, pm[3], 5) != pm[3])
 cat("rare-variant checks passed\n")

@@ -493,7 +493,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   Rcpp::NumericVector nobs(p), asum(p);
   Rcpp::IntegerVector status(p);
   Rcpp::NumericMatrix beta(p, S), se(p, S), se_rob(p, robust ? S : 0);
-  Rcpp::NumericVector p_spa(p, NA_REAL);
+  Rcpp::NumericVector p_spa(p, NA_REAL), eig_min(S > 1 ? p : 0, NA_REAL);  // eig_min: of A scaled to unit diagonal
   Rcpp::NumericMatrix p_spa_int(w.size() ? p : 0, n_exp);  // SPA P of each exposure interaction (logistic)
   std::fill(p_spa_int.begin(), p_spa_int.end(), NA_REAL);
   // logistic effect-size summaries (carrier_max > 0): score c and information A of every variant, and the carrier
@@ -601,6 +601,11 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
             }
           }
         }
+        if (S > 1) {
+          const Eigen::VectorXd dd = A.diagonal().cwiseMax(1e-300).cwiseSqrt().cwiseInverse();
+          const Eigen::MatrixXd Ac = dd.asDiagonal() * A * dd.asDiagonal();
+          eig_min[j] = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(Ac, Eigen::EigenvaluesOnly).eigenvalues()[0];
+        }
         Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
         if (ldlt.info() != Eigen::Success) { status[j] = 2; continue; }
         const Eigen::MatrixXd Ainv = ldlt.solve(Eigen::MatrixXd::Identity(S, S));
@@ -655,7 +660,7 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   }
 
   Rcpp::List out;
-  out["p_spa"] = p_spa; out["p_spa_int"] = p_spa_int; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
+  out["p_spa"] = p_spa; out["eig_min"] = eig_min; out["p_spa_int"] = p_spa_int; out["score_carrier"] = u_c; out["info_carrier"] = i_c; out["score"] = u_1; out["info"] = i_1;
   out["v_int"] = v_int; out["v_int_robust"] = v_int_rob;
   out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
   out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;

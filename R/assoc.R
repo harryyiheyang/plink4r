@@ -54,6 +54,9 @@
 #'   hits' variance), the weights by EM over one random common variant per block. With fewer than 10 hits or 50
 #'   blocks the corresponding defaults are kept (sd 0.05 at MAF 0.25; weights 0.7, 0.15, 0.1, 0.05); the prior used
 #'   is in `info$prior`. The carrier step uses the ridge penalty `1 / wide_sd^2`.
+#' @param robust_min_mac With `mac_adjust`, `P_ROBUST` is the model-based `P` for variants whose minor allele count
+#'   `2 N p` is below this (default 5): the sandwich variance carries no information there (real data: lambda 2.2
+#'   at MAC 1-5 against 1.08 for the model P). Those rows are recognisable from `N` and `A1_FREQ`.
 #' @param min_mac `P` (and `P_ROBUST`) are `NA` for variants whose minor allele count `2 N p` is below this (e.g.
 #'   dosage-only variants with MAC < 1, where neither the normal nor the saddlepoint reference is reliable); 0 =
 #'   never.
@@ -76,7 +79,7 @@
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
                  mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000,
-                 blocks = 38, min_mac = 1) {
+                 blocks = 38, min_mac = 1, robust_min_mac = 5) {
   family <- match.arg(family)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
@@ -96,7 +99,7 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
   }
   if (robust) {
     out[, SE_ROBUST := res$se_robust[, 1L]]
-    out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust)]
+    out[, P_ROBUST := .p_robust_1df((BETA / SE_ROBUST)^2, N, A1_FREQ, mac_adjust, P, robust_min_mac)]
   }
   if (min_mac > 0) {
     lowp <- which(!(2 * out$N * pmin(out$A1_FREQ, 1 - out$A1_FREQ) >= min_mac))
@@ -151,8 +154,15 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
 #' @param min_mac Every P column is `NA` for variants whose minor allele count `2 N p` is below this (e.g.
 #'   dosage-only variants with MAC < 1, where no reference distribution is reliable); 0 = never.
-#' @param min_mac_int Logistic only: the Wald chi-square interaction tests that have no saddlepoint version
-#'   (`P_INT` with two or more exposure terms, `P_JOINT`) are `NA` below this minor allele count.
+#' @param min_mac_int Interaction tests are `NA` below this minor allele count: for the linear model all of them
+#'   (default 10), for the logistic model the Wald chi-square ones that have no saddlepoint version (`P_INT` with two
+#'   or more exposure terms, `P_JOINT`; default 100, as they were seen at 1e-12 to 1e-52 under the null up to MAC
+#'   1000 in real data). **With a logistic model and two or more exposure terms, use `P_INT_CAUCHY`**, which is
+#'   built from saddlepoint P values and stays calibrated at low counts.
+#' @param robust_min_mac As [gwas()], for `P_MARGINAL_ROBUST` and the one-df `P_INT_ROBUST`.
+#' @param eig_tol Interaction and joint tests are `NA` when the information matrix of G and its interactions,
+#'   scaled to unit diagonal, has its smallest eigenvalue below this (near singular: the carriers barely vary in
+#'   the exposures); `info$int_singular` counts them.
 #' @param shrink,prior,carrier_max,blocks Logistic only, as [gwas()]; `prior` also takes `int_ratio`, `int_weight`,
 #'   `int_wide_weight` and `gamma` (see Details).
 #' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
@@ -160,8 +170,10 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
                 family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
                 snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
-                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 1, min_mac_int = 10) {
+                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 1, min_mac_int = NULL,
+                robust_min_mac = 5, eig_tol = 1e-6) {
   family <- match.arg(family)
+  if (is.null(min_mac_int)) min_mac_int <- if (family == "binomial") 100 else 10
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
@@ -177,7 +189,8 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   if (!lin) out[!is.na(res$p_spa), P_MARGINAL := res$p_spa[!is.na(res$p_spa)]]
   if (robust) {
     out[, SE_MARGINAL_ROBUST := res$se_marginal_robust]
-    out[, P_MARGINAL_ROBUST := .p_robust_1df((BETA_MARGINAL / SE_MARGINAL_ROBUST)^2, N, A1_FREQ, mac_adjust)]
+    out[, P_MARGINAL_ROBUST := .p_robust_1df((BETA_MARGINAL / SE_MARGINAL_ROBUST)^2, N, A1_FREQ, mac_adjust,
+                                             P_MARGINAL, robust_min_mac)]
   }
   nm <- c("G", paste0("GxE_", terms))
   for (q in seq_along(nm)) {
@@ -199,17 +212,12 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   z1 <- res$beta[, ki, drop = FALSE] / res$se[, ki, drop = FALSE]
   p1 <- if (lin) 2 * stats::pt(-abs(z1), res$df) else 2 * stats::pnorm(-abs(z1))
   if (!lin) { k <- !is.na(res$p_spa_int); p1[k] <- res$p_spa_int[k] }
-  if (!lin) {
-    if (ne == 1L) p_int <- p1[, 1L]
-    # Wald chi-squares of logistic interactions have no saddlepoint version: not reported at low counts
-    low <- mac < min_mac_int
-    if (ne >= 2L) p_int[low] <- NA_real_
-    p_joint[low] <- NA_real_
-  }
+  if (!lin && ne == 1L) p_int <- p1[, 1L]
   out[, `:=`(P_INT = p_int, P_JOINT = p_joint)]
   if (robust) {
     p1r <- vapply(seq_len(ne), function(q) .p_robust_1df((res$beta[, 1L + q] / res$se_robust[, 1L + q])^2, out$N,
-                                                          out$A1_FREQ, mac_adjust), numeric(nrow(out)))
+                                                          out$A1_FREQ, mac_adjust, p1[, q], robust_min_mac),
+                  numeric(nrow(out)))
     p1r <- matrix(p1r, ncol = ne)
     out[, `:=`(P_INT_ROBUST = if (ne == 1L) p1r[, 1L] else stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
                P_JOINT_ROBUST = stats::pchisq(res$chisq_joint_robust, ne + 1L, lower.tail = FALSE))]
@@ -222,6 +230,18 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
     if (robust)
       out[, P_INT_ROBUST_CAUCHY := int_cauchy_cpp(cz(p1r, res$v_int_robust), res$v_int_robust, p1r, r$info$threads)]
   }
+  # Interaction tests not reported (NA): (a) below min_mac_int, every chi-square (Wald) interaction / joint test,
+  # and for the linear model also the one-df and Cauchy interaction tests (logistic one-df and Cauchy tests use the
+  # saddlepoint and are kept); (b) the information matrix of (G, interactions) near singular: smallest eigenvalue of
+  # its unit-diagonal scaling below eig_tol, every interaction / joint test.
+  ic <- intersect(c("P_INT", "P_JOINT", "P_INT_ROBUST", "P_JOINT_ROBUST", "P_INT_CAUCHY", "P_INT_ROBUST_CAUCHY"),
+                  names(out))
+  chi <- c("P_JOINT", "P_JOINT_ROBUST", if (ne >= 2L) c("P_INT", "P_INT_ROBUST"))
+  lowc <- which(!(mac >= min_mac_int))
+  if (length(lowc)) for (cl in if (lin) ic else intersect(chi, ic)) data.table::set(out, lowc, cl, NA_real_)
+  sing <- which(!(res$eig_min >= eig_tol))
+  if (length(sing)) for (cl in ic) data.table::set(out, sing, cl, NA_real_)
+  r$info$int_low_mac <- length(lowc); r$info$int_singular <- length(sing); r$info$eig_min <- res$eig_min
   if (min_mac > 0) {
     pc <- grep("^P_", names(out), value = TRUE)
     lowp <- which(!(mac >= min_mac))
@@ -240,13 +260,18 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
 # H -> infinity: a MAC-5 dosage variant went from 0.02 to 1e-19), so the tail keeps the normal P, which the
 # simulations found conservative there. W >= M therefore gives the normal P, and a non-integer M is fine (F with
 # real df). The floor "M >= 5" is checked on the minor allele count 2 N p (M = MAC - MAC^2 / 4N is a hair below 5
-# at MAC 5); below it, or with adjust = FALSE, chi-square(1) as before.
-.p_robust_1df <- function(W, N, freq, adjust = TRUE) {
+# at MAC 5); below it chi-square(1). With p_model given, variants with a minor allele count below min_mac_model take
+# the model-based P instead (the robust variance has no information there). adjust = FALSE: chi-square(1) as before.
+.p_robust_1df <- function(W, N, freq, adjust = TRUE, p_model = NULL, min_mac_model = 5) {
   p <- stats::pchisq(W, 1, lower.tail = FALSE)
   if (!adjust) return(p)
   maf <- rep_len(pmin(freq, 1 - freq), length(W)); N <- rep_len(N, length(W))
+  if (!is.null(p_model)) {  # very low counts: the sandwich is unreliable (real data: lambda 2.2 at MAC 1-5)
+    lo <- which(2 * N * maf < min_mac_model)
+    p[lo] <- rep_len(p_model, length(W))[lo]
+  }
   M <- N * (1 - (1 - maf)^2)
-  k <- which(is.finite(W) & is.finite(M) & 2 * N * maf >= 5 - 1e-8 & W < M)
+  k <- which(is.finite(W) & is.finite(M) & 2 * N * maf >= max(5 - 1e-8, min_mac_model) & W < M)
   if (length(k)) {
     Mk <- M[k]; Wk <- W[k]
     p[k] <- pmax(p[k], stats::pf((Mk - 1) * Wk / (Mk - Wk), 1, Mk - 1, lower.tail = FALSE))
