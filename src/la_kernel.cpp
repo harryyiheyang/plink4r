@@ -16,6 +16,7 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include "la_dispatch.h"
 #if defined(__AVX2__)
@@ -227,32 +228,57 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
 }
 
 // sum_l col[l] * (het_l + 2 hom_l): bit b of byte q of het / hom is row 8q + b. Per ISA copy: 16 lanes under
-// AVX-512 (two bytes as a lane mask), 8 under AVX2 (one byte expanded to lane masks), else scalar.
+// AVX-512 (two bytes as a lane mask), 8 under AVX2 (one byte expanded to lane masks), else scalar. Several
+// independent accumulators (het and hom apart) so the loop is not bound by the latency of one add chain.
 float plane_dot(const float* col, const unsigned char* het, const unsigned char* hom, int nbyte) {
 #if defined(__AVX512F__)
-  __m512 acc = _mm512_setzero_ps();
-  for (int q = 0; q < nbyte / 2; ++q) {
+  __m512 h0 = _mm512_setzero_ps(), h1 = h0, h2 = h0, h3 = h0, o0 = h0, o1 = h0, o2 = h0, o3 = h0;
+  const int nq = nbyte / 2;
+  int q = 0;
+  for (; q + 4 <= nq; q += 4) {  // 64 rows: 8 bytes of each plane
+    std::uint64_t hb, ob;
+    std::memcpy(&hb, het + 2 * q, 8); std::memcpy(&ob, hom + 2 * q, 8);
+    const float* c = col + 16 * q;
+    h0 = _mm512_mask_add_ps(h0, static_cast<__mmask16>(hb), h0, _mm512_loadu_ps(c));
+    h1 = _mm512_mask_add_ps(h1, static_cast<__mmask16>(hb >> 16), h1, _mm512_loadu_ps(c + 16));
+    h2 = _mm512_mask_add_ps(h2, static_cast<__mmask16>(hb >> 32), h2, _mm512_loadu_ps(c + 32));
+    h3 = _mm512_mask_add_ps(h3, static_cast<__mmask16>(hb >> 48), h3, _mm512_loadu_ps(c + 48));
+    o0 = _mm512_mask_add_ps(o0, static_cast<__mmask16>(ob), o0, _mm512_loadu_ps(c));
+    o1 = _mm512_mask_add_ps(o1, static_cast<__mmask16>(ob >> 16), o1, _mm512_loadu_ps(c + 16));
+    o2 = _mm512_mask_add_ps(o2, static_cast<__mmask16>(ob >> 32), o2, _mm512_loadu_ps(c + 32));
+    o3 = _mm512_mask_add_ps(o3, static_cast<__mmask16>(ob >> 48), o3, _mm512_loadu_ps(c + 48));
+  }
+  for (; q < nq; ++q) {
     unsigned short h16, o16;
     std::memcpy(&h16, het + 2 * q, 2); std::memcpy(&o16, hom + 2 * q, 2);
-    const __mmask16 h = h16, o = o16;
-    if ((h | o) == 0) continue;
     const __m512 c = _mm512_loadu_ps(col + 16 * q);
-    acc = _mm512_mask_add_ps(acc, h, acc, c);
-    acc = _mm512_mask_add_ps(acc, o, acc, _mm512_add_ps(c, c));
+    h0 = _mm512_mask_add_ps(h0, h16, h0, c);
+    o0 = _mm512_mask_add_ps(o0, o16, o0, c);
   }
-  return _mm512_reduce_add_ps(acc);
+  const __m512 h = _mm512_add_ps(_mm512_add_ps(h0, h1), _mm512_add_ps(h2, h3));
+  const __m512 o = _mm512_add_ps(_mm512_add_ps(o0, o1), _mm512_add_ps(o2, o3));
+  return _mm512_reduce_add_ps(_mm512_add_ps(h, _mm512_add_ps(o, o)));
 #elif defined(__AVX2__)
   const __m256i bits = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
-  __m256 acc = _mm256_setzero_ps();
-  for (int q = 0; q < nbyte; ++q) {
-    const unsigned char h = het[q], o = hom[q];
-    if ((h | o) == 0) continue;
-    const __m256 c = _mm256_loadu_ps(col + 8 * q);
-    const __m256i hm = _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(h), bits), bits);
-    const __m256i om = _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(o), bits), bits);
-    acc = _mm256_add_ps(acc, _mm256_and_ps(c, _mm256_castsi256_ps(hm)));
-    acc = _mm256_add_ps(acc, _mm256_and_ps(_mm256_add_ps(c, c), _mm256_castsi256_ps(om)));
+  auto lanes = [&](unsigned char b) {
+    return _mm256_castsi256_ps(_mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(b), bits), bits));
+  };
+  __m256 h0 = _mm256_setzero_ps(), h1 = h0, o0 = h0, o1 = h0;
+  int q = 0;
+  for (; q + 2 <= nbyte; q += 2) {
+    const __m256 c0 = _mm256_loadu_ps(col + 8 * q), c1 = _mm256_loadu_ps(col + 8 * q + 8);
+    h0 = _mm256_add_ps(h0, _mm256_and_ps(c0, lanes(het[q])));
+    h1 = _mm256_add_ps(h1, _mm256_and_ps(c1, lanes(het[q + 1])));
+    o0 = _mm256_add_ps(o0, _mm256_and_ps(c0, lanes(hom[q])));
+    o1 = _mm256_add_ps(o1, _mm256_and_ps(c1, lanes(hom[q + 1])));
   }
+  for (; q < nbyte; ++q) {
+    const __m256 c = _mm256_loadu_ps(col + 8 * q);
+    h0 = _mm256_add_ps(h0, _mm256_and_ps(c, lanes(het[q])));
+    o0 = _mm256_add_ps(o0, _mm256_and_ps(c, lanes(hom[q])));
+  }
+  const __m256 hs = _mm256_add_ps(h0, h1), os = _mm256_add_ps(o0, o1);
+  const __m256 acc = _mm256_add_ps(hs, _mm256_add_ps(os, os));
   __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
   s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
   return _mm_cvtss_f32(s);
