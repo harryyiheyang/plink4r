@@ -3,12 +3,13 @@
 // D terms, X'M and X B by plane scans, and dense sub-blocks on demand.
 // H is a 0/1/2 matrix in 2-bit planes (n p / 4 bytes). D is a sparse
 // deviation: per variant a 1-bit nonzero mask and int16 values in units of
-// that variant's `unit` (1/16384 for genotypes), allocated only for variants
-// with a nonzero D. It holds
-//   - dosage PGEN: dosage - H, H the rounded dosage (exact);
+// that variant's `unit` (1/16384 for hard-call inputs, 0.01 for a dosage PGEN),
+// allocated only for variants with a nonzero D. It holds
+//   - dosage PGEN: dosage - H, the file's 1/16384 dosage taken to the nearest 0.01 (PI 2026-11-18: the
+//     precision of imputed dosages) and H that value rounded;
 //   - every input: the fill of a missing entry, f - H with H = round(f) and
 //     f the variant's lower median (impute = "median", D = 0) or observed
-//     mean (impute = "mean", and dosage PGEN; quantized to 1/16384);
+//     mean (impute = "mean", and dosage PGEN; quantized to the variant's unit);
 //   - appended columns (geno_append_cpp): all of x, H = 0, own unit.
 // Values are A1 (BED) / ALT (PGEN) dosages as in BEDMatrix. Centering and
 // scaling are applied on the R side from mu and sd of the stored X.
@@ -45,13 +46,20 @@ const NibbleTable& pgen_table() {
 
 constexpr std::size_t kGroup = 64;          // variants per read group
 constexpr std::size_t kDBlock = 8;          // mask words per prefix count (512 rows)
-constexpr double kDUnit = 1.0 / 16384.0;    // value of one int16 step of D
+constexpr double kDUnit = 1.0 / 16384.0;    // value of one int16 step of D, hard-call inputs
+constexpr double kDosUnit = 0.01;           // value of one int16 step of D, dosage PGEN
+constexpr int kDosSteps = 100;              // steps of kDosUnit per allele
+
+// int16 steps per allele of a genotype column's unit (16384 or 100); 0 for an appended column.
+inline int unit_steps(double unit) {
+  return unit == kDUnit ? 16384 : unit == kDosUnit ? kDosSteps : 0;
+}
 
 // D of one variant: nonzero mask over the samples (H words), int16 values
 // q = D / unit in ascending row order, and the nonzero count before each block
 // of kDBlock mask words. All empty when the variant's D is zero. unit is
-// 1/16384 for genotype columns; an appended column (H = 0, all of x in D)
-// has its own unit max|x| / 32767.
+// 1/16384 (hard-call inputs) or 0.01 (dosage PGEN) for genotype columns; an
+// appended column (H = 0, all of x in D) has its own unit max|x| / 32767.
 struct DCol {
   std::vector<u64> mask;
   std::vector<std::int16_t> q;
@@ -110,11 +118,11 @@ struct DBuilder {
 };
 
 // A fill value f as H = round(f) (halves up, within 0..2) and the int16
-// deviation q = round(16384 (f - H)).
-inline void quantize_fill(double f, unsigned int& h, int& q) {
+// deviation q = round((f - H) / unit).
+inline void quantize_fill(double f, double unit, unsigned int& h, int& q) {
   const double hf = std::min(2.0, std::max(0.0, std::floor(f + 0.5)));
   h = static_cast<unsigned int>(hf);
-  q = static_cast<int>(std::lround(16384.0 * (f - hf)));
+  q = static_cast<int>(std::lround((f - hf) / unit));
 }
 
 // Nonzeros of D column c in mask words before word w.
@@ -174,7 +182,7 @@ void fill_missing(Geno& g, std::size_t j, const u64* miss, double f, bool fill, 
   u64* hi = lo + W;
   unsigned int h;
   int q;
-  quantize_fill(f, h, q);
+  quantize_fill(f, g.D[j].unit, h, q);
   std::vector<std::uint32_t>& rows = g.M[j];
   for (std::size_t w = 0; w < W; ++w)
     for (u64 bits = miss[w]; bits; bits &= bits - 1) {
@@ -271,9 +279,9 @@ std::vector<int> to_rows(const Rcpp::IntegerVector& x) {
   return std::vector<int>(x.begin(), x.end());
 }
 
-// Dosage PGEN: H = dosage rounded to the nearest integer (halves up) into the
-// planes, D = dosage - H exactly as int16 in [-8192, 8191]. Missing dosages
-// take the variant's observed mean dosage, through D; their rows go to M[j].
+// Dosage PGEN: the file's dosage (1/16384 steps) is taken to the nearest 0.01 (plink4r::dosage_grid); H = that
+// value rounded to the nearest integer (halves up) into the planes, D = value - H as int16 in [-50, 49] steps
+// of 0.01. Missing dosages take the variant's observed mean of those values, through D; their rows go to M[j].
 void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
                  const std::vector<int>& rows, int threads, const std::string& path) {
   const std::size_t n = g.n, p = g.p, sel_stride = (n + 3) / 4, W = g.G.words;
@@ -301,7 +309,7 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
         const std::uint16_t v = x[rows[i]];
         if (v == kMiss) ++miss;
         else if (v > 32768u) bad_range = true;
-        else obs_sum += v;
+        else obs_sum += plink4r::dosage_grid(v);
       }
       if (bad_range) {
         #pragma omp atomic write
@@ -311,11 +319,12 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
       g.nmiss[j] = static_cast<double>(miss);
       unsigned int hfill = 0;
       int qfill = 0;
-      const double fmean = miss < n ? static_cast<double>(obs_sum) / 16384.0 / static_cast<double>(n - miss) : 0.0;
-      if (miss) quantize_fill(fmean, hfill, qfill);
+      const double fmean = miss < n ? static_cast<double>(obs_sum) / kDosSteps / static_cast<double>(n - miss) : 0.0;
+      if (miss) quantize_fill(fmean, kDosUnit, hfill, qfill);
       g.M[j].reserve(miss);
       unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
       std::fill(buf, buf + sel_stride, 0);
+      g.D[j].unit = kDosUnit;
       DBuilder db(g, j);
       for (std::size_t i = 0; i < n; ++i) {
         const std::uint16_t v = x[rows[i]];
@@ -326,8 +335,9 @@ void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
           q = qfill;
           g.M[j].push_back(static_cast<std::uint32_t>(i));
         } else {
-          h = (static_cast<unsigned int>(v) + 8192u) >> 14;
-          q = static_cast<int>(v) - static_cast<int>(h << 14);
+          const unsigned int c = plink4r::dosage_grid(v);
+          h = (c + kDosSteps / 2) / kDosSteps;
+          q = static_cast<int>(c) - static_cast<int>(h) * kDosSteps;
         }
         buf[i >> 2] |= static_cast<unsigned char>(h << (2 * (i & 3u)));
         if (q) db.add(i, h, q);
@@ -582,16 +592,23 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
 
 namespace {
 
-// Sum of the stored values of column j over its observed (not missing) cells. Genotype columns (unit
-// 1/16384) are summed exactly in int16 steps, so the result equals the sum of the file's observed calls
-// (hard calls) or dosages; an appended column (no missing cells) gives its column sum.
+// Sum of the stored values of column j over all cells, in int16 steps of a genotype column's unit (k per allele).
+inline std::int64_t step_sum_col(const Geno& g, std::size_t j, int k) {
+  std::int64_t tot = k * static_cast<std::int64_t>(g.G.s[j]);
+  for (std::int16_t q : g.D[j].q) tot += q;
+  return tot;
+}
+
+// Sum of the stored values of column j over its observed (not missing) cells. Genotype columns are summed
+// exactly in int16 steps, so the result equals the sum of the file's observed calls (hard calls) or 0.01
+// dosages; an appended column (no missing cells) gives its column sum.
 double obs_sum_col(const Geno& g, std::size_t j) {
   const DCol& c = g.D[j];
-  if (c.unit != kDUnit) return static_cast<double>(g.G.s[j]) + g.dsum[j];
-  std::int64_t tot = 16384 * static_cast<std::int64_t>(g.G.s[j]);
-  for (std::int16_t q : c.q) tot += q;
-  for (std::uint32_t i : g.M[j]) tot -= 16384 * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
-  return static_cast<double>(tot) / 16384.0;
+  const int k = unit_steps(c.unit);
+  if (!k) return static_cast<double>(g.G.s[j]) + g.dsum[j];
+  std::int64_t tot = step_sum_col(g, j, k);
+  for (std::uint32_t i : g.M[j]) tot -= k * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
+  return static_cast<double>(tot) / k;
 }
 
 // Rebuilds D of column j from (row, q) entries in ascending row order and refreshes the column's sums,
@@ -607,12 +624,12 @@ void rebuild_col(Geno& g, std::size_t j, double unit, Entries&& each) {
   col_stats(g, j);
 }
 
-// Exact flip of one stored cell x = h + q / 16384 -> 2 - x, in the canonical form of a direct load
-// (q = +8192 becomes h + 1, q = -8192).
-inline void flip_cell(unsigned int& h, int& q) {
+// Exact flip of one stored cell x = h + q / k -> 2 - x (k int16 steps per allele), in the canonical form of a
+// direct load (q = +k/2 becomes h + 1, q = -k/2).
+inline void flip_cell(unsigned int& h, int& q, int k) {
   h = 2u - h;
   q = -q;
-  if (q == 8192 && h < 2u) { ++h; q = -8192; }
+  if (q == k / 2 && h < 2u) { ++h; q = -(k / 2); }
 }
 
 }  // namespace
@@ -622,21 +639,23 @@ namespace {
 // The kernels of the products, writing into caller buffers (column-major); the R functions below and the
 // C-callable entry points (bottom of this file) both call them.
 
-// Rows r0..r0+R-1 of stored column j (H + D) as T (float or double) into dst[0..R).
+// Rows r0..r0+R-1 of stored column j (H + D) as T (float or double) into dst[0..R). grid: the value in steps of
+// 0.01 minus 100 (an integer in -100..100), for a column on the 0.01 grid (on_grid).
 template <class T>
-void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, T* dst) {
-  std::fill(dst, dst + R, T(0));
+void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, T* dst, bool grid = false) {
+  const T v0 = grid ? T(-kDosSteps) : T(0), v1 = grid ? T(0) : T(1), v2 = grid ? T(kDosSteps) : T(2);
+  std::fill(dst, dst + R, v0);
   const u64* lo = g.G.lo(j);
   const u64* hi = g.G.hi(j);
   const std::size_t w0 = r0 / 64, w1 = (r0 + R + 63) / 64;
   for (std::size_t x = w0; x < w1; ++x) {
     for (u64 bits = lo[x]; bits; bits &= bits - 1) {
       const std::size_t i = 64 * x + __builtin_ctzll(bits);
-      if (i >= r0 && i < r0 + R) dst[i - r0] = T(1);
+      if (i >= r0 && i < r0 + R) dst[i - r0] = v1;
     }
     for (u64 bits = hi[x]; bits; bits &= bits - 1) {
       const std::size_t i = 64 * x + __builtin_ctzll(bits);
-      if (i >= r0 && i < r0 + R) dst[i - r0] = T(2);
+      if (i >= r0 && i < r0 + R) dst[i - r0] = v2;
     }
   }
   const DCol& dc = g.D[j];
@@ -645,7 +664,7 @@ void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, T*
     for (std::size_t x = w0; x < w1 && x < dc.mask.size(); ++x)
       for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) {
         const std::size_t i = 64 * x + __builtin_ctzll(bits);
-        const double d = dc.q[e++] * dc.unit;
+        const double d = grid ? dc.q[e++] : dc.q[e++] * dc.unit;
         if (i >= r0 && i < r0 + R) dst[i - r0] += static_cast<T>(d);
       }
   }
@@ -656,9 +675,10 @@ void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, T*
 // LD = RB + pad: no power-of-two stride, which thrashes the cache); then the output tiles of TS x TS of the
 // lower triangle are shared out by OpenMP (disjoint outputs), each adding its block product to o through
 // tile(X, LD, r0, R, a0, na, b0, nb) of the thread's own worker from make(). The lower triangle is mirrored.
+// grid: the columns are decoded as centred 0.01 steps (decode_rows).
 template <class T, class Make>
 void dense_tiles(const Geno& g, const int* cols, std::size_t pc, std::size_t RB, std::size_t pad, std::size_t TS,
-                 double* o, int threads, Make make) {
+                 double* o, int threads, Make make, bool grid = false) {
   const std::size_t n = g.n, P = cols ? pc : g.p, LD = RB + pad;
   auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
   const std::size_t nt = (P + TS - 1) / TS;
@@ -673,7 +693,7 @@ void dense_tiles(const Geno& g, const int* cols, std::size_t pc, std::size_t RB,
       const std::size_t R = std::min(RB, n - r0);
       #pragma omp for schedule(static)
       for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa)
-        decode_rows(g, col(static_cast<std::size_t>(aa)), r0, R, &X[static_cast<std::size_t>(aa) * LD]);
+        decode_rows(g, col(static_cast<std::size_t>(aa)), r0, R, &X[static_cast<std::size_t>(aa) * LD], grid);
       #pragma omp for schedule(dynamic, 1)
       for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
         const std::size_t a0 = tiles[tt].first * TS, b0 = tiles[tt].second * TS;
@@ -719,8 +739,8 @@ constexpr std::size_t kXPad = 8;       // doubles after each column of the share
 
 // X'X into o (p x p, or pc x pc for columns cols) in double (dense_tiles): blocks of kXRows rows, 16 KB per
 // column of the shared buffer (66 MB at p = 4000, 329 MB at p = 20000); a tile adds X_a'X_b of its row and
-// column groups to o by the run-time-dispatched serial dgemm. Genotype columns hold multiples of 2^-14 in
-// [0, 2], so for n below 2^23 every product and partial sum is exact and the result equals the popcount one.
+// column groups to o by the run-time-dispatched serial dgemm. Columns in 1/16384 steps hold multiples of 2^-14
+// in [0, 2], so for n below 2^23 every product and partial sum is exact and the result equals the popcount one.
 void xtx_dense_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
   const std::size_t P = cols ? pc : g.p, RB = std::min(kXRows, g.n);
   const plink4r::LaFns& LA = plink4r::la();
@@ -734,7 +754,52 @@ void xtx_dense_into(const Geno& g, const int* cols, std::size_t pc, double* o, i
 }
 
 constexpr double kDDenseFrac = 0.01;     // D nonzero fraction above which xtwx_bin_into uses the float kernel
-constexpr double kDDenseFracXtx = 0.07;  // D nonzero fraction above which xtx_into uses the double kernel
+constexpr std::size_t kGRows = 1024;   // rows per block of the grid X'X kernel: partial sums <= 1024 * 100^2 < 2^24
+
+// Whether every column of cols (or all) is on the 0.01 grid: no D, or D in steps of 0.01 (dosage PGEN).
+bool on_grid(const Geno& g, const int* cols, std::size_t pc) {
+  const std::size_t P = cols ? pc : g.p;
+  for (std::size_t a = 0; a < P; ++a) {
+    const DCol& c = g.D[cols ? cols[a] : a];
+    if (!c.mask.empty() && c.unit != kDosUnit) return false;
+  }
+  return true;
+}
+
+// X'X into o (p x p, or pc x pc for columns cols) for columns on the 0.01 grid (on_grid), exact, in float
+// products (dense_tiles, tiles and buffer as xtwx_float_into, blocks of kGRows rows). A column is decoded as
+// the integer c = 100 x - 100 in -100..100; within a block every product and partial sum is an integer below
+// 2^24, so the serial sgemm is exact in any order; the blocks are summed in double (integers below 2^53) and
+// X'X = (C'C + 100 (s_a + s_b) - 1e4 n) / 1e4, s the column sums of 100 x.
+void xtx_grid_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
+  const std::size_t P = cols ? pc : g.p, RB = std::min(kGRows, g.n);
+  const plink4r::LaFns& LA = plink4r::la();
+  dense_tiles<float>(g, cols, pc, RB, kFPad, kFTile, o, threads, [&] {
+    return [&, At = std::vector<float>(kFTile * RB), Pt = std::vector<float>(kFTile * kFTile)](
+               const float* X, std::size_t LD, std::size_t, std::size_t R, std::size_t a0, std::size_t na,
+               std::size_t b0, std::size_t nb) mutable {
+      const float* xa = &X[a0 * LD];
+      for (std::size_t r = 0; r < R; ++r)  // A' : na x R, ld kFTile
+        for (std::size_t c = 0; c < na; ++c) At[c + r * kFTile] = xa[c * LD + r];
+      LA.sgemm_nn(At.data(), static_cast<int>(na), static_cast<int>(R), static_cast<int>(kFTile), &X[b0 * LD],
+                  static_cast<int>(nb), static_cast<int>(LD), Pt.data(), static_cast<int>(kFTile));
+      for (std::size_t y = 0; y < nb; ++y)
+        for (std::size_t x = 0; x < na; ++x) o[(a0 + x) + (b0 + y) * P] += Pt[x + y * kFTile];
+    };
+  }, true);
+  std::vector<double> s(P);
+  for (std::size_t a = 0; a < P; ++a)
+    s[a] = static_cast<double>(step_sum_col(g, cols ? static_cast<std::size_t>(cols[a]) : a, kDosSteps));
+  const double k = kDosSteps, nk2 = k * k * static_cast<double>(g.n);
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(P); ++b)
+    for (std::size_t a = 0; a < P; ++a) {
+      double& v = o[a + static_cast<std::size_t>(b) * P];
+      v = (v + k * (s[a] + s[static_cast<std::size_t>(b)]) - nk2) / (k * k);
+    }
+}
+
+constexpr double kDDenseFracXtx = 0.07;  // D nonzero fraction above which xtx_into uses a dense kernel
 
 // Whether more than frac of the cells of the columns cols (or all) have a nonzero D.
 bool d_dense(const Geno& g, const int* cols, std::size_t pc, double frac) {
@@ -746,10 +811,11 @@ bool d_dense(const Geno& g, const int* cols, std::size_t pc, double frac) {
 
 // X'X of the stored matrix into o (p x p), or of columns cols (0-based, length pc) into o (pc x pc): exact
 // popcounts of H'H plus add_d_xtx, or, when more than kDDenseFracXtx of the cells of the columns have a nonzero
-// D (dosages), the double kernel xtx_dense_into.
+// D (dosages), a dense kernel: xtx_grid_into for columns on the 0.01 grid, else the double xtx_dense_into.
 void xtx_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
   if (d_dense(g, cols, pc, kDDenseFracXtx)) {
-    xtx_dense_into(g, cols, pc, o, threads);
+    if (on_grid(g, cols, pc)) xtx_grid_into(g, cols, pc, o, threads);
+    else xtx_dense_into(g, cols, pc, o, threads);
     return;
   }
   const TileKernel kernel = select_kernel();
@@ -1225,7 +1291,7 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
     if (flip.size()) {
       if (flip[c] == NA_LOGICAL) Rcpp::stop("flip must not be NA.");
       fl[c] = flip[c] ? 1 : 0;
-      if (fl[c] && a->D[cl[c]].unit != kDUnit) Rcpp::stop("Appended columns cannot be flipped.");
+      if (fl[c] && !unit_steps(a->D[cl[c]].unit)) Rcpp::stop("Appended columns cannot be flipped.");
     }
   }
   Rcpp::XPtr<Geno> g(new Geno, true);
@@ -1253,7 +1319,7 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
         const std::size_t i = static_cast<std::size_t>(rw[r]);
         unsigned int h = h_at(a->G, j, i);
         int q = qbuf[i];
-        if (fl[c]) flip_cell(h, q);
+        if (fl[c]) flip_cell(h, q, unit_steps(dc.unit));
         if (h == 1u) lo[r >> 6] |= u64(1) << (r & 63u);
         else if (h == 2u) hi[r >> 6] |= u64(1) << (r & 63u);
         if (q) db.add(r, h, q);
@@ -1301,7 +1367,7 @@ void fill_column(Geno& g, std::size_t j, bool hasc, double fc, const RowT* ci, c
     else continue;
     unsigned int h;
     int q;
-    quantize_fill(f, h, q);
+    quantize_fill(f, g.D[j].unit, h, q);
     nh[r] = static_cast<unsigned char>(h);
     nq[r] = q;
     chg[r] = 1;

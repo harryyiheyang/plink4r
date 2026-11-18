@@ -9,7 +9,7 @@
 //   B = Z'R2 Z - M2'M - M'M2 + M'(V'R2 V)M,  M2 = V'R2 Z, R2 = diag(r^2)          (robust, linear only)
 // and every n-long sum is an entry of L1'G or L2'(G o G), G the centred genotypes of a block (missing call = mean,
 // i.e. 0 after centring), L1 = [wV e_j | r2 V e_j | r e_j], L2 = [w e_j e_l | r2 e_j e_l]_{j <= l}. G is expanded
-// to doubles kRowChunk rows at a time from the 2-bit codes (hard calls) or 1/16384 dosages, so a thread holds
+// to doubles kRowChunk rows at a time from the 2-bit codes (hard calls) or 0.01 dosages, so a thread holds
 // b variants as n/4 (or 2n) bytes each plus 2 x kRowChunk x b doubles. A variant whose A_jj lost more than
 // 1 - 1/kKappaMax of Z_j'W Z_j to the subtraction (strong collinearity with the covariates) is recomputed by
 // explicit projection. The block size b follows from mem_gb (shared L1, L2, V, outputs; then per thread).
@@ -140,7 +140,7 @@ struct Worker {
   bool dosage = false;
   std::size_t sb = 0;
   std::vector<unsigned char> g8;   // cap x sb: 2-bit codes (0/1/2 = count, 3 = missing)
-  std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
+  std::vector<std::uint16_t> g16;  // cap x n: dosage in steps of 0.01 (dosage_grid), kDosMiss = missing
   std::vector<double> mean, G, G2, C1, C2, z, Z, Zt;
   std::vector<int> mono;
   void init(const Pre& pre, int capacity, bool dos) {
@@ -157,7 +157,7 @@ struct Worker {
     const double mu = mean[s];
     if (dosage) {
       const std::uint16_t* d = &g16[static_cast<std::size_t>(s) * n + row0];
-      for (int i = 0; i < rows; ++i) out[i] = d[i] == kDosMiss ? 0.0 : d[i] * (1.0 / 16384.0) - mu;
+      for (int i = 0; i < rows; ++i) out[i] = d[i] == kDosMiss ? 0.0 : d[i] * 0.01 - mu;
       return;
     }
     const double lut[4] = {-mu, 1.0 - mu, 2.0 - mu, 0.0};
@@ -350,9 +350,10 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
           std::uint16_t* o = &W.g16[static_cast<std::size_t>(s) * ns];
           for (int i = 0; i < ns; ++i) {
             const std::uint16_t v = d[si[i]];
-            o[i] = v;
-            if (v == kDosMiss) continue;
-            const double x = v * (1.0 / 16384.0);
+            if (v == kDosMiss) { o[i] = v; continue; }
+            const unsigned int c = plink4r::dosage_grid(v);
+            o[i] = static_cast<std::uint16_t>(c);
+            const double x = c * 0.01;
             no += 1; sum += x; sq += x * x;
           }
         } else {

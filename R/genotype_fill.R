@@ -16,7 +16,7 @@
 #' their observed calls alone (the `cond` of [genotype_impute()]), so columns outside `snps`, e.g. wrong calls
 #' that are being replaced, carry no information. Nothing is copied for the subset: the kernel reads the
 #' selected columns of `x` in place. A value f is stored as round(f) in the 2-bit planes and the
-#' rest in the int16 part (1/16384). All values refer to the counted allele `x$a1` (after [geno_harmonise()],
+#' rest in the int16 part (1/16384; 0.01 for a dosage PGEN). All values refer to the counted allele `x$a1` (after [geno_harmonise()],
 #' the harmonised one).
 #'
 #' The file route of earlier versions is kept: when `x` is a character PLINK2 prefix the call is

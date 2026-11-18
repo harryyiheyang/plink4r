@@ -7,7 +7,7 @@
 # cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
-# unit (1/16384 for genotypes) holding dosage - H for a PGEN with dosages,
+# unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
 # f - round(f) for a missing entry filled with f (the variant's lower median,
 # impute = "median", or observed mean, "mean"), and all of x (H = 0) for an
 # appended column; with scale = TRUE every product is that of the
@@ -27,12 +27,13 @@
 #' @param pgenfile PLINK 2 PGEN path or prefix (uncompressed `.pvar` and
 #'   `.psam` alongside). Give either `bedfile` or `pgenfile`. A PGEN whose
 #'   header flags dosages (e.g. `--make-pgen` from imputed data) is detected
-#'   automatically and read as ALT dosages: values, `center`, `sd` and all
-#'   products are those of the dosage matrix, stored as the rounded hard call
-#'   in 2-bit planes plus the exact dosage - hard call correction (a 1-bit
-#'   nonzero mask and int16 values in 1/16384 units). Such files must be
-#'   biallelic; a missing dosage takes the variant's observed mean dosage
-#'   (to 1/32768) whatever `impute` is.
+#'   automatically and read as ALT dosages taken to the nearest 0.01 (the
+#'   precision of imputed dosages; the file holds 1/16384 steps): values,
+#'   `center`, `sd` and all products are those of that dosage matrix, stored as
+#'   the rounded hard call in 2-bit planes plus the dosage - hard call
+#'   correction (a 1-bit nonzero mask and int16 values in 0.01 units). Such
+#'   files must be biallelic; a missing dosage takes the variant's observed
+#'   mean dosage (to 0.01) whatever `impute` is.
 #' @param snp_vec Variants to keep, as IDs or 1-based file indices, in the
 #'   column order wanted. `NULL` keeps all in file order. Selection by ID takes
 #'   the first match, so use indices when IDs are duplicated (e.g. ".").
@@ -252,7 +253,7 @@ as.matrix.geno <- function(x, ...) x[, , drop = FALSE]
 #' Same reader and arguments as [geno_open()], returned as an ordinary n x p
 #' double matrix (rows = samples, named by IID; columns = variants). Values are
 #' A1 (BED) or ALT (PGEN) allele counts, or dosages for a dosage PGEN (to
-#' 1/16384); missing hardcalls are filled by `impute`. With `scale = TRUE`
+#' 0.01); missing hardcalls are filled by `impute`. With `scale = TRUE`
 #' every column is standardized (mean 0, sd 1 with n - 1). For a large region
 #' prefer [geno_open()], which never forms this matrix.
 #'
@@ -273,9 +274,9 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 
 #' Cross products of a geno matrix
 #'
-#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount, or by double
-#' products of decoded row blocks when more than 7% of the cells have an int16
-#' part (dosages); `geno_crossprod(X, M)` is `crossprod(X, M)` for a dense `M`
+#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount, or by products of
+#' decoded row blocks when more than 7% of the cells have an int16 part
+#' (dosages; exact for the 0.01 dosages of a PGEN); `geno_crossprod(X, M)` is `crossprod(X, M)` for a dense `M`
 #' with one row per sample. With `X$scale = TRUE` both are those of the
 #' column-standardized matrix.
 #'
