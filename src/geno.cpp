@@ -20,6 +20,7 @@
 #include <Rcpp.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -1007,6 +1008,71 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
   return g;
 }
 
+namespace {
+
+// A fill value must keep the int16 part in range.
+inline bool fill_value_ok(double f) {
+  if (!std::isfinite(f)) return false;
+  const double hf = std::min(2.0, std::max(0.0, std::floor(f + 0.5)));
+  return std::fabs(16384.0 * (f - hf)) <= 32767.0;
+}
+
+// Rewrites the missing cells of column j: a cell takes its per-cell value when given (rows ci[k..end),
+// ascending, values cg; the first of repeated rows wins), else fc when hasc, else keeps its value.
+template <class RowT>
+void fill_column(Geno& g, std::size_t j, bool hasc, double fc, const RowT* ci, const double* cg, std::size_t k,
+                 std::size_t end) {
+  const std::vector<std::uint32_t>& Mj = g.M[j];
+  if (Mj.empty() || (!hasc && k == end)) return;
+  const std::size_t m = Mj.size();
+  std::vector<int> nq(m, 0);
+  std::vector<unsigned char> nh(m, 0), chg(m, 0);
+  bool any = false;
+  for (std::size_t r = 0; r < m; ++r) {
+    const std::size_t i = Mj[r];
+    while (k < end && static_cast<std::size_t>(ci[k]) < i) ++k;
+    double f;
+    if (k < end && static_cast<std::size_t>(ci[k]) == i) f = cg[k];
+    else if (hasc) f = fc;
+    else continue;
+    unsigned int h;
+    int q;
+    quantize_fill(f, h, q);
+    nh[r] = static_cast<unsigned char>(h);
+    nq[r] = q;
+    chg[r] = 1;
+    any = true;
+  }
+  if (!any) return;
+  const std::size_t W = g.G.words;
+  u64* lo = g.G.bits.data() + 2 * j * W;
+  u64* hi = lo + W;
+  for (std::size_t r = 0; r < m; ++r) {
+    if (!chg[r]) continue;
+    const std::size_t i = Mj[r];
+    const u64 bit = u64(1) << (i & 63u);
+    lo[i >> 6] &= ~bit;
+    hi[i >> 6] &= ~bit;
+    if (nh[r] == 1) lo[i >> 6] |= bit;
+    else if (nh[r] == 2) hi[i >> 6] |= bit;
+  }
+  const DCol old = std::move(g.D[j]);
+  rebuild_col(g, j, old.unit, [&](auto&& emit) {  // old D entries merged with the new missing-cell values, rows ascending
+    std::size_t r = 0, e = 0;
+    for (std::size_t w = 0; w < old.mask.size(); ++w)
+      for (u64 bits = old.mask[w]; bits; bits &= bits - 1) {
+        const std::size_t i = 64 * w + __builtin_ctzll(bits);
+        const int q = old.q[e++];
+        for (; r < m && Mj[r] < i; ++r) if (chg[r]) emit(Mj[r], nq[r]);
+        if (r < m && Mj[r] == i) { emit(i, chg[r] ? nq[r] : q); ++r; }
+        else emit(i, q);
+      }
+    for (; r < m; ++r) if (chg[r]) emit(Mj[r], nq[r]);
+  });
+}
+
+}  // namespace
+
 // The one fill routine: writes the missing cells (rows M[j]) of ptr. Column j's missing cells take the
 // per-cell value when given (CSR: cells of column j at cell_ptr[j]..cell_ptr[j+1], 0-based row cell_i
 // ascending, value cell_g; the first of repeated rows wins), else fill_c[j] when finite, else keep their
@@ -1025,75 +1091,22 @@ SEXP geno_fill_cpp(SEXP ptr, const Rcpp::NumericVector& fill_c, const Rcpp::Inte
     if (static_cast<std::size_t>(cell_ptr.size()) != p + 1) Rcpp::stop("cell_ptr must have p + 1 entries.");
     if (cell_i.size() != cell_g.size() || cell_ptr[p] != cell_i.size()) Rcpp::stop("cell_i / cell_g do not match cell_ptr.");
   }
-  auto ok_value = [](double f) {  // the int16 part of every fill must fit
-    if (!std::isfinite(f)) return false;
-    const double hf = std::min(2.0, std::max(0.0, std::floor(f + 0.5)));
-    return std::fabs(16384.0 * (f - hf)) <= 32767.0;
-  };
   for (std::size_t j = 0; j < static_cast<std::size_t>(fill_c.size()); ++j)
-    if (!std::isnan(fill_c[j]) && !ok_value(fill_c[j])) Rcpp::stop("fill values must be finite and within (-2, 4).");
+    if (!std::isnan(fill_c[j]) && !fill_value_ok(fill_c[j])) Rcpp::stop("fill values must be finite and within (-2, 4).");
   for (R_xlen_t k = 0; k < cell_g.size(); ++k)
-    if (!ok_value(cell_g[k])) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
+    if (!fill_value_ok(cell_g[k])) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
   Rcpp::XPtr<Geno> out = inplace ? src : Rcpp::XPtr<Geno>(new Geno(*src), true);
   Geno& g = *out;
   const double* fc = hc ? fill_c.begin() : nullptr;
   const int* cp = hcell ? cell_ptr.begin() : nullptr;
   const int* ci = hcell ? cell_i.begin() : nullptr;
   const double* cg = hcell ? cell_g.begin() : nullptr;
-  const std::size_t W = g.G.words;
   #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
   for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(p); ++jj) {
     const std::size_t j = static_cast<std::size_t>(jj);
-    const std::vector<std::uint32_t>& Mj = g.M[j];
-    if (Mj.empty()) continue;
     const bool hasc = fc && std::isfinite(fc[j]);
-    int k = cp ? cp[j] : 0;
-    const int end = cp ? cp[j + 1] : 0;
-    if (!hasc && k == end) continue;
-    const std::size_t m = Mj.size();
-    std::vector<int> nq(m, 0);
-    std::vector<unsigned char> nh(m, 0), chg(m, 0);
-    bool any = false;
-    for (std::size_t r = 0; r < m; ++r) {
-      const int i = static_cast<int>(Mj[r]);
-      while (k < end && ci[k] < i) ++k;
-      double f;
-      if (k < end && ci[k] == i) f = cg[k];
-      else if (hasc) f = fc[j];
-      else continue;
-      unsigned int h;
-      int q;
-      quantize_fill(f, h, q);
-      nh[r] = static_cast<unsigned char>(h);
-      nq[r] = q;
-      chg[r] = 1;
-      any = true;
-    }
-    if (!any) continue;
-    u64* lo = g.G.bits.data() + 2 * j * W;
-    u64* hi = lo + W;
-    for (std::size_t r = 0; r < m; ++r) {
-      if (!chg[r]) continue;
-      const std::size_t i = Mj[r];
-      const u64 bit = u64(1) << (i & 63u);
-      lo[i >> 6] &= ~bit;
-      hi[i >> 6] &= ~bit;
-      if (nh[r] == 1) lo[i >> 6] |= bit;
-      else if (nh[r] == 2) hi[i >> 6] |= bit;
-    }
-    const DCol old = std::move(g.D[j]);
-    rebuild_col(g, j, old.unit, [&](auto&& emit) {  // old D entries merged with the new missing-cell values, rows ascending
-      std::size_t r = 0, e = 0;
-      for (std::size_t w = 0; w < old.mask.size(); ++w)
-        for (u64 bits = old.mask[w]; bits; bits &= bits - 1) {
-          const std::size_t i = 64 * w + __builtin_ctzll(bits);
-          const int q = old.q[e++];
-          for (; r < m && Mj[r] < i; ++r) if (chg[r]) emit(Mj[r], nq[r]);
-          if (r < m && Mj[r] == i) { emit(i, chg[r] ? nq[r] : q); ++r; }
-          else emit(i, q);
-        }
-      for (; r < m; ++r) if (chg[r]) emit(Mj[r], nq[r]);
-    });
+    fill_column(g, j, hasc, hasc ? fc[j] : 0.0, ci, cg, cp ? static_cast<std::size_t>(cp[j]) : 0,
+                cp ? static_cast<std::size_t>(cp[j + 1]) : 0);
   }
   return out;
 }
@@ -1122,6 +1135,23 @@ Rcpp::List geno_miss_cpp(SEXP ptr) {
 
 namespace plink4r {
 
+void geno_write_cells(SEXP ptr, const std::vector<int>& cols, const std::vector<std::size_t>& off,
+                      const std::vector<std::uint32_t>& rows, const std::vector<double>& vals, int threads) {
+  Rcpp::XPtr<Geno> gp(ptr);
+  Geno& g = *gp;
+  threads = resolve_threads(threads);
+  const std::size_t m = cols.size();
+  if (off.size() != m + 1 || off[m] != rows.size() || rows.size() != vals.size())
+    Rcpp::stop("geno_write_cells: cols / off / rows / vals do not match.");
+  for (int j : cols) if (j < 0 || static_cast<std::size_t>(j) >= g.p) Rcpp::stop("geno_write_cells: column out of range.");
+  for (double v : vals) if (!fill_value_ok(v)) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+  for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
+    const std::size_t c = static_cast<std::size_t>(cc);
+    fill_column(g, static_cast<std::size_t>(cols[c]), false, 0.0, rows.data(), vals.data(), off[c], off[c + 1]);
+  }
+}
+
 void geno_genovec(SEXP ptr, const std::vector<int>& cols, std::vector<unsigned char>& gs,
                   std::vector<double>& sum_obs, int& n_out, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
@@ -1147,7 +1177,30 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, std::vector<unsigned c
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
     const std::size_t c = static_cast<std::size_t>(cc), j = static_cast<std::size_t>(cols[c]);
     unsigned char* dst = gs.data() + c * sb;
-    for (std::size_t i = 0; i < n; ++i) dst[i >> 2] |= static_cast<unsigned char>(h_at(g->G, j, i) << (2 * (i & 3u)));
+    // 64 rows per step: code = lo | hi << 1 (h_at: lo wins), i.e. the bits of lo and hi interleaved
+    const u64* lo = g->G.lo(j);
+    const u64* hi = g->G.hi(j);
+    auto spread = [](u64 x) {  // bit t of the low 32 bits -> bit 2t
+      x &= 0xFFFFFFFFull;
+      x = (x | (x << 16)) & 0x0000FFFF0000FFFFull;
+      x = (x | (x << 8)) & 0x00FF00FF00FF00FFull;
+      x = (x | (x << 4)) & 0x0F0F0F0F0F0F0F0Full;
+      x = (x | (x << 2)) & 0x3333333333333333ull;
+      x = (x | (x << 1)) & 0x5555555555555555ull;
+      return x;
+    };
+    const std::size_t nw = (n + 63) / 64;
+    for (std::size_t w = 0; w < nw; ++w) {
+      u64 l = lo[w], h = hi[w] & ~l;
+      const std::size_t rows = std::min<std::size_t>(64, n - 64 * w);
+      if (rows < 64) { const u64 keep = (u64(1) << rows) - 1; l &= keep; h &= keep; }
+      const u64 out[2] = {spread(l) | (spread(h) << 1), spread(l >> 32) | (spread(h >> 32) << 1)};
+      const std::size_t b0 = 16 * w, nbyt = std::min<std::size_t>(16, sb - b0);
+      unsigned char tmp[16];
+      for (int k = 0; k < 2; ++k)
+        for (int b = 0; b < 8; ++b) tmp[8 * k + b] = static_cast<unsigned char>(out[k] >> (8 * b));
+      std::memcpy(dst + b0, tmp, nbyt);
+    }
     std::int64_t s = g->G.s[j];
     for (std::uint32_t i : g->M[j]) {
       s -= h_at(g->G, j, i);

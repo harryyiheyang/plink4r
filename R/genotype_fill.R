@@ -9,7 +9,13 @@
 #' - `ld`: per-cell conditional means from the eigen.bin panel ([genotype_impute()] on `x`, anchored to `af`
 #'   when given, else to the panel AF); columns absent from the panel keep f_j;
 #' - `cells`: the given value of that cell.
-#' Priority cells > ld > const > af > mean. A value f is stored as round(f) in the 2-bit planes and the
+#' Priority cells > ld > const > af > mean.
+#'
+#' `snps` restricts the call to a subset of columns: only their missing cells are rewritten (every other column
+#' keeps its current fill, and its `af`, `const` and `cells` entries are ignored), and the LD fill conditions on
+#' their observed calls alone (the `cond` of [genotype_impute()]), so columns outside `snps`, e.g. wrong calls
+#' that are being replaced, carry no information. Nothing is copied for the subset: the kernel reads the
+#' selected columns of `x` in place. A value f is stored as round(f) in the 2-bit planes and the
 #' rest in the int16 part (1/16384). All values refer to the counted allele `x$a1` (after [geno_harmonise()],
 #' the harmonised one).
 #'
@@ -24,14 +30,15 @@
 #' @param ld NULL, or list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
 #'   parquet path or data.frame in place of that table).
 #' @param const Fill constant per column (`NA` = not given).
+#' @param snps NULL (every column), or the columns (names, or numbers) to fill and, for `ld`, to condition on.
 #' @param cells data.frame(snp = column name (or j = column number), IID, g) of per-cell fills; cells that
 #'   are not missing are ignored.
 #' @param para named list overriding [genotype_fill_para()] (used: delta, anchor_min_miss, flank, thresh,
-#'   threads, mem_gb; the old route uses all).
+#'   threads, mem_gb; the old route uses all, and `cond`).
 #' @return A `geno` object (new external pointer), `impute` = "mean", "af", "custom" or "ld". Old route: as
 #'   before, list(snp, cells, dropped, method, para, time).
 #' @export
-genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NULL, para = list()) {
+genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NULL, snps = NULL, para = list()) {
   if (missing(x)) {  # old route called as genotype_fill(pfile = , ...)
     a <- list(...)
     if (is.null(a$pfile)) stop("x is missing.", call. = FALSE)
@@ -45,7 +52,8 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     if (is.null(an)) an <- rep("", length(a))
     bad <- setdiff(an[nzchar(an)], c("snp", "sample"))
     if (length(bad)) stop("unknown argument: ", paste(bad, collapse = ", "), call. = FALSE)
-    if (!is.null(af) || !is.null(const) || !is.null(cells)) stop("af / const / cells need a geno object.", call. = FALSE)
+    if (!is.null(af) || !is.null(const) || !is.null(cells) || !is.null(snps))
+      stop("af / const / cells / snps need a geno object (the file route takes para$cond).", call. = FALSE)
     args <- list(snp = a$snp, ld = if (!missing(ld)) ld, sample = a$sample, para = if (!missing(para)) para)
     given <- c(snp = "snp" %in% an, ld = !missing(ld), sample = "sample" %in% an, para = !missing(para))
     for (v in a[!nzchar(an)]) {  # positional: snp, ld, sample, para in that order, skipping named ones
@@ -65,6 +73,13 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   P[names(para)] <- para
   P$threads <- .threads(P$threads)
   p <- x$p
+  sel <- rep(TRUE, p)
+  if (!is.null(snps)) {
+    js <- if (is.numeric(snps)) as.integer(snps) else match(as.character(snps), x$snp)
+    bad <- is.na(js) | js < 1L | js > p
+    if (any(bad)) stop(sum(bad), " of `snps` are not columns of x.", call. = FALSE)
+    sel <- seq_len(p) %in% js
+  }
   if (!is.null(const)) {
     const <- as.numeric(const)
     if (length(const) != p) stop("const needs one value per column.", call. = FALSE)
@@ -73,9 +88,12 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   if (!is.null(cells) && nrow(cells)) {
     j <- if (!is.null(cells$j)) as.integer(cells$j) else match(as.character(cells$snp), x$snp)
     cl <- data.frame(j = j, IID = as.character(cells$IID), g = as.numeric(cells$g))
+    cl <- cl[!is.na(cl$j) & sel[pmax(cl$j, 1L)], , drop = FALSE]
+    if (!nrow(cl)) cl <- NULL
   }
   lab <- if (!is.null(cl)) "custom" else if (!is.null(ld)) "ld" else if (any(is.finite(const))) "custom" else
     if (any(is.finite(af))) "af" else "mean"
+  ld_write <- NULL
   if (!is.null(ld) && any(x$n_miss > 0)) {
     P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
     .check_delta(P$delta)
@@ -83,26 +101,27 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
                        "genotype_fill(pfile, snp, ld, sample) and geno_open(pgenfile =, fill = ).", call. = FALSE)
     pan <- .ld_panel(ld$ref, ld$dir)
     al <- .ld_align(pan, .geno_vartab(x))
-    use <- sort(intersect(al$vi + 1L, which(x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
+    use <- sort(intersect(al$vi + 1L, which(sel & x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
     if (length(use)) {
       a <- if (!is.null(af)) { ua <- which(is.finite(af)); stats::setNames(af[ua], x$snp[ua]) }
-      gi <- genotype_impute(x, pan, ld$dir, snps = x$snp[use], flank = P$flank, delta = P$delta,
-                            anchor_min_miss = P$anchor_min_miss, thresh = P$thresh, threads = P$threads,
-                            mem_gb = P$mem_gb, af = a)
-      lc <- data.frame(j = gi$fill$j, IID = gi$fill$IID, g = gi$fill$g, i = gi$fill$i)
-      if (!is.null(cl)) cl$i <- NA_integer_
-      cl <- if (is.null(cl)) lc else rbind(cl, lc)  # user cells first: they win
+      cond <- if (!all(sel)) x$snp[sel] else P$cond
+      # the kernel writes the LD fills straight into the new object (no per-cell table in R)
+      ld_write <- function(ptr) .genotype_impute(x, pan, ld$dir, NULL, x$snp[use], P$flank, NULL, P$delta,
+                                                 P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb, a, cond,
+                                                 write_ptr = ptr)
     }
   }
   .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
-               default = "mean", inplace = FALSE, impute = lab, threads = P$threads)
+               default = "mean", inplace = FALSE, impute = lab, threads = P$threads, cols = if (!all(sel)) sel,
+               ld_write = ld_write)
 }
 
 # Refill the missing cells of X through geno_fill_cpp. Per column f = default ("mean": observed mean, 0 when
 # every cell is missing; "keep": the current fill), then af (anchored), then const; cells (CSR from
-# .geno_fill_spec) win over all. inplace only for an object nothing else references.
+# .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
+# writes the LD fills into the new store after the per-column values and before the cells (so cells > LD > f).
 .geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, default = c("mean", "keep"), inplace = FALSE,
-                         impute = X$impute, threads = X$threads) {
+                         impute = X$impute, threads = X$threads, cols = NULL, ld_write = NULL) {
   default <- match.arg(default)
   p <- X$p; n <- X$n
   if (!is.null(af)) {
@@ -122,8 +141,15 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     f[ok] <- const[ok]
   }
   f[m == 0] <- NaN
+  if (!is.null(cols)) f[!cols] <- NaN  # columns outside `cols` keep their current fill
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
-  ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+  if (is.null(ld_write)) {
+    ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+  } else {
+    ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), inplace, .threads(threads))
+    ld_write(ptr)
+    if (length(cells$ptr)) ptr <- geno_fill_cpp(ptr, numeric(0), cells$ptr, cells$i, cells$g, TRUE, .threads(threads))
+  }
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
             threads = X$threads, file = X$file, appended = X$appended)
 }
@@ -243,7 +269,8 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       ua <- m[in_ld == TRUE & is.finite(p_alt)]
       gi <- genotype_impute(pfile, pan, ld$dir, snps = m$ID[m$in_ld], flank = P$flank, sample = iid[si],
                             delta = P$delta, anchor_min_miss = P$anchor_min_miss, thresh = P$thresh,
-                            threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID))
+                            threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID),
+                            cond = P$cond)
       cells <- gi$fill[, .(ID = snp, IID, g)]
       method <- paste0("scheme4+", method)
     }
@@ -260,9 +287,10 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
 #' build NULL = the one BP column present; maf 0.01 (observed); miss_max 1 = keep all (drop SNPs whose
 #' missing rate exceeds it); delta 0.01 ridge of stage 1; anchor_min_miss 0.01 (stage 2 only at or above
 #' this missing rate); flank 2500 panel rows each side; thresh 0 = all stored eigenpairs; threads; mem_gb
-#' memory budget for the people batches of stage 1.
+#' memory budget for the people batches of stage 1; cond NULL = condition on every panel SNP of the window,
+#' else the IDs of the conditioning set (see `cond` of [genotype_impute()]; the object route's `snps` sets it).
 #' @export
 genotype_fill_para <- function() {
   list(build = NULL, maf = 0.01, miss_max = 1, delta = 0.01, anchor_min_miss = 0.01, flank = 2500L,
-       thresh = 0, threads = 4L, mem_gb = 2)
+       thresh = 0, threads = 4L, mem_gb = 2, cond = NULL)
 }

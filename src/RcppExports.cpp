@@ -385,6 +385,29 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// genotype_fill_ld_geno_cpp
+Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people, double mem_gb, Rcpp::IntegerVector rows);
+RcppExport SEXP _plink4r_genotype_fill_ld_geno_cpp(SEXP ptrSEXP, SEXP var_idxSEXP, SEXP eigen_fileSEXP, SEXP afSEXP, SEXP signSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP keep_rowSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP, SEXP rowsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type eigen_file(eigen_fileSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type af(afSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sign(signSEXP);
+    Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
+    Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
+    Rcpp::traits::input_parameter< double >::type anchor_min_miss(anchor_min_missSEXP);
+    Rcpp::traits::input_parameter< Rcpp::LogicalVector >::type keep_row(keep_rowSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< int >::type nb_people(nb_peopleSEXP);
+    Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type rows(rowsSEXP);
+    rcpp_result_gen = Rcpp::wrap(genotype_fill_ld_geno_cpp(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows));
+    return rcpp_result_gen;
+END_RCPP
+}
 // post_mix_mv_cpp
 Rcpp::List post_mix_mv_cpp(Rcpp::NumericMatrix score, Rcpp::NumericMatrix info, Rcpp::NumericVector base, Rcpp::NumericVector m_scaled, Rcpp::NumericVector m_abs, Rcpp::NumericVector m_w, Rcpp::NumericVector i_scaled, Rcpp::NumericVector i_abs, Rcpp::NumericVector i_w, double gamma, int threads);
 RcppExport SEXP _plink4r_post_mix_mv_cpp(SEXP scoreSEXP, SEXP infoSEXP, SEXP baseSEXP, SEXP m_scaledSEXP, SEXP m_absSEXP, SEXP m_wSEXP, SEXP i_scaledSEXP, SEXP i_absSEXP, SEXP i_wSEXP, SEXP gammaSEXP, SEXP threadsSEXP) {
@@ -462,6 +485,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 16},
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
+    {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
     {"_plink4r_post_mix_mv_cpp", (DL_FUNC) &_plink4r_post_mix_mv_cpp, 11},
     {"_plink4r_int_cauchy_cpp", (DL_FUNC) &_plink4r_int_cauchy_cpp, 4},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},

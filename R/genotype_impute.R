@@ -27,16 +27,30 @@
 #' @param nb_people people per batch (NULL = largest batch whose S_i, rhs and SNP lists fit in `mem_gb`).
 #' @param mem_gb memory budget of the people batches; 0 takes it from [plink4r_resources()].
 #' @param af optional anchor frequencies of the PGEN ALT allele, named by PGEN ID; they replace AF_PanUKB.
-#' @return list(fill = data.table(IID, snp, g1, g), snp = per-SNP n_miss / c / shift, info, time); `snp` is
+#' @param cond optional IDs (panel or PGEN IDs; column names for a `geno` object) of the conditioning set:
+#'   only these SNPs enter S, so a person's missing cells are predicted from their observed calls at these SNPs
+#'   alone and the other SNPs of the window (e.g. wrong calls that are being replaced) carry no information.
+#'   A SNP to impute that is not in `cond` is not imputed (warning). NULL = every panel SNP of the window.
+#' @return list(fill = data.table(IID, snp, g1, g), snp = per-SNP n_miss / c / shift of the imputed SNPs (flank
+#'   rows excluded), info, time); `snp` is
 #'   the PGEN ID and g the ALT dosage. For a `geno` object `snp` is the column name, g the dosage of `a1`,
 #'   and `fill` also has `i` (row) and `j` (column) of the object.
 #' @export
 genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
-                            mem_gb = 2, af = NULL) {
+                            mem_gb = 2, af = NULL, cond = NULL) {
+  .genotype_impute(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh, threads,
+                   nb_people, mem_gb, af, cond)
+}
+
+# write_ptr: for a geno object, the external pointer of a fresh clone of it (same columns, nobody else references
+# it) into which the final fills of the imputed SNPs are written directly; the result then has no `fill` table.
+.genotype_impute <- function(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh,
+                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL) {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
   obj <- inherits(pfile, "geno")
+  if (!is.null(write_ptr) && !obj) stop("internal: write_ptr needs a geno object", call. = FALSE)
   if (obj) {
     if (!is.null(sample)) stop("with a geno object, sample must be NULL (use geno_subset() first)", call. = FALSE)
     if (pfile$dosage) stop("LD imputation on an object needs hard calls; for a PGEN with dosages give the PGEN prefix.", call. = FALSE)
@@ -75,12 +89,22 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
     ef <- file.path(ld_dir, paste0("block", blk, ".eigen.bin"))
     w <- .ld_rows(al, blk, jb$lo, jb$hi)
     w <- w[AF_PanUKB > 0 & AF_PanUKB < 1]
+    if (!is.null(cond)) {
+      inc <- w$ID %in% cond | pvar$ID[w$vi + 1L] %in% cond
+      if (!is.null(jb$keep) && any(lost <- !inc & w$vi %in% jb$keep))
+        warning(sum(lost), " SNP(s) to impute in block ", blk, " are not in `cond` and are not imputed", call. = FALSE)
+      w <- w[inc]
+    }
     if (!nrow(w)) stop("no SNP of block ", blk, " found in ", what)
     snp <- pvar$ID[w$vi + 1L]
     kr <- if (is.null(jb$keep)) rep(TRUE, nrow(w)) else w$vi %in% jb$keep
     p_alt <- ifelse(w$sign > 0, w$AF_PanUKB, 1 - w$AF_PanUKB)
     nbp <- if (is.null(nb_people)) 0L else as.integer(nb_people)
-    out <- if (obj) {
+    out <- if (!is.null(write_ptr)) {
+      genotype_fill_ld_geno_cpp(write_ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
+                                as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
+                                mem_gb, as.integer(w$ld_index))
+    } else if (obj) {
       genotype_impute_geno_cpp(X$ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
                                as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
                                mem_gb, as.integer(w$ld_index))
@@ -89,18 +113,22 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
                           as.integer(si), normalizePath(ef), p_alt, as.integer(w$sign), thresh, delta,
                           anchor_min_miss, kr, as.integer(threads), nbp, mem_gb, as.integer(w$ld_index))
     }
-    f <- data.table::as.data.table(out$fill)
-    col <- if (obj) pvar$row[w$vi + 1L][f$j] else NULL
-    f[, `:=`(IID = iid[si[i] + 1L], snp = snp[j])]
-    f <- if (obj) f[, .(IID, snp, g1, g, i, j = col)] else f[, .(IID, snp, g1, g)]
+    f <- NULL
+    if (is.null(write_ptr)) {
+      f <- data.table::as.data.table(out$fill)
+      col <- if (obj) pvar$row[w$vi + 1L][f$j] else NULL
+      f[, `:=`(IID = iid[si[i] + 1L], snp = snp[j])]
+      f <- if (obj) f[, .(IID, snp, g1, g, i, j = col)] else f[, .(IID, snp, g1, g)]
+    }
     s <- data.table::as.data.table(out$snp)
     s[, snp := snp[j]]
+    s <- s[kr[j]]  # rows whose cells are returned (flank rows only condition)
     list(fill = f, snp = s[n_miss > 0, .(snp, n_miss, c_raw, c, mean_stage1, shift)],
          info = c(list(block = blk, window = if (is.null(jb$lo)) 0L else nrow(w), working_rows = nrow(w),
                        flipped = sum(w$sign < 0), threads = threads, mem_gb = mem_gb), out$info),
          time = out$time)
   })
   if (length(res) == 1L) return(res[[1]])
-  list(fill = data.table::rbindlist(lapply(res, `[[`, "fill")), snp = data.table::rbindlist(lapply(res, `[[`, "snp")),
+  list(fill = if (is.null(write_ptr)) data.table::rbindlist(lapply(res, `[[`, "fill")), snp = data.table::rbindlist(lapply(res, `[[`, "snp")),
        info = lapply(res, `[[`, "info"), time = do.call(rbind, lapply(res, `[[`, "time")))
 }
