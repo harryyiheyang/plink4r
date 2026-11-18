@@ -273,9 +273,11 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 
 #' Cross products of a geno matrix
 #'
-#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount; `geno_crossprod(X, M)`
-#' is `crossprod(X, M)` for a dense `M` with one row per sample. With
-#' `X$scale = TRUE` both are those of the column-standardized matrix.
+#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount, or by double
+#' products of decoded row blocks when more than 7% of the cells have an int16
+#' part (dosages); `geno_crossprod(X, M)` is `crossprod(X, M)` for a dense `M`
+#' with one row per sample. With `X$scale = TRUE` both are those of the
+#' column-standardized matrix.
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param M Optional dense matrix (or vector) with one row per sample.
