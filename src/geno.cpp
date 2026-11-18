@@ -22,6 +22,8 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include "geno_kernel.h"
@@ -351,8 +353,10 @@ double bytes_d(const Geno& g) {
 
 // X'X += H'D + D'H + D'D, as S + S' with S[a, b] = sum_i D_bi (H_ai + D_ai / 2),
 // from a row-interleaved buffer of T columns of H + D / 2 per thread. With cols (0-based, length pc), the
-// columns cols of g in that order (out is pc x pc); without, all columns of g.
-void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullptr, std::size_t pc = 0) {
+// columns cols of g in that order (out is pc x pc); without, all columns of g. With per-row weights wrow, the
+// buffered rows are multiplied by them, giving X'WX += H'WD + D'WH + D'WD.
+void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullptr, std::size_t pc = 0,
+               const double* wrow = nullptr) {
   const std::size_t n = g.n, p = cols ? pc : g.p;
   auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
   if (!g.dnnz()) return;
@@ -382,6 +386,9 @@ void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullpt
           for (u64 bits = c.mask[w]; bits; bits &= bits - 1)
             buf[(64 * w + __builtin_ctzll(bits)) * T + t] += 0.5 * (c.q[e++] * c.unit);
       }
+      if (wrow)
+        for (std::size_t i = 0; i < n; ++i)
+          for (std::size_t t = 0; t < na; ++t) buf[i * T + t] *= wrow[i];
       for (std::size_t b = 0; b < p; ++b) {
         const DCol& c = g.D[col(b)];
         std::size_t e = 0;
@@ -550,6 +557,118 @@ void xtx_into(const Geno& g, const int* cols, std::size_t pc, double* o, int thr
   }
   dot_block(sub, 0, pc, sub, 0, pc, true, o, pc, threads, kernel);
   add_d_xtx(g, o, threads, cols, pc);
+}
+
+constexpr std::size_t kBinRows = 64;     // rows per weight bin: one 64-bit word of the gathered planes
+constexpr std::size_t kBinGroup = 384;   // bins per streamed group (24576 rows; a multiple of 4)
+
+// X'W~X into o (p x p, or pc x pc for columns cols), W~ = diag(w binned): rows sorted by w (ties by row
+// index), each run of kBinRows sorted rows takes the mean w of its rows. With the weight constant within a
+// bin, H'W~H = sum_b wbar_b H_b'H_b by exact popcounts: per group of kBinGroup bins the rows of the group
+// are gathered for every column (one bin per word), then the 64 x 64 tiles of the upper triangle are shared
+// out by OpenMP (disjoint outputs). The D terms come from add_d_xtx with the binned per-row weights, which
+// are also written to w_bin (n, row order) when it is not null.
+void xtwx_bin_into(const Geno& g, const double* w, const int* cols, std::size_t pc, double* o, double* w_bin,
+                   int threads) {
+  const std::size_t n = g.n, P = cols ? pc : g.p;
+  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+  std::vector<std::uint32_t> ord(n);
+  std::iota(ord.begin(), ord.end(), 0u);
+  std::stable_sort(ord.begin(), ord.end(), [w](std::uint32_t a, std::uint32_t b) { return w[a] < w[b]; });
+  const std::size_t nbin = (n + kBinRows - 1) / kBinRows, nbin4 = (nbin + 3) / 4 * 4;
+  std::vector<double> wbar(nbin4, 0.0), wq(n);  // padding bins (no rows) weigh 0
+  for (std::size_t b = 0; b < nbin; ++b) {
+    const std::size_t r0 = b * kBinRows, r1 = std::min(n, r0 + kBinRows);
+    double s = 0.0;
+    for (std::size_t r = r0; r < r1; ++r) s += w[ord[r]];
+    wbar[b] = s / static_cast<double>(r1 - r0);
+    for (std::size_t r = r0; r < r1; ++r) wq[ord[r]] = wbar[b];
+  }
+  if (w_bin) std::copy(wq.begin(), wq.end(), w_bin);
+  std::fill(o, o + P * P, 0.0);
+  const WTileKernel kernel = select_wkernel();
+  const std::size_t nt = (P + kTile - 1) / kTile, gw = std::min(kBinGroup, nbin4);
+  std::vector<u64> store(2 * P * gw + 3);  // 3 spare words to start the buffer on 32 bytes
+  void* start = store.data();
+  std::size_t space = store.size() * sizeof(u64);
+  u64* buf = static_cast<u64*>(std::align(32, 2 * P * gw * sizeof(u64), start, space));
+  for (std::size_t b0 = 0; b0 < nbin4; b0 += kBinGroup) {
+    const std::size_t W = std::min(kBinGroup, nbin4 - b0);  // words per plane of this group
+    const std::size_t g0 = b0 * kBinRows, g1 = std::min(n, (b0 + W) * kBinRows);
+    #pragma omp parallel for num_threads(threads) schedule(static)
+    for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa) {
+      const std::size_t a = static_cast<std::size_t>(aa), j = col(a);
+      const u64* lo = g.G.lo(j);
+      const u64* hi = g.G.hi(j);
+      u64* ol = buf + 2 * a * W;
+      u64* oh = ol + W;
+      for (std::size_t k = 0; k < W; ++k) {
+        u64 l = 0, h = 0;
+        const std::size_t r0 = g0 + kBinRows * k, r1 = std::min(g1, r0 + kBinRows);
+        for (std::size_t r = r0; r < r1; ++r) {
+          const std::uint32_t i = ord[r];
+          l |= ((lo[i >> 6] >> (i & 63u)) & 1u) << (r - r0);
+          h |= ((hi[i >> 6] >> (i & 63u)) & 1u) << (r - r0);
+        }
+        ol[k] = l;
+        oh[k] = h;
+      }
+    }
+    #pragma omp parallel num_threads(threads)
+    {
+      std::vector<double> acc(kTile * kTile);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t t = 0; t < static_cast<std::ptrdiff_t>(nt * nt); ++t) {
+        const std::size_t ti = static_cast<std::size_t>(t) / nt, tj = static_cast<std::size_t>(t) % nt;
+        if (ti > tj) continue;
+        const std::size_t i0 = ti * kTile, j0 = tj * kTile, ni = std::min(kTile, P - i0), nj = std::min(kTile, P - j0);
+        std::fill(acc.begin(), acc.end(), 0.0);
+        kernel(buf, W, i0, ni, j0, nj, wbar.data() + b0, acc.data());
+        for (std::size_t x = 0; x < ni; ++x)
+          for (std::size_t y = 0; y < nj; ++y) o[(i0 + x) + (j0 + y) * P] += acc[x * kTile + y];
+      }
+    }
+  }
+  for (std::size_t b = 0; b < P; ++b)  // mirror the upper triangle
+    for (std::size_t a = b + 1; a < P; ++a) o[a + b * P] = o[b + a * P];
+  add_d_xtx(g, o, threads, cols, pc, wq.data());
+}
+
+// Standardizes a weighted cross product in place: o (pc x pc, columns cols or all when null) becomes
+// (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w in double from the planes and D; center c and div d
+// are per output column (div may be null: no division).
+void xtwx_std(const Geno& g, const double* w, const int* cols, std::size_t pc, const double* center,
+              const double* div, double* o, int threads) {
+  const std::size_t n = g.n, P = cols ? pc : g.p;
+  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+  std::vector<double> sw(P, 0.0);
+  double wsum = 0.0;
+  for (std::size_t i = 0; i < n; ++i) wsum += w[i];
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+  for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa) {
+    const std::size_t a = static_cast<std::size_t>(aa), j = col(a);
+    double acc = 0.0;
+    const u64* lo = g.G.lo(j);
+    const u64* hi = g.G.hi(j);
+    for (std::size_t x = 0; x < g.G.words; ++x) {
+      for (u64 bits = lo[x]; bits; bits &= bits - 1) acc += w[64 * x + __builtin_ctzll(bits)];
+      for (u64 bits = hi[x]; bits; bits &= bits - 1) acc += 2.0 * w[64 * x + __builtin_ctzll(bits)];
+    }
+    const DCol& dc = g.D[j];
+    std::size_t e = 0;
+    for (std::size_t x = 0; x < dc.mask.size(); ++x)
+      for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) acc += dc.q[e++] * dc.unit * w[64 * x + __builtin_ctzll(bits)];
+    sw[a] = acc;
+  }
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::ptrdiff_t bb = 0; bb < static_cast<std::ptrdiff_t>(P); ++bb) {
+    const std::size_t b = static_cast<std::size_t>(bb);
+    for (std::size_t a = 0; a < P; ++a) {
+      double v = o[a + b * P] - center[a] * sw[b] - sw[a] * center[b] + wsum * center[a] * center[b];
+      if (div) v /= div[a] * div[b];
+      o[a + b * P] = v;
+    }
+  }
 }
 
 // X'M into o (p x k) for a dense n x k matrix m.
@@ -910,37 +1029,28 @@ Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const 
     for (std::size_t a = b + 1; a < p; ++a) o[b + a * p] = o[a + b * p];
   if (center.size() > 0) {
     if (static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
-    const bool hd = div.size() > 0;
-    std::vector<double> sw(p, 0.0);
-    double wsum = 0.0;
-    for (std::size_t i = 0; i < n; ++i) wsum += wp[i];
-    #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
-    for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(p); ++jj) {  // s = X'w in double
-      const std::size_t j = static_cast<std::size_t>(jj);
-      double acc = 0.0;
-      const u64* lo = g->G.lo(j);
-      const u64* hi = g->G.hi(j);
-      for (std::size_t x = 0; x < g->G.words; ++x) {
-        for (u64 bits = lo[x]; bits; bits &= bits - 1) acc += wp[64 * x + __builtin_ctzll(bits)];
-        for (u64 bits = hi[x]; bits; bits &= bits - 1) acc += 2.0 * wp[64 * x + __builtin_ctzll(bits)];
-      }
-      const DCol& dc = g->D[j];
-      std::size_t e = 0;
-      for (std::size_t x = 0; x < dc.mask.size(); ++x)
-        for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) acc += dc.q[e++] * dc.unit * wp[64 * x + __builtin_ctzll(bits)];
-      sw[j] = acc;
-    }
-    #pragma omp parallel for num_threads(threads) schedule(static)
-    for (std::ptrdiff_t bb = 0; bb < static_cast<std::ptrdiff_t>(p); ++bb) {
-      const std::size_t b = static_cast<std::size_t>(bb);
-      for (std::size_t a = 0; a < p; ++a) {
-        double v = o[a + b * p] - center[a] * sw[b] - sw[a] * center[b] + wsum * center[a] * center[b];
-        if (hd) v /= div[a] * div[b];
-        o[a + b * p] = v;
-      }
-    }
+    xtwx_std(*g, wp, nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, o, threads);
   }
   return out;
+}
+
+// X'W~X of the stored matrix with w binned in groups of 64 rows (xtwx_bin_into), standardized as in
+// geno_xtwx_cpp with the binned weights when center is given; w = the binned weights in row order.
+// [[Rcpp::export]]
+Rcpp::List geno_xtwx_bin_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center,
+                             const Rcpp::NumericVector& div, int threads) {
+  Rcpp::XPtr<Geno> g(ptr);
+  threads = resolve_threads(threads);
+  const std::size_t n = g->n, p = g->p;
+  if (static_cast<std::size_t>(w.size()) != n) Rcpp::stop("w must have one value per sample.");
+  for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(w[i])) Rcpp::stop("w must be finite.");
+  if (center.size() > 0 && static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
+  Rcpp::NumericMatrix out(p, p);
+  Rcpp::NumericVector wq(n);
+  xtwx_bin_into(*g, w.begin(), nullptr, p, out.begin(), wq.begin(), threads);
+  if (center.size() > 0)
+    xtwx_std(*g, wq.begin(), nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
+  return Rcpp::List::create(Rcpp::Named("XtWX") = out, Rcpp::Named("w") = wq);
 }
 
 // A new geno = rows x cols of ptr (0-based, any order; repeats allowed), each cell copied as stored (no
@@ -1342,6 +1452,35 @@ int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int 
   });
 }
 
+// out (q x q) = X'W~X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, with w (n)
+// binned in groups of 64 rows (xtwx_bin_into), standardized in place with the binned weights when scale;
+// w_bin (n, may be NULL) receives the binned weights. geno_wcrossprod_bin(X, w)[cols + 1, cols + 1].
+int api_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc, double* out, double* w_bin,
+                      int threads) {
+  const Geno* g = api_geno(ptr);
+  if (!g) return 1;
+  if (!out || !w || (cols && !api_cols_ok(*g, cols, nc))) return 2;
+  for (std::size_t i = 0; i < g->n; ++i) if (!std::isfinite(w[i])) return 2;
+  return api_guard([&] {
+    threads = resolve_threads(threads);
+    const std::size_t q = cols ? static_cast<std::size_t>(nc) : g->p;
+    std::vector<double> wq(g->n);
+    xtwx_bin_into(*g, w, cols, q, out, wq.data(), threads);
+    if (w_bin) std::copy(wq.begin(), wq.end(), w_bin);
+    if (scale) {
+      const std::vector<double> d = api_div(*g);
+      std::vector<double> u(q), dq(q);
+      for (std::size_t a = 0; a < q; ++a) {
+        const std::size_t j = cols ? static_cast<std::size_t>(cols[a]) : a;
+        u[a] = g->mu[j];
+        dq[a] = d[j];
+      }
+      xtwx_std(*g, wq.data(), cols, q, u.data(), dq.data(), out, threads);
+    }
+    return 0;
+  });
+}
+
 // out (n x nc) = X[, cols + 1] (cols 0-based), standardized when scale.
 int api_geno_cols(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
   const Geno* g = api_geno(ptr);
@@ -1376,6 +1515,7 @@ void plink4r_register_ccallables(DllInfo* dll) {
   R_RegisterCCallable("plink4r", "plink4r_geno_mx", reinterpret_cast<DL_FUNC>(&api_geno_mx));
   R_RegisterCCallable("plink4r", "plink4r_geno_xtx", reinterpret_cast<DL_FUNC>(&api_geno_xtx));
   R_RegisterCCallable("plink4r", "plink4r_geno_cols", reinterpret_cast<DL_FUNC>(&api_geno_cols));
+  R_RegisterCCallable("plink4r", "plink4r_geno_xtwx_bin", reinterpret_cast<DL_FUNC>(&api_geno_xtwx_bin));
 }
 
 // Read-only: the threads and memory budget a call with threads = 0 / mem_gb = 0 would use.

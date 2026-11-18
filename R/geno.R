@@ -338,6 +338,19 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
   list(XtWX = XtWX, XtM = XtM)
 }
 
+# crossprod(X, X * wq) (of the standardized matrix when X$scale, centered with wq), wq = w binned: rows sorted
+# by w, each run of 64 sorted rows shares the mean of its w, so X'diag(wq)X sums exact popcount products per
+# bin times the bin weight (geno_xtwx_bin_cpp). Returns the matrix and wq, the weights it corresponds to.
+geno_wcrossprod_bin <- function(X, w, threads = X$threads) {
+  threads <- .threads(threads)
+  w <- as.numeric(w)
+  if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
+  out <- if (X$scale) geno_xtwx_bin_cpp(X$ptr, w, X$center, .geno_div(X), threads) else
+    geno_xtwx_bin_cpp(X$ptr, w, numeric(0), numeric(0), threads)
+  dimnames(out$XtWX) <- list(X$snp, X$snp)
+  list(XtWX = out$XtWX, w = out$w)
+}
+
 .geno_bed_path <- function(x) {
   if (!is.character(x) || length(x) != 1L || is.na(x) || !nzchar(x)) {
     stop("bedfile must be one BED file path.", call. = FALSE)

@@ -73,6 +73,18 @@ static inline int plink4r_geno_cols(SEXP ptr, int scale, const int* cols, int nc
   return fn(ptr, scale, cols, nc, out, threads);
 }
 
+/* out (q x q) = X'W~X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored), with
+ * W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean of its w (n values);
+ * standardized in place in out with the binned weights; w_bin (n values, may be NULL) receives the binned
+ * weights. geno_wcrossprod_bin(X, w)$XtWX[cols + 1, cols + 1] and $w. */
+static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc,
+                                        double* out, double* w_bin, int threads) {
+  typedef int (*fn_t)(SEXP, int, const double*, const int*, int, double*, double*, int);
+  static fn_t fn = NULL;
+  if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtwx_bin");
+  return fn(ptr, scale, w, cols, nc, out, w_bin, threads);
+}
+
 #ifdef __cplusplus
 }
 #endif
