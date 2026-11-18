@@ -340,7 +340,9 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
 
 # crossprod(X, X * wq) (of the standardized matrix when X$scale, centered with wq), wq = w binned: rows sorted
 # by w, each run of 64 sorted rows shares the mean of its w, so X'diag(wq)X sums exact popcount products per
-# bin times the bin weight (geno_xtwx_bin_cpp). Returns the matrix and wq, the weights it corresponds to.
+# bin times the bin weight (geno_xtwx_bin_cpp). When more than 1% of the cells have a nonzero D (dosages,
+# mean-filled missing calls, appended columns) the popcounts do not pay: wq = w and the product is
+# geno_wcrossprod's. Returns the matrix and wq, the weights it corresponds to.
 geno_wcrossprod_bin <- function(X, w, threads = X$threads) {
   threads <- .threads(threads)
   w <- as.numeric(w)

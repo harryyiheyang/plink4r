@@ -75,8 +75,10 @@ static inline int plink4r_geno_cols(SEXP ptr, int scale, const int* cols, int nc
 
 /* out (q x q) = X'W~X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored), with
  * W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean of its w (n values);
- * standardized in place in out with the binned weights; w_bin (n values, may be NULL) receives the binned
- * weights. geno_wcrossprod_bin(X, w)$XtWX[cols + 1, cols + 1] and $w. */
+ * when more than 1% of the cells of those columns are stored off the 0/1/2 grid (dosages, mean-filled
+ * missing calls, appended columns), W~ = diag(w) instead (float products, double sums). Standardized in
+ * place in out with the weights of the result; w_bin (n values, may be NULL) receives those weights.
+ * geno_wcrossprod_bin(X, w)$XtWX[cols + 1, cols + 1] and $w. */
 static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc,
                                         double* out, double* w_bin, int threads) {
   typedef int (*fn_t)(SEXP, int, const double*, const int*, int, double*, double*, int);

@@ -351,62 +351,146 @@ double bytes_d(const Geno& g) {
   return b;
 }
 
-// X'X += H'D + D'H + D'D, as S + S' with S[a, b] = sum_i D_bi (H_ai + D_ai / 2),
-// from a row-interleaved buffer of T columns of H + D / 2 per thread. With cols (0-based, length pc), the
-// columns cols of g in that order (out is pc x pc); without, all columns of g. With per-row weights wrow, the
-// buffered rows are multiplied by them, giving X'WX += H'WD + D'WH + D'WD.
+constexpr std::size_t kDRows = 2048;  // rows per block of the D accumulation (a multiple of 64)
+constexpr std::size_t kDCols = 256;   // D columns per work item of the D accumulation
+constexpr std::size_t kDLine = 16;    // columns decoded together (one cache line of a row of Y)
+constexpr std::size_t kDSpan = 1024;  // output rows per work item of the D accumulation
+
+// s[a] += sum_k d[k] Y[r[k] * ld + a] for a < len, the terms added in the order of k (4 rows per pass over s).
+using DAxpy = void (*)(const float*, std::size_t, const std::uint32_t*, const double*, std::size_t, double*,
+                       std::size_t);
+
+__attribute__((always_inline)) inline void d_axpy_body(const float* Y, std::size_t ld, const std::uint32_t* r,
+                                                       const double* d, std::size_t m, double* s, std::size_t len) {
+  std::size_t k = 0;
+  for (; k + 4 <= m; k += 4) {
+    const float *y0 = Y + r[k] * ld, *y1 = Y + r[k + 1] * ld, *y2 = Y + r[k + 2] * ld, *y3 = Y + r[k + 3] * ld;
+    const double d0 = d[k], d1 = d[k + 1], d2 = d[k + 2], d3 = d[k + 3];
+    #pragma omp simd
+    for (std::size_t a = 0; a < len; ++a) {
+      double v = s[a];
+      v += d0 * y0[a];
+      v += d1 * y1[a];
+      v += d2 * y2[a];
+      v += d3 * y3[a];
+      s[a] = v;
+    }
+  }
+  for (; k < m; ++k) {
+    const float* y = Y + r[k] * ld;
+    const double dk = d[k];
+    #pragma omp simd
+    for (std::size_t a = 0; a < len; ++a) s[a] += dk * y[a];
+  }
+}
+
+void d_axpy_generic(const float* Y, std::size_t ld, const std::uint32_t* r, const double* d, std::size_t m,
+                    double* s, std::size_t len) {
+  d_axpy_body(Y, ld, r, d, m, s, len);
+}
+
+#ifdef GENO_KERNEL_X86
+__attribute__((target("avx2,fma")))
+void d_axpy_avx2(const float* Y, std::size_t ld, const std::uint32_t* r, const double* d, std::size_t m,
+                 double* s, std::size_t len) {
+  d_axpy_body(Y, ld, r, d, m, s, len);
+}
+#endif
+
+// Chosen as select_kernel(): the AVX2 + FMA loop whenever la() picked avx2 or avx512 (an AVX-512 loop
+// measured no faster: the loop is bound by reading Y).
+DAxpy select_d_axpy() {
+#ifdef GENO_KERNEL_X86
+  if (std::strcmp(plink4r::la().isa, "generic") != 0) return d_axpy_avx2;
+#endif
+  return d_axpy_generic;
+}
+
+// X'X += H'D + D'H + D'D, as S + S' with S[a, b] = sum_i D_bi (H_ai + D_ai / 2). With cols (0-based, length
+// pc), the columns cols of g in that order (out is pc x pc); without, all columns of g. With per-row weights
+// wrow, D_bi is multiplied by wrow_i, giving X'WX += H'WD + D'WH + D'WD. Per block of kDRows rows, Y = (H + D / 2)
+// / sc of every column (sc = unit / 2) is decoded once into a row-major float buffer (row i contiguous over the
+// columns); Y = 2 H / unit + q is an integer below 2^17 for a genotype column and q for an appended one (H = 0),
+// so float holds it exactly. Then work items of kDSpan rows x kDCols columns of S, shared out by OpenMP
+// (disjoint outputs), add D_bi Y[i, ] to S[, b] for the nonzeros of their columns in the block, in double with
+// the span of S and the rows of Y it reads in cache; sc is applied at the end. Every S[a, b] sums its terms in
+// ascending row order.
 void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullptr, std::size_t pc = 0,
                const double* wrow = nullptr) {
   const std::size_t n = g.n, p = cols ? pc : g.p;
   auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
   if (!g.dnnz()) return;
-  constexpr std::size_t T = 8;
-  std::vector<double> S(p * p, 0.0);
-  const std::size_t tiles = (p + T - 1) / T;
+  const DAxpy axpy = select_d_axpy();
+  const std::size_t RB = std::min(kDRows, n);
+  std::vector<double> S(p * p, 0.0), sc(p), val;  // val, row: the nonzeros of the block, column by column
+  std::vector<float> Y(RB * p);
+  std::vector<std::uint32_t> row;
+  for (std::size_t a = 0; a < p; ++a) sc[a] = 0.5 * g.D[col(a)].unit;
+  std::vector<std::size_t> e0(p), off(p + 1, 0);  // per column: first nonzero of the block, start in row / val
+  const std::size_t ns = (p + kDSpan - 1) / kDSpan, ng = (p + kDCols - 1) / kDCols, nc = (p + kDLine - 1) / kDLine;
   #pragma omp parallel num_threads(threads)
   {
-    std::vector<double> buf(n * T);
-    #pragma omp for schedule(dynamic, 1)
-    for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles); ++tt) {
-      const std::size_t a0 = static_cast<std::size_t>(tt) * T, na = std::min(T, p - a0);
-      std::fill(buf.begin(), buf.end(), 0.0);
-      for (std::size_t t = 0; t < na; ++t) {
-        const std::size_t a = col(a0 + t);
-        const u64* lo = g.G.lo(a);
-        const u64* hi = g.G.hi(a);
-        for (std::size_t w = 0; w < g.G.words; ++w) {
-          for (u64 bits = lo[w]; bits; bits &= bits - 1)
-            buf[(64 * w + __builtin_ctzll(bits)) * T + t] = 1.0;
-          for (u64 bits = hi[w]; bits; bits &= bits - 1)
-            buf[(64 * w + __builtin_ctzll(bits)) * T + t] = 2.0;
-        }
-        const DCol& c = g.D[a];
-        std::size_t e = 0;
-        for (std::size_t w = 0; w < c.mask.size(); ++w)
-          for (u64 bits = c.mask[w]; bits; bits &= bits - 1)
-            buf[(64 * w + __builtin_ctzll(bits)) * T + t] += 0.5 * (c.q[e++] * c.unit);
+    std::vector<double> yb(kDLine * RB);
+    for (std::size_t i0 = 0; i0 < n; i0 += RB) {
+      const std::size_t R = std::min(RB, n - i0), w0 = i0 / 64, w1 = (i0 + R + 63) / 64;
+      #pragma omp for schedule(static)
+      for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(p); ++aa) {
+        const std::size_t a = static_cast<std::size_t>(aa);
+        const DCol& c = g.D[col(a)];
+        e0[a] = c.mask.empty() ? 0 : d_rank(c, w0);
+        off[a + 1] = c.mask.empty() ? 0 : d_rank(c, w1) - e0[a];
       }
-      if (wrow)
-        for (std::size_t i = 0; i < n; ++i)
-          for (std::size_t t = 0; t < na; ++t) buf[i * T + t] *= wrow[i];
-      for (std::size_t b = 0; b < p; ++b) {
-        const DCol& c = g.D[col(b)];
-        std::size_t e = 0;
-        double acc[T] = {};
-        for (std::size_t w = 0; w < c.mask.size(); ++w)
-          for (u64 bits = c.mask[w]; bits; bits &= bits - 1) {
-            const double d = c.q[e++] * c.unit;
-            const double* r = buf.data() + (64 * w + __builtin_ctzll(bits)) * T;
-            for (std::size_t t = 0; t < T; ++t) acc[t] += d * r[t];
+      #pragma omp single
+      {
+        std::partial_sum(off.begin(), off.end(), off.begin());
+        if (row.size() < off[p]) { row.resize(off[p]); val.resize(off[p]); }
+      }
+      const bool any = off[p] > 0;
+      #pragma omp barrier
+      if (!any) continue;  // every thread has read off[p] before the next block rewrites it
+      #pragma omp for schedule(static)
+      for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(nc); ++cc) {
+        const std::size_t a0 = static_cast<std::size_t>(cc) * kDLine, na = std::min(kDLine, p - a0);
+        for (std::size_t t = 0; t < na; ++t) {
+          const std::size_t a = a0 + t, j = col(a);
+          double* y = yb.data() + t * RB;
+          std::fill(y, y + R, 0.0);
+          const u64* lo = g.G.lo(j);
+          const u64* hi = g.G.hi(j);
+          for (std::size_t w = w0; w < w1; ++w) {
+            for (u64 bits = lo[w]; bits; bits &= bits - 1) y[64 * (w - w0) + __builtin_ctzll(bits)] = 1.0;
+            for (u64 bits = hi[w]; bits; bits &= bits - 1) y[64 * (w - w0) + __builtin_ctzll(bits)] = 2.0;
           }
-        for (std::size_t t = 0; t < na; ++t) S[a0 + t + b * p] = acc[t];
+          const DCol& c = g.D[j];
+          const double inv = 1.0 / sc[a];
+          for (std::size_t r = 0; r < R; ++r) y[r] *= inv;
+          std::size_t e = e0[a], k = off[a];
+          for (std::size_t w = w0; w < w1 && off[a + 1] > off[a]; ++w)
+            for (u64 bits = c.mask[w]; bits; bits &= bits - 1) {
+              const std::size_t r = 64 * (w - w0) + __builtin_ctzll(bits);
+              const int q = c.q[e++];
+              row[k] = static_cast<std::uint32_t>(r);
+              val[k++] = wrow ? q * c.unit * wrow[i0 + r] : q * c.unit;
+              y[r] += q;
+            }
+        }
+        for (std::size_t r = 0; r < R; ++r)
+          for (std::size_t t = 0; t < na; ++t) Y[r * p + a0 + t] = static_cast<float>(yb[t * RB + r]);
       }
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t it = 0; it < static_cast<std::ptrdiff_t>(ns * ng); ++it) {
+        const std::size_t s0 = (static_cast<std::size_t>(it) % ns) * kDSpan, len = std::min(kDSpan, p - s0);
+        const std::size_t b0 = (static_cast<std::size_t>(it) / ns) * kDCols, b1 = std::min(p, b0 + kDCols);
+        for (std::size_t b = b0; b < b1; ++b)
+          if (off[b + 1] > off[b])
+            axpy(Y.data() + s0, p, row.data() + off[b], val.data() + off[b], off[b + 1] - off[b], S.data() + s0 + b * p,
+                 len);
+      }  // implicit barrier: Y and the lists are rewritten for the next block after every work item of this one
     }
-    #pragma omp barrier
     #pragma omp for schedule(static)
     for (std::ptrdiff_t bb = 0; bb < static_cast<std::ptrdiff_t>(p); ++bb) {
       const std::size_t b = static_cast<std::size_t>(bb);
-      for (std::size_t a = 0; a < p; ++a) out[a + b * p] += S[a + b * p] + S[b + a * p];
+      for (std::size_t a = 0; a < p; ++a) out[a + b * p] += sc[a] * S[a + b * p] + sc[b] * S[b + a * p];
     }
   }
 }
@@ -559,19 +643,103 @@ void xtx_into(const Geno& g, const int* cols, std::size_t pc, double* o, int thr
   add_d_xtx(g, o, threads, cols, pc);
 }
 
+// Rows r0..r0+R-1 of stored column j (H + D) as floats into dst[0..R).
+void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, float* dst) {
+  std::fill(dst, dst + R, 0.0f);
+  const u64* lo = g.G.lo(j);
+  const u64* hi = g.G.hi(j);
+  const std::size_t w0 = r0 / 64, w1 = (r0 + R + 63) / 64;
+  for (std::size_t x = w0; x < w1; ++x) {
+    for (u64 bits = lo[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[i - r0] = 1.0f;
+    }
+    for (u64 bits = hi[x]; bits; bits &= bits - 1) {
+      const std::size_t i = 64 * x + __builtin_ctzll(bits);
+      if (i >= r0 && i < r0 + R) dst[i - r0] = 2.0f;
+    }
+  }
+  const DCol& dc = g.D[j];
+  if (!dc.mask.empty()) {
+    std::size_t e = d_rank(dc, w0);
+    for (std::size_t x = w0; x < w1 && x < dc.mask.size(); ++x)
+      for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) {
+        const std::size_t i = 64 * x + __builtin_ctzll(bits);
+        const double d = dc.q[e++] * dc.unit;
+        if (i >= r0 && i < r0 + R) dst[i - r0] += static_cast<float>(d);
+      }
+  }
+}
+
+constexpr std::size_t kFTile = 256;    // columns per side of an output tile of the float kernel
+constexpr std::size_t kFRows = 4096;   // rows per block of the float kernel
+constexpr std::size_t kFPad = 16;      // floats after each column of the shared buffer (no power-of-two stride)
+
+// X'WX into o (p x p, or pc x pc for columns cols), W = diag(w), any real w, in float products with double
+// sums. Per block of kFRows rows, every column is decoded once into a shared float buffer (16 KB per column:
+// 66 MB at p = 4000, 329 MB at p = 20000); then the output tiles of kFTile x kFTile (lower triangle) are
+// shared out by OpenMP: a tile copies its row group transposed and times w, multiplies it with its column
+// group in the shared buffer by the run-time-dispatched serial sgemm and accumulates in double.
+void xtwx_float_into(const Geno& g, const double* w, const int* cols, std::size_t pc, double* o, int threads) {
+  const std::size_t n = g.n, P = cols ? pc : g.p, RB = std::min(kFRows, n), LD = RB + kFPad;
+  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+  const plink4r::LaFns& LA = plink4r::la();
+  const std::size_t nt = (P + kFTile - 1) / kFTile;
+  std::vector<std::pair<std::size_t, std::size_t>> tiles;
+  for (std::size_t b = 0; b < nt; ++b) for (std::size_t a = b; a < nt; ++a) tiles.emplace_back(a, b);
+  std::vector<float> X(LD * P);  // column a of the block at X[a * LD]
+  std::fill(o, o + P * P, 0.0);
+  #pragma omp parallel num_threads(threads)
+  {
+    std::vector<float> At(kFTile * RB), Pt(kFTile * kFTile);
+    for (std::size_t r0 = 0; r0 < n; r0 += RB) {
+      const std::size_t R = std::min(RB, n - r0);
+      #pragma omp for schedule(static)
+      for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa)
+        decode_rows(g, col(static_cast<std::size_t>(aa)), r0, R, &X[static_cast<std::size_t>(aa) * LD]);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
+        const std::size_t a0 = tiles[tt].first * kFTile, b0 = tiles[tt].second * kFTile;
+        const std::size_t na = std::min(kFTile, P - a0), nb = std::min(kFTile, P - b0);
+        const float* xa = &X[a0 * LD];
+        for (std::size_t r = 0; r < R; ++r) {  // A' : na x R, ld kFTile
+          const double wr = w[r0 + r];
+          for (std::size_t c = 0; c < na; ++c) At[c + r * kFTile] = static_cast<float>(xa[c * LD + r] * wr);
+        }
+        LA.sgemm_nn(At.data(), static_cast<int>(na), static_cast<int>(R), static_cast<int>(kFTile), &X[b0 * LD],
+                    static_cast<int>(nb), static_cast<int>(LD), Pt.data(), static_cast<int>(kFTile));
+        for (std::size_t y = 0; y < nb; ++y)
+          for (std::size_t x = 0; x < na; ++x) o[(a0 + x) + (b0 + y) * P] += Pt[x + y * kFTile];
+      }  // implicit barrier: the buffer is rewritten for the next block after every tile of this one
+    }
+  }
+  for (std::size_t b = 0; b < P; ++b)  // mirror the lower triangle
+    for (std::size_t a = b + 1; a < P; ++a) o[b + a * P] = o[a + b * P];
+}
+
 constexpr std::size_t kBinRows = 64;     // rows per weight bin: one 64-bit word of the gathered planes
 constexpr std::size_t kBinGroup = 384;   // bins per streamed group (24576 rows; a multiple of 4)
+constexpr double kDDenseFrac = 0.01;     // D nonzero fraction above which xtwx_bin_into uses the float kernel
 
 // X'W~X into o (p x p, or pc x pc for columns cols), W~ = diag(w binned): rows sorted by w (ties by row
 // index), each run of kBinRows sorted rows takes the mean w of its rows. With the weight constant within a
 // bin, H'W~H = sum_b wbar_b H_b'H_b by exact popcounts: per group of kBinGroup bins the rows of the group
 // are gathered for every column (one bin per word), then the 64 x 64 tiles of the upper triangle are shared
-// out by OpenMP (disjoint outputs). The D terms come from add_d_xtx with the binned per-row weights, which
-// are also written to w_bin (n, row order) when it is not null.
+// out by OpenMP (disjoint outputs). The D terms come from add_d_xtx with the binned per-row weights. When
+// more than kDDenseFrac of the cells of the columns have a nonzero D (dosages), the popcounts do not pay:
+// X'WX with w itself comes from xtwx_float_into, and W~ = W. w_bin (n, row order, may be null) receives the
+// weights of the result.
 void xtwx_bin_into(const Geno& g, const double* w, const int* cols, std::size_t pc, double* o, double* w_bin,
                    int threads) {
   const std::size_t n = g.n, P = cols ? pc : g.p;
   auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+  double nnz = 0.0;
+  for (std::size_t a = 0; a < P; ++a) nnz += static_cast<double>(g.D[col(a)].q.size());
+  if (nnz > kDDenseFrac * static_cast<double>(n) * static_cast<double>(P)) {
+    xtwx_float_into(g, w, cols, pc, o, threads);
+    if (w_bin) std::copy(w, w + n, w_bin);
+    return;
+  }
   std::vector<std::uint32_t> ord(n);
   std::iota(ord.begin(), ord.end(), 0u);
   std::stable_sort(ord.begin(), ord.end(), [w](std::uint32_t a, std::uint32_t b) { return w[a] < w[b]; });
@@ -951,46 +1119,8 @@ Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads) {
   return out;
 }
 
-namespace {
-
-// Rows r0..r0+R-1 of stored column j (H + D) as floats: dst[r * stride], times w[r0 + r] when w is given.
-void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, const double* w, float* dst,
-                 std::size_t stride) {
-  for (std::size_t r = 0; r < R; ++r) dst[r * stride] = 0.0f;
-  const u64* lo = g.G.lo(j);
-  const u64* hi = g.G.hi(j);
-  const std::size_t w0 = r0 / 64, w1 = (r0 + R + 63) / 64;
-  for (std::size_t x = w0; x < w1; ++x) {
-    for (u64 bits = lo[x]; bits; bits &= bits - 1) {
-      const std::size_t i = 64 * x + __builtin_ctzll(bits);
-      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 1.0f;
-    }
-    for (u64 bits = hi[x]; bits; bits &= bits - 1) {
-      const std::size_t i = 64 * x + __builtin_ctzll(bits);
-      if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] = 2.0f;
-    }
-  }
-  const DCol& dc = g.D[j];
-  if (!dc.mask.empty()) {
-    std::size_t e = d_rank(dc, w0);
-    for (std::size_t x = w0; x < w1 && x < dc.mask.size(); ++x)
-      for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) {
-        const std::size_t i = 64 * x + __builtin_ctzll(bits);
-        const double d = dc.q[e++] * dc.unit;
-        if (i >= r0 && i < r0 + R) dst[(i - r0) * stride] += static_cast<float>(d);
-      }
-  }
-  if (w)
-    for (std::size_t r = 0; r < R; ++r) dst[r * stride] = static_cast<float>(dst[r * stride] * w[r0 + r]);
-}
-
-}  // namespace
-
-// X'WX of the stored matrix, W = diag(w), any real w. Output tiles of 256 x 256 (lower triangle) are shared
-// out by OpenMP within each block of 4096 samples; a tile decodes only its two groups of 256 columns for that
-// block into float (w folded into one side), multiplies them with the run-time-dispatched serial sgemm, and
-// accumulates in double; ~8 MB per thread whatever n and p. With center (and div) given, returns the
-// product of the standardized matrix: (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w.
+// X'WX of the stored matrix, W = diag(w), any real w (xtwx_float_into). With center (and div) given, returns
+// the product of the standardized matrix: (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w.
 // [[Rcpp::export]]
 Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center,
                                   const Rcpp::NumericVector& div, int threads) {
@@ -999,43 +1129,17 @@ Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const 
   const std::size_t n = g->n, p = g->p;
   if (static_cast<std::size_t>(w.size()) != n) Rcpp::stop("w must have one value per sample.");
   for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(w[i])) Rcpp::stop("w must be finite.");
-  const plink4r::LaFns& LA = plink4r::la();
-  constexpr std::size_t TB = 256, RB = 4096;
-  const std::size_t nt = (p + TB - 1) / TB;
-  std::vector<std::pair<std::size_t, std::size_t>> tiles;
-  for (std::size_t b = 0; b < nt; ++b) for (std::size_t a = b; a < nt; ++a) tiles.emplace_back(a, b);
+  if (center.size() > 0 && static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
   Rcpp::NumericMatrix out(p, p);
-  double* o = out.begin();
-  const double* wp = w.begin();
-  #pragma omp parallel num_threads(threads)
-  {
-    std::vector<float> At(TB * RB), B(RB * TB), P(TB * TB);
-    for (std::size_t r0 = 0; r0 < n; r0 += RB) {
-      const std::size_t R = std::min(RB, n - r0);
-      #pragma omp for schedule(dynamic, 1)
-      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
-        const std::size_t a0 = tiles[tt].first * TB, b0 = tiles[tt].second * TB;
-        const std::size_t na = std::min(TB, p - a0), nb = std::min(TB, p - b0);
-        for (std::size_t c = 0; c < na; ++c) decode_rows(*g, a0 + c, r0, R, wp, &At[c], TB);    // A' : na x R, ld TB
-        for (std::size_t c = 0; c < nb; ++c) decode_rows(*g, b0 + c, r0, R, nullptr, &B[c * RB], 1);  // B : R x nb, ld RB
-        LA.sgemm_nn(At.data(), static_cast<int>(na), static_cast<int>(R), static_cast<int>(TB), B.data(),
-                    static_cast<int>(nb), static_cast<int>(RB), P.data(), static_cast<int>(TB));
-        for (std::size_t y = 0; y < nb; ++y)
-          for (std::size_t x = 0; x < na; ++x) o[(a0 + x) + (b0 + y) * p] += P[x + y * TB];
-      }  // implicit barrier: the next sample block starts after every tile of this one
-    }
-  }
-  for (std::size_t b = 0; b < p; ++b)  // mirror the lower triangle
-    for (std::size_t a = b + 1; a < p; ++a) o[b + a * p] = o[a + b * p];
-  if (center.size() > 0) {
-    if (static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
-    xtwx_std(*g, wp, nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, o, threads);
-  }
+  xtwx_float_into(*g, w.begin(), nullptr, p, out.begin(), threads);
+  if (center.size() > 0)
+    xtwx_std(*g, w.begin(), nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
   return out;
 }
 
-// X'W~X of the stored matrix with w binned in groups of 64 rows (xtwx_bin_into), standardized as in
-// geno_xtwx_cpp with the binned weights when center is given; w = the binned weights in row order.
+// X'W~X of the stored matrix with w binned in groups of 64 rows, or with w itself when more than 1% of the
+// cells have a nonzero D (xtwx_bin_into), standardized as in geno_xtwx_cpp with those weights when center is
+// given; w = the weights of the result in row order.
 // [[Rcpp::export]]
 Rcpp::List geno_xtwx_bin_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center,
                              const Rcpp::NumericVector& div, int threads) {
@@ -1453,8 +1557,8 @@ int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int 
 }
 
 // out (q x q) = X'W~X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, with w (n)
-// binned in groups of 64 rows (xtwx_bin_into), standardized in place with the binned weights when scale;
-// w_bin (n, may be NULL) receives the binned weights. geno_wcrossprod_bin(X, w)[cols + 1, cols + 1].
+// binned in groups of 64 rows, or w itself when D is dense (xtwx_bin_into), standardized in place with those
+// weights when scale; w_bin (n, may be NULL) receives them. geno_wcrossprod_bin(X, w)[cols + 1, cols + 1].
 int api_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc, double* out, double* w_bin,
                       int threads) {
   const Geno* g = api_geno(ptr);
