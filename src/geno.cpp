@@ -1073,13 +1073,19 @@ void std_into(const double* k, std::size_t r, std::size_t c, const double* u, co
 Rcpp::List geno_info_cpp(SEXP ptr) {
   Rcpp::XPtr<Geno> g(ptr);
   std::vector<double> os(g->p);
-  for (std::size_t j = 0; j < g->p; ++j) os[j] = obs_sum_col(*g, j);
+  Rcpp::NumericVector af(g->p, NA_REAL);  // observed frequency of the counted allele (NA: nothing observed)
+  for (std::size_t j = 0; j < g->p; ++j) {
+    os[j] = obs_sum_col(*g, j);
+    const double obs = static_cast<double>(g->n) - g->nmiss[j];
+    if (obs > 0) af[j] = os[j] / (2.0 * obs);
+  }
   return Rcpp::List::create(Rcpp::Named("n") = static_cast<double>(g->n),
                             Rcpp::Named("p") = static_cast<double>(g->p),
                             Rcpp::Named("mean") = g->mu,
                             Rcpp::Named("sd") = g->sd,
                             Rcpp::Named("n_miss") = g->nmiss,
                             Rcpp::Named("obs_sum") = os,
+                            Rcpp::Named("af") = af,
                             Rcpp::Named("dosage") = g->dosage,
                             Rcpp::Named("dosage_nnz") = static_cast<double>(g->dnnz()),
                             Rcpp::Named("bytes_H") = bytes_h(*g),

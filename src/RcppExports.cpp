@@ -36,6 +36,25 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// fill_value_cpp
+Rcpp::NumericVector fill_value_cpp(double n, const Rcpp::NumericVector& s_obs, const Rcpp::NumericVector& m, const Rcpp::NumericVector& af, const Rcpp::NumericVector& cnst, bool mean_default, double none, double lo, double hi);
+RcppExport SEXP _plink4r_fill_value_cpp(SEXP nSEXP, SEXP s_obsSEXP, SEXP mSEXP, SEXP afSEXP, SEXP cnstSEXP, SEXP mean_defaultSEXP, SEXP noneSEXP, SEXP loSEXP, SEXP hiSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< double >::type n(nSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type s_obs(s_obsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type m(mSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type af(afSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type cnst(cnstSEXP);
+    Rcpp::traits::input_parameter< bool >::type mean_default(mean_defaultSEXP);
+    Rcpp::traits::input_parameter< double >::type none(noneSEXP);
+    Rcpp::traits::input_parameter< double >::type lo(loSEXP);
+    Rcpp::traits::input_parameter< double >::type hi(hiSEXP);
+    rcpp_result_gen = Rcpp::wrap(fill_value_cpp(n, s_obs, m, af, cnst, mean_default, none, lo, hi));
+    return rcpp_result_gen;
+END_RCPP
+}
 // geno_open_bed_cpp
 SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, bool mean, int threads);
 RcppExport SEXP _plink4r_geno_open_bed_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP m_totalSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP meanSEXP, SEXP threadsSEXP) {
@@ -440,6 +459,7 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 15},
+    {"_plink4r_fill_value_cpp", (DL_FUNC) &_plink4r_fill_value_cpp, 9},
     {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 7},
     {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 7},
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},

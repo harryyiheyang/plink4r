@@ -116,9 +116,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   n <- as.integer(info$n); p <- as.integer(info$p)
   for (k in names(cols)) if (length(cols[[k]]) != p) stop("internal: column field ", k, " has the wrong length", call. = FALSE)
   for (k in names(rows)) if (length(rows[[k]]) != n) stop("internal: row field ", k, " has the wrong length", call. = FALSE)
-  obs <- n - info$n_miss
-  af <- info$obs_sum / (2 * obs)
-  af[obs <= 0] <- NA_real_
+  af <- info$af
   af[appended] <- NA_real_
   structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, a1 = cols$a1, a2 = cols$a2, sample = rows$sample,
                  impute = impute, scale = scale, center = info$mean, sd = info$sd, threads = threads,

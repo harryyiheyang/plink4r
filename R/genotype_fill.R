@@ -130,16 +130,9 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
   }
   info <- geno_info_cpp(X$ptr)
-  m <- info$n_miss; S <- info$obs_sum
-  f <- if (default == "mean") ifelse(m < n, S / (n - m), 0) else rep(NaN, p)
-  if (length(af)) {
-    ok <- is.finite(af) & m > 0
-    f[ok] <- pmin(2, pmax(0, (2 * n * af[ok] - S[ok]) / m[ok]))
-  }
-  if (length(const)) {
-    ok <- is.finite(const)
-    f[ok] <- const[ok]
-  }
+  m <- info$n_miss
+  f <- fill_value_cpp(n, info$obs_sum, m, if (is.null(af)) numeric(0) else af,
+                      if (is.null(const)) numeric(0) else as.numeric(const), default == "mean")
   f[m == 0] <- NaN
   if (!is.null(cols)) f[!cols] <- NaN  # columns outside `cols` keep their current fill
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
@@ -254,9 +247,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   if (!nrow(m)) stop("no SNP left after matching and QC")
 
   m[, p_alt := data.table::fifelse(a1_is_alt, A1Freq, 1 - A1Freq)]
-  m[, fill_const := data.table::fifelse(is.finite(p_alt) & n_miss > 0,
-                                        pmin(2, pmax(0, (2 * n * p_alt - sum_obs) / pmax(n_miss, 1))),
-                                        sum_obs / pmax(n - n_miss, 1))]
+  m[, fill_const := fill_value_cpp(n, sum_obs, n_miss, p_alt, numeric(0), TRUE)]
   method <- if (all(is.finite(m$p_alt))) "scheme3" else if (any(is.finite(m$p_alt))) "scheme3_partial" else "mean"
 
   cells <- data.table::data.table(ID = character(0), IID = character(0), g = numeric(0))

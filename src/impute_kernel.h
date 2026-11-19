@@ -46,6 +46,7 @@
 #include "eigen_bin.h"
 #include "pgen_reader.h"
 #include "la_dispatch.h"
+#include "fill_value.h"
 #include "resources.h"
 
 namespace plink4r {
@@ -452,15 +453,15 @@ inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<doubl
   for (int j = 0; j < m; ++j) {
     if (A.cnt1[j] == 0) continue;
     A.mean1[j] = A.sum1[j] / A.cnt1[j];
-    A.craw[j] = (2.0 * ns * af[j] - sum_obs[j]) / A.cnt1[j];
-    A.cc[j] = std::min(2.0, std::max(0.0, A.craw[j]));
+    A.craw[j] = anchor_raw(ns, sum_obs[j], A.cnt1[j], af[j]);
+    A.cc[j] = clip_dosage(A.craw[j], 0.0, 2.0);
     if (anchor_min_miss >= 0 && A.cnt1[j] >= anchor_min_miss * ns) A.shift[j] = A.cc[j] - A.mean1[j];
   }
   return A;
 }
 
 // Final fill of a cell from its stage-1 value and the row's shift.
-inline double final_fill(float g1, double shift) { return std::min(2.0, std::max(0.0, g1 + shift)); }
+inline double final_fill(float g1, double shift) { return clip_dosage(g1 + shift, 0.0, 2.0); }
 
 // Visits every filled cell of the kept rows: f(i = person, j = row, g1 = stage 1, g = final), thread-list order.
 template <class F>

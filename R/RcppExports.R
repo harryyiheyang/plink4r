@@ -5,6 +5,10 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
+fill_value_cpp <- function(n, s_obs, m, af, cnst, mean_default, none = 0.0, lo = 0.0, hi = 2.0) {
+    .Call(`_plink4r_fill_value_cpp`, n, s_obs, m, af, cnst, mean_default, none, lo, hi)
+}
+
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
 }
