@@ -8,8 +8,9 @@
 // Blocks are swept in parallel (largest first). Active set: in a partial sweep a SNP that did not move at the last full
 // sweep reuses its stored r_j (no O(k) dot) and rejoins when its eta would move by more than act_tol; convergence is
 // only declared on a full sweep. M-step and ELBO as VIPRS 0.1.5 (pi, tau, sigma in that order).
-// Hyperparameter search, one entry per mode: em (pi, tau, sigma by EM), path (pi grid ascending, warm start, tau and
-// sigma by EM, PUMAS pseudo-validation, early stop, refit), grid2d (outer V = 1/tau grid, inner pi path, tau fixed).
+// Hyperparameter search: grid search with warm start (viprs_eigen mode "path"): pi grid ascending, each point warm-
+// started from the previous one, tau and sigma by EM, PUMAS pseudo-validation, early stop; a point that does not
+// converge is skipped in the choice; the best converged point is refitted on all data.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -33,7 +34,7 @@ namespace {
 
 struct ViprsControl {
   bool use_active;
-  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend, n_v;
+  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap;
   unsigned long long seed;
@@ -52,7 +53,6 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.stop_after = Rcpp::as<int>(c["stop_after"]);
   x.pi_steps = Rcpp::as<int>(c["pi_steps"]);
   x.grid_extend = Rcpp::as<int>(c["grid_extend"]);
-  x.n_v = Rcpp::as<int>(c["n_v"]);
   x.act_tol = Rcpp::as<double>(c["act_tol"]);
   x.x_tol = Rcpp::as<double>(c["x_tol"]);
   x.f_tol = Rcpp::as<double>(c["f_tol"]);
@@ -387,23 +387,10 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
   return in;
 }
 
+// pi ascending with warm start, PUMAS pseudo-validation, early stop after stop_after consecutive drops of pseudo R2,
+// refit of the best converged point on all data (points that did not converge are never chosen)
 template <typename T>
-Rcpp::List fit_em(const Inputs& in, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
-  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
-  Fitter<T> F(P, c, in.n, in.z, threads);
-  const double h2_0 = F.h2_ldsc();
-  const double pi = F.pi_grid()[0];
-  State st(P.M, P.S, pi);
-  const RunResult r = F.run(st, in.n.data(), P.bt.data(), pi, pi * P.M / h2_0, 1. - h2_0, true, true, true, c.max_iter,
-                            nullptr);
-  return pack(F, st, r, in.af, h2_0, Rcpp::List::create());
-}
-
-// path (tau_outer empty) and grid2d (tau_outer = fixed tau values): pi ascending with warm start, PUMAS pseudo-
-// validation, early stop after stop_after consecutive drops of pseudo R2, refit of the best converged point on all data
-template <typename T>
-Rcpp::List fit_grid(const Inputs& in, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads,
-                    bool grid2d) {
+Rcpp::List fit_path(const Inputs& in, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
   const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
@@ -411,56 +398,38 @@ Rcpp::List fit_grid(const Inputs& in, const std::string& ld_dir, double thresh, 
   std::vector<float> train, valid, n_tr;
   std::vector<double> xi;
   F.pumas(train, valid, n_tr, xi);
-  std::vector<double> outer;  // NaN = tau by EM (path)
-  if (grid2d) {
-    const int step = std::max(1, c.pi_steps / c.n_v);
-    for (std::size_t i = 0; i < grid.size() && (int)outer.size() < c.n_v; i += step) outer.push_back(grid[i] * P.M / h2_0);
-  } else {
-    outer.push_back(NAN);
-  }
-  std::vector<double> gV, gpi, gtau, gsig, gh2, gr2, grb, gsec;
-  std::vector<int> git;
-  std::vector<int> gconv;
-  double best_r2 = -INFINITY, bpi = 0, btau = 0, bsig = 0;
-  bool btau_fixed = false;
-  State* best = nullptr;
-  for (double tau_v : outer) {
-    const bool fixed_tau = !std::isnan(tau_v);
-    State st(P.M, P.S, grid[0]);
-    double tau = NAN, sigma = 1. - h2_0, best_here = -INFINITY, prev_pi = NAN;
-    int drops = 0;
-    for (double pi : grid) {
-      if (fixed_tau) tau = tau_v;
-      else if (std::isnan(tau)) tau = pi * P.M / h2_0;
-      else tau = tau * pi / prev_pi;  // keep the implied h2 when pi moves
-      const auto t1 = std::chrono::steady_clock::now();
-      const RunResult r = F.run(st, n_tr.data(), train.data(), pi, tau, sigma, false, !fixed_tau, true, c.grid_max_iter,
-                                valid.data());
-      tau = r.tau; sigma = r.sigma; prev_pi = pi;
-      double r2, rb;
-      Fitter<T>::pseudo_r2(st, valid, r2, rb);
-      gV.push_back(fixed_tau ? 1. / tau_v : NAN); gpi.push_back(pi); gtau.push_back(tau); gsig.push_back(sigma);
-      gh2.push_back(r.h2); gr2.push_back(r2); grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged);
-      gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
-      if (r.converged && rb > 0 && r2 > best_r2) {
-        best_r2 = r2;
-        delete best;
-        best = new State(st);
-        bpi = pi; btau = tau; bsig = sigma; btau_fixed = fixed_tau;
-      }
-      if (r2 > best_here) { best_here = r2; drops = 0; }
-      else if (c.stop_after && ++drops >= c.stop_after) break;
+  std::vector<double> gpi, gtau, gsig, gh2, gr2, grb, gsec;
+  std::vector<int> git, gconv;
+  double best_r2 = -INFINITY, bpi = 0, btau = 0, bsig = 0, best_here = -INFINITY;
+  State st(P.M, P.S, grid[0]), best(0, 0, 0.);
+  bool have_best = false;
+  double tau = grid[0] * P.M / h2_0, sigma = 1. - h2_0, prev_pi = grid[0];
+  int drops = 0;
+  for (double pi : grid) {
+    tau = tau * pi / prev_pi;  // keep the implied h2 when pi moves
+    const auto t1 = std::chrono::steady_clock::now();
+    const RunResult r = F.run(st, n_tr.data(), train.data(), pi, tau, sigma, false, true, true, c.grid_max_iter,
+                              valid.data());
+    tau = r.tau; sigma = r.sigma; prev_pi = pi;
+    double r2, rb;
+    Fitter<T>::pseudo_r2(st, valid, r2, rb);
+    gpi.push_back(pi); gtau.push_back(tau); gsig.push_back(sigma); gh2.push_back(r.h2); gr2.push_back(r2);
+    grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged);
+    gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+    if (r.converged && rb > 0 && r2 > best_r2) {
+      best_r2 = r2; best = st; have_best = true;
+      bpi = pi; btau = tau; bsig = sigma;
     }
+    if (r2 > best_here) { best_here = r2; drops = 0; }
+    else if (c.stop_after && ++drops >= c.stop_after) break;
   }
-  if (!best) Rcpp::stop("no grid point converged with a positive pseudo R2");
-  State st = *best;
-  delete best;
-  RunResult res = F.run(st, in.n.data(), P.bt.data(), bpi, btau, bsig, false, !btau_fixed, true, c.max_iter, nullptr);
+  if (!have_best) Rcpp::stop("no grid point converged with a positive pseudo R2");
+  RunResult res = F.run(best, in.n.data(), P.bt.data(), bpi, btau, bsig, false, true, true, c.max_iter, nullptr);
   Rcpp::DataFrame tab = Rcpp::DataFrame::create(
-      Rcpp::_["V"] = gV, Rcpp::_["pi"] = gpi, Rcpp::_["tau"] = gtau, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2,
+      Rcpp::_["pi"] = gpi, Rcpp::_["tau"] = gtau, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2,
       Rcpp::_["pseudo_r2"] = gr2, Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
       Rcpp::_["seconds"] = gsec);
-  return pack(F, st, res, in.af, h2_0,
+  return pack(F, best, res, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["best_pseudo_r2"] = best_r2,
                                  Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi.begin(), xi.end())));
 }
@@ -472,42 +441,14 @@ Rcpp::List fit_grid(const Inputs& in, const std::string& ld_dir, double thresh, 
 // thresh (eigen truncation, <= 0 = every stored pair), fp16 (store V as float16), control (viprs_control()).
 
 // [[Rcpp::export]]
-Rcpp::List viprs_em_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
-                        Rcpp::NumericVector n, Rcpp::NumericVector af, double thresh, bool fp16, Rcpp::List control,
-                        int threads) {
+Rcpp::List viprs_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
+                     Rcpp::NumericVector n, Rcpp::NumericVector af, double thresh, bool fp16, Rcpp::List control,
+                     int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
   const Inputs in = read_inputs(blocks, keep, z, n, af);
   try {
-    return fp16 ? fit_em<uint16_t>(in, ld_dir, thresh, c, T) : fit_em<float>(in, ld_dir, thresh, c, T);
-  } catch (const std::exception& e) {
-    Rcpp::stop(e.what());
-  }
-}
-
-// [[Rcpp::export]]
-Rcpp::List viprs_path_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
-                          Rcpp::NumericVector n, Rcpp::NumericVector af, double thresh, bool fp16, Rcpp::List control,
-                          int threads) {
-  const int T = plink4r::resolve_threads(threads);
-  const ViprsControl c = read_control(control);
-  const Inputs in = read_inputs(blocks, keep, z, n, af);
-  try {
-    return fp16 ? fit_grid<uint16_t>(in, ld_dir, thresh, c, T, false) : fit_grid<float>(in, ld_dir, thresh, c, T, false);
-  } catch (const std::exception& e) {
-    Rcpp::stop(e.what());
-  }
-}
-
-// [[Rcpp::export]]
-Rcpp::List viprs_grid2d_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep,
-                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, double thresh,
-                            bool fp16, Rcpp::List control, int threads) {
-  const int T = plink4r::resolve_threads(threads);
-  const ViprsControl c = read_control(control);
-  const Inputs in = read_inputs(blocks, keep, z, n, af);
-  try {
-    return fp16 ? fit_grid<uint16_t>(in, ld_dir, thresh, c, T, true) : fit_grid<float>(in, ld_dir, thresh, c, T, true);
+    return fp16 ? fit_path<uint16_t>(in, ld_dir, thresh, c, T) : fit_path<float>(in, ld_dir, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }
