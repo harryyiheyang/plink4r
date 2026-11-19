@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include "half.h"
 #include "la_dispatch.h"
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -293,10 +294,90 @@ float plane_dot(const float* col, const unsigned char* het, const unsigned char*
 #endif
 }
 
+// ---- one stored LD row of the eigen-panel PRS fits (vi_store.h). The SIMD copies are the kernels of
+// viprs_eigen/src/_engine.cpp (Store<T>::dot / axpy): 2 x 8 FMA lanes, lane sums in double, double tail. The generic
+// copy keeps the same lane order without FMA.
+float vi_dot_f32(const float* v, const float* s, int k) {
+  int i = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+  __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+  for (; i + 16 <= k; i += 16) {
+    a0 = _mm256_fmadd_ps(_mm256_loadu_ps(v + i), _mm256_loadu_ps(s + i), a0);
+    a1 = _mm256_fmadd_ps(_mm256_loadu_ps(v + i + 8), _mm256_loadu_ps(s + i + 8), a1);
+  }
+  for (; i + 8 <= k; i += 8) a0 = _mm256_fmadd_ps(_mm256_loadu_ps(v + i), _mm256_loadu_ps(s + i), a0);
+  a0 = _mm256_add_ps(a0, a1);
+  alignas(32) float t[8];
+  _mm256_store_ps(t, a0);
+  double acc = (double)t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+#else
+  float a[16] = {0};
+  for (; i + 16 <= k; i += 16)
+    for (int l = 0; l < 16; ++l) a[l] += v[i + l] * s[i + l];
+  for (; i + 8 <= k; i += 8)
+    for (int l = 0; l < 8; ++l) a[l] += v[i + l] * s[i + l];
+  double acc = 0;
+  for (int l = 0; l < 8; ++l) acc += (double)(a[l] + a[l + 8]);
+#endif
+  for (; i < k; ++i) acc += (double)v[i] * s[i];
+  return (float)acc;
+}
+
+float vi_dot_f16(const std::uint16_t* v, const float* s, int k) {
+  int i = 0;
+#if defined(__AVX2__) && defined(__FMA__) && defined(__F16C__)
+  __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+  for (; i + 16 <= k; i += 16) {
+    const __m256 x0 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(v + i)));
+    const __m256 x1 = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(v + i + 8)));
+    a0 = _mm256_fmadd_ps(x0, _mm256_loadu_ps(s + i), a0);
+    a1 = _mm256_fmadd_ps(x1, _mm256_loadu_ps(s + i + 8), a1);
+  }
+  for (; i + 8 <= k; i += 8)
+    a0 = _mm256_fmadd_ps(_mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(v + i))), _mm256_loadu_ps(s + i), a0);
+  a0 = _mm256_add_ps(a0, a1);
+  alignas(32) float t[8];
+  _mm256_store_ps(t, a0);
+  double acc = (double)t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+#else
+  float a[16] = {0};
+  for (; i + 16 <= k; i += 16)
+    for (int l = 0; l < 16; ++l) a[l] += plink4r::half_to_float(v[i + l]) * s[i + l];
+  for (; i + 8 <= k; i += 8)
+    for (int l = 0; l < 8; ++l) a[l] += plink4r::half_to_float(v[i + l]) * s[i + l];
+  double acc = 0;
+  for (int l = 0; l < 8; ++l) acc += (double)(a[l] + a[l + 8]);
+#endif
+  for (; i < k; ++i) acc += (double)plink4r::half_to_float(v[i]) * s[i];
+  return (float)acc;
+}
+
+void vi_axpy_f32(float* s, const float* v, float a, int k) {
+  int i = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+  const __m256 av = _mm256_set1_ps(a);
+  for (; i + 8 <= k; i += 8) _mm256_storeu_ps(s + i, _mm256_fmadd_ps(av, _mm256_loadu_ps(v + i), _mm256_loadu_ps(s + i)));
+#endif
+  for (; i < k; ++i) s[i] += a * v[i];
+}
+
+void vi_axpy_f16(float* s, const std::uint16_t* v, float a, int k) {
+  int i = 0;
+#if defined(__AVX2__) && defined(__FMA__) && defined(__F16C__)
+  const __m256 av = _mm256_set1_ps(a);
+  for (; i + 8 <= k; i += 8) {
+    const __m256 x = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(v + i)));
+    _mm256_storeu_ps(s + i, _mm256_fmadd_ps(av, x, _mm256_loadu_ps(s + i)));
+  }
+#endif
+  for (; i < k; ++i) s[i] += a * plink4r::half_to_float(v[i]);
+}
+
 }  // namespace
 
 #define PLINK4R_LA_TABLE PLINK4R_CAT(plink4r_la_, PLINK4R_LA_ISA)
 #define PLINK4R_STR2(x) #x
 #define PLINK4R_STR(x) PLINK4R_STR2(x)
 extern const plink4r::LaFns PLINK4R_LA_TABLE;
-const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, dgemm_tn, PLINK4R_STR(PLINK4R_LA_ISA)};
+const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, dgemm_tn, vi_dot_f32, vi_dot_f16, vi_axpy_f32,
+                                         vi_axpy_f16, PLINK4R_STR(PLINK4R_LA_ISA)};

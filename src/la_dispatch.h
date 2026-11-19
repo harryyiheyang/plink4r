@@ -4,6 +4,7 @@
 #ifndef PLINK4R_LA_DISPATCH_H
 #define PLINK4R_LA_DISPATCH_H
 
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 
@@ -21,6 +22,12 @@ struct LaFns {
   // doubles, one serial call (the association stream runs one per thread).
   void (*dgemm_tn)(const double* A, int K, int M, int lda, const double* B, int N, int ldb, double* Out, int ldo,
                    int beta);
+  // one stored LD row of the eigen-panel PRS fits (vi_store.h): sum_i v_i s_i (float lanes, double total) and
+  // s += a v, rows in float32 or IEEE float16
+  float (*vi_dot_f32)(const float* v, const float* s, int k);
+  float (*vi_dot_f16)(const std::uint16_t* v, const float* s, int k);
+  void (*vi_axpy_f32)(float* s, const float* v, float a, int k);
+  void (*vi_axpy_f16)(float* s, const std::uint16_t* v, float a, int k);
   const char* isa;
 };
 
@@ -28,6 +35,7 @@ struct LaFns {
 
 extern const plink4r::LaFns plink4r_la_generic;
 #if defined(PLINK4R_LA_X86)
+#include <cpuid.h>
 extern const plink4r::LaFns plink4r_la_avx2;
 extern const plink4r::LaFns plink4r_la_avx512;
 #endif
@@ -41,7 +49,10 @@ inline const LaFns& pick_la() {
   __builtin_cpu_init();
   const bool a512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512dq") &&
                     __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512bw");
-  const bool a2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+  // F16C (CPUID.1:ECX bit 29) comes with every AVX2 CPU; checked anyway since both SIMD copies are built with it
+  unsigned int ea = 0, eb = 0, ec = 0, ed = 0;
+  const bool f16c = __get_cpuid(1, &ea, &eb, &ec, &ed) && (ec & (1u << 29));
+  const bool a2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && f16c;
   if (a512 && (want.empty() || want == "avx512")) return plink4r_la_avx512;
   if (a2 && (want.empty() || want == "avx512" || want == "avx2")) return plink4r_la_avx2;
 #endif
