@@ -2,19 +2,19 @@
 // BED with a sparse kinship
 // (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed.
 //
-// Null model (reml_tau_gaussian.cpp / reml_tau_binomial.cpp): V = diag(d) + tau K, Omega = V^-1,
-// P = Omega - Omega X (X' Omega X)^-1 X' Omega, r = P y (y the response, or the working response and K the
-// kinship scaled by W^-1/2 for the logistic model),
-// Q = Omega X L^-T and Vb = X L^-T with X' Omega X = L L'. For a variant g (centred, missing call = mean):
+// Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp (kin_sparse.h), used as
+// it is: Omega = V^-1 = S H^-1 S, P = Omega - Omega X (X' Omega X)^-1 X' Omega, r = P y (y the response, or the
+// working response of the logistic model), Q = Omega X La^-T and Vb = X La^-T with X' Omega X = La La'. For a
+// variant g (centred, missing call = mean):
 //   c = g' r,   A = g' P g = g' Omega g - |Q' g|^2,   beta = c / A,   se = A^-1/2,   chi2 = c^2 / A
 // (generalised least squares; for the logistic model on the working response, one step from the null). The exact
 // statistic, not the GRAMMAR-GAMMA approximation.
-// g' Omega g has two parts. Samples without a relative: sum_i g_i^2 / (d_i + tau k_ii). Related samples:
-// g_r' V_rr^-1 g_r = |L_r^-1 g_r|^2, one sparse triangular solve per variant with the Cholesky factor of V_rr
-// (kin_sparse.h). The n-long sums of the first part, Q' g and g' r are entries of L1' G and L2' (G o G) per block
-// of variants, L1 = [Q | r], L2 = [omega] (omega = 0 at related samples), as in assoc_stream.cpp, from which the
-// reading and blocking are taken. A variant whose A lost more than 1 - 1 / kKappaMax of g' Omega g to the
-// subtraction is recomputed from g - Vb Q' g.
+// g' Omega g has two parts. Samples without a relative: sum_i om_i g_i^2. Related samples: |L^-1 (s_r o g_r)|^2,
+// one sparse triangular solve per variant with the Cholesky factor of H_rr found by the null model. The n-long
+// sums of the first part, Q' g and g' r are entries of L1' G and L2' (G o G) per block of variants, L1 = [Q | r],
+// L2 = [om] (0 at related samples), as in assoc_stream.cpp, from which the reading and blocking are taken. A
+// variant whose A lost more than 1 - 1 / kKappaMax of g' Omega g to the subtraction is recomputed from
+// g - Vb Q' g.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -44,13 +44,13 @@ inline double dot(const double* a, const double* b, int len) {
   return s;
 }
 
-// Null-model quantities shared by all threads.
+// The null model, shared by all threads.
 struct Pre {
-  int n = 0, k = 0, m1 = 0;
-  std::vector<double> L1;  // n x (k + 1): Q, r
-  const double* Vb = nullptr;
-  const plink4r::Kin* K = nullptr;
-  const plink4r::KinFactor* F = nullptr;
+  int n = 0, k = 0, m1 = 0, nr = 0;
+  const plink4r::KinNull* N = nullptr;
+  const double* L1 = nullptr;  // n x (k + 1): Q, r
+  const double* Vb = nullptr;  // n x k
+  const double* om = nullptr;  // n
 };
 
 // Variants of one thread: compact genotypes over the analysis samples and the block products.
@@ -72,7 +72,7 @@ struct Worker {
     G.assign(R * cap, 0.0); G2.assign(R * cap, 0.0);
     C1.assign(static_cast<std::size_t>(pre.m1) * cap, 0.0);
     C2.assign(cap, 0.0);
-    gr.resize(pre.K->nr);
+    gr.resize(pre.nr);
   }
   void centred(int s, int row0, int rows, double* out) const {
     const double mu = mean[s];
@@ -100,10 +100,11 @@ struct Worker {
     const unsigned code = (g8[s * sb + (i >> 2)] >> ((i & 3) << 1)) & 3;
     return code == 3 ? 0.0 : static_cast<double>(code) - mu;
   }
-  // the related samples' centred values of slot s into gr
+  // the related samples' centred values of slot s, scaled, into gr (in the order of the factor)
   void related(const Pre& pre, int s) {
-    const std::vector<int>& rel = pre.K->rel;
-    for (int a = 0; a < pre.K->nr; ++a) gr[a] = value(s, rel[a]);
+    const int* rs = pre.N->rs.data();
+    const double* ss = pre.N->ss.data();
+    for (int q = 0; q < pre.nr; ++q) gr[q] = ss[q] * value(s, rs[q]);
   }
 };
 
@@ -119,18 +120,16 @@ double explicit_projection(const Pre& pre, Worker& wk, int s, const double* M) {
     for (std::size_t i = 0; i < N; ++i) wk.z[i] -= v[i] * m;
   }
   double a = 0.0;
-  const std::vector<double>& om = pre.F->om;
-  for (std::size_t i = 0; i < N; ++i) a += om[i] * wk.z[i] * wk.z[i];
-  const std::vector<int>& rel = pre.K->rel;
-  for (int q = 0; q < pre.K->nr; ++q) wk.gr[q] = wk.z[rel[q]];
-  return a + pre.F->quad_rel(wk.gr);
+  for (std::size_t i = 0; i < N; ++i) a += pre.om[i] * wk.z[i] * wk.z[i];
+  if (pre.nr == 0) return a;
+  for (int q = 0; q < pre.nr; ++q) wk.gr[q] = pre.N->ss[q] * wk.z[pre.N->rs[q]];
+  return a + pre.N->quad_rel(wk.gr);
 }
 
 // c and A of the nb slots of the worker; returns the number of explicit projections.
 int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
   const int n = pre.n, k = pre.k, m1 = pre.m1;
   const plink4r::LaFns& LA = plink4r::la();
-  const double* om = pre.F->om.data();
   for (int row0 = 0; row0 < n; row0 += kRowChunk) {
     const int rows = std::min(kRowChunk, n - row0);
     for (int s = 0; s < nb; ++s) {
@@ -141,16 +140,16 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
     }
     const int beta = row0 > 0;
     LA.dgemm_tn(&pre.L1[row0], rows, m1, n, wk.G.data(), nb, rows, wk.C1.data(), m1, beta);
-    LA.dgemm_tn(om + row0, rows, 1, n, wk.G2.data(), nb, rows, wk.C2.data(), 1, beta);
+    LA.dgemm_tn(pre.om + row0, rows, 1, n, wk.G2.data(), nb, rows, wk.C2.data(), 1, beta);
   }
   int nexp = 0;
   for (int s = 0; s < nb; ++s) {
     if (wk.mono[s]) continue;
     const double* M = &wk.C1[static_cast<std::size_t>(s) * m1];
     double gog = wk.C2[s];
-    if (pre.K->nr > 0) {
+    if (pre.nr > 0) {
       wk.related(pre, s);
-      gog += pre.F->quad_rel(wk.gr);
+      gog += pre.N->quad_rel(wk.gr);
     }
     double A = gog - dot(M, M, k);
     if (!(A > gog / kKappaMax)) { A = explicit_projection(pre, wk, s, M); ++nexp; }
@@ -163,24 +162,21 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 }  // namespace
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
-// var_idx, sample_idx: 0-based file rows. The null model over the analysis samples (in the order of
-// sample_idx): Q, Vb (n x k), r, d (n), tau, and the kinship ki, kj, kv (off-diagonal, 0-based analysis
-// samples, each pair once), kdiag (n). block: variants per thread (0 = from mem_gb).
+// var_idx, sample_idx: 0-based file rows. null: external pointer to the plink4r::KinNull of the analysis samples
+// (in the order of sample_idx), projected. block: variants per thread (0 = from mem_gb).
 // Returns per variant n_obs, a1_sum, beta, se, status (0 ok, 1 monomorphic / all missing, 2 A <= 0).
 // [[Rcpp::export]]
 Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
-                              const Rcpp::NumericMatrix& Q, const Rcpp::NumericMatrix& Vb,
-                              const Rcpp::NumericVector& r, const Rcpp::NumericVector& d, double tau,
-                              const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj,
-                              const Rcpp::NumericVector& kv, const Rcpp::NumericVector& kdiag, int threads,
-                              double mem_gb, int block) {
+                              SEXP null, int threads, double mem_gb, int block) {
   const int T = plink4r::resolve_threads(threads);
   mem_gb = plink4r::resolve_mem_gb(mem_gb, T);
-  const int p = var_idx.size(), ns = sample_idx.size(), k = Q.ncol();
-  if (Q.nrow() != ns || Vb.nrow() != ns || Vb.ncol() != k || r.size() != ns || d.size() != ns || kdiag.size() != ns)
+  const Rcpp::XPtr<plink4r::KinNull> np(null);
+  const plink4r::KinNull& NM = *np;
+  const plink4r::Kin& K = NM.K;
+  const int p = var_idx.size(), ns = sample_idx.size(), k = NM.p;
+  if (NM.n != ns || NM.L1.size() != static_cast<std::size_t>(ns) * (k + 1))
     Rcpp::stop("the null model does not match the samples");
-  if (ki.size() != kj.size() || ki.size() != kv.size()) Rcpp::stop("kinship triplets do not match");
   const std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
   const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
 
@@ -191,26 +187,17 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcp
   const bool dos = pf && pf->dosage();
   const std::size_t rawb = (static_cast<std::size_t>(n_raw) + 3) / 4;
 
-  plink4r::Kin K;
-  try {
-    K = plink4r::build_kin(ns, ki.begin(), kj.begin(), kv.begin(), ki.size(), kdiag.begin());
-  } catch (const std::exception& e) { Rcpp::stop(e.what()); }
-  plink4r::KinFactor F;
-  if (!F.factor(K, d.begin(), tau)) Rcpp::stop("V = diag(d) + tau K is not positive definite");
-
   const std::size_t N = ns;
   Pre pre;
-  pre.n = ns; pre.k = k; pre.m1 = k + 1; pre.Vb = Vb.begin(); pre.K = &K; pre.F = &F;
-  pre.L1.resize(N * pre.m1);
-  std::copy(Q.begin(), Q.end(), pre.L1.begin());
-  std::copy(r.begin(), r.end(), pre.L1.begin() + N * k);
+  pre.n = ns; pre.k = k; pre.m1 = k + 1; pre.nr = K.nr; pre.N = &NM;
+  pre.L1 = NM.L1.data(); pre.Vb = NM.Vb.data(); pre.om = NM.om.data();
 
   // block size from the memory budget
   const double GiB = 1073741824.0;
-  const double shared = 8.0 * N * (pre.m1 + 2.0 * k + 6) + 8.0 * p * 6.0 + 16.0 * (2.0 * K.pairs + K.nr) * 3;
+  const double shared = 8.0 * N * (pre.m1 + k + 1.0) + 8.0 * p * 6.0 + 16.0 * (2.0 * K.pairs + K.nr) * 3;
   const double per_var = (dos ? 2.0 * N : (N + 3) / 4.0) + 16.0 * std::min<int>(kRowChunk, ns) +
                          8.0 * (pre.m1 + 1) + 8.0 * 4;
-  const double per_thread = 8.0 * N + 16.0 * K.nr + (bed ? rawb : (dos ? 3.0 * n_raw : rawb)) + 1048576.0;
+  const double per_thread = 8.0 * N + 8.0 * K.nr + (bed ? rawb : (dos ? 3.0 * n_raw : rawb)) + 1048576.0;
   const double budget = mem_gb * GiB * 0.95 - 268435456.0 - shared;
   const int per_thread_max = (p + T - 1) / T;
   int b = block;

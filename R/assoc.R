@@ -131,19 +131,10 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   out[]
 }
 
-# Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
-.assoc_run <- function(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust,
-                       center, threads, mem_gb, block) {
+# The genotype file of an association run: its variants (var), sample IDs (iid), path, the file rows of the
+# biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
+.geno_variants <- function(pfile, bfile, snp_vec) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
-  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  d <- as.data.frame(data)
-  need <- c(id_col, pheno, covar, exposure, int_covar)
-  miss <- setdiff(need, names(d))
-  if (length(miss)) stop("data lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
-  if (length(pheno) != 1L) stop("Give one phenotype column.", call. = FALSE)
-
-  # ---- genotype file
   if (!is.null(pfile)) {
     pvar <- .read_pvar5(pfile)
     var <- data.table::data.table(CHR = pvar$CHROM, POS = pvar$POS, ID = pvar$ID, A1 = pvar$ALT, A2 = pvar$REF,
@@ -165,17 +156,30 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   skipped <- var$ID[vrow[var$allele_ct[vrow] > 2L]]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
+  list(var = var, iid = iid, path = path, vrow = vrow, skipped = skipped)
+}
 
-  # ---- samples: in the genotype file, complete phenotype / covariates / exposures; file order
+# The analysis samples: rows of d with an ID and complete `need` columns (and, with iid, present in the genotype
+# file, in file order; srow = their file rows), and their phenotype (0/1 for a logistic model).
+.pheno_samples <- function(d, need, pheno, family, id_col, iid = NULL) {
+  miss <- setdiff(need, names(d))
+  if (length(miss)) stop("data lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
+  if (length(pheno) != 1L) stop("Give one phenotype column.", call. = FALSE)
   ids <- as.character(d[[id_col]])
   if (anyDuplicated(ids[!is.na(ids)])) stop("IDs repeated in data.", call. = FALSE)
-  srow <- match(ids, iid)
-  ok <- !is.na(srow) & stats::complete.cases(d[, setdiff(need, id_col), drop = FALSE])
-  if (!any(ok)) stop("No sample of data is in the genotype file with complete data.", call. = FALSE)
-  d <- d[ok, , drop = FALSE]; srow <- srow[ok]
-  o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]
-  n <- nrow(d)
-
+  ok <- !is.na(ids) & stats::complete.cases(d[, setdiff(need, id_col), drop = FALSE])
+  srow <- NULL
+  if (!is.null(iid)) {
+    srow <- match(ids, iid)
+    ok <- ok & !is.na(srow)
+  }
+  if (!any(ok)) stop("No sample of data has complete data", if (!is.null(iid)) " and is in the genotype file", ".",
+                     call. = FALSE)
+  d <- d[ok, , drop = FALSE]
+  if (!is.null(iid)) {
+    srow <- srow[ok]
+    o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]
+  }
   y <- d[[pheno]]
   if (!is.numeric(y) && !is.logical(y)) stop("The phenotype must be numeric.", call. = FALSE)
   y <- as.numeric(y)
@@ -185,6 +189,21 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
       stop("A logistic phenotype must be coded 0/1 or 1/2.", call. = FALSE)
     if (length(unique(y)) < 2L) stop("The phenotype has one class only.", call. = FALSE)
   }
+  list(d = d, srow = srow, y = y)
+}
+
+# Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
+.assoc_run <- function(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust,
+                       center, threads, mem_gb, block) {
+  if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
+  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
+  d <- as.data.frame(data)
+  need <- c(id_col, pheno, covar, exposure, int_covar)
+  gv <- .geno_variants(pfile, bfile, snp_vec)
+  var <- gv$var; iid <- gv$iid; path <- gv$path; vrow <- gv$vrow; skipped <- gv$skipped
+  sm <- .pheno_samples(d, need, pheno, family, id_col, iid)
+  d <- sm$d; srow <- sm$srow; y <- sm$y
+  n <- nrow(d)
 
   # ---- null model with base glm(): factors and characters are expanded by R's own model.matrix (contrasts
   # as options("contrasts")), and the numeric design is taken from the fit (x = TRUE). Columns: intercept,
