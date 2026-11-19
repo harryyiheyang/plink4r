@@ -97,12 +97,8 @@ genotype_impute_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh,
     .Call(`_plink4r_genotype_impute_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
 }
 
-pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads) {
-    .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
-}
-
-genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+genotype_fill_ld_jobs_cpp <- function(ptr, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb) {
+    .Call(`_plink4r_genotype_fill_ld_jobs_cpp`, ptr, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {

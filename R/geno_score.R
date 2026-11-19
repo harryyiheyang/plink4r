@@ -12,13 +12,13 @@
 #' `ignore-dup-ids`) are listed in `skipped`.
 #'
 #' Missing calls (`impute`):
-#' * `"anchor"` (default): scheme 3 of [genotype_fill()]. With an A1 frequency `p` in `weights[[freq_col]]`
+#' * `"anchor"` (default): the anchored value of [geno_fill()]. With an A1 frequency `p` in `weights[[freq_col]]`
 #'   the missing calls of a variant take the constant `c = (2 n p - sum_obs) / n_miss` (clipped to [0, 2]),
 #'   so observed + filled allele count equals `2 n p`; without one, `c` is the observed mean, which is
-#'   exactly plink2's default mean imputation. With `ld`, variants in the eigen.bin panel are filled by
-#'   scheme 4 instead (per-cell LD conditional mean, stage 2 anchored to `p` or to `AF_PanUKB`), one LD
+#'   exactly plink2's default mean imputation. With `ld`, variants in the eigen.bin panel are filled
+#'   per cell instead (LD conditional mean, stage 2 anchored to `p` or to `AF_PanUKB`), one LD
 #'   block at a time through the same kernel as [genotype_impute()]; variants outside the panel keep
-#'   scheme 3.
+#'   the anchored value.
 #' * `"none"`: plink2 `no-mean-imputation`; a missing call adds nothing and lowers `allele_ct` by 2.
 #'
 #' `transform = "center"` scores `d - 2p` and `"standardize"` `(d - 2p) / sqrt(2p(1 - p))` (plink2 `center`,

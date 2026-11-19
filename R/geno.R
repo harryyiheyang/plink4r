@@ -49,25 +49,13 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result of the file route (its
-#'   per-SNP `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by
-#'   chromosome, position and allele pair, not by ID, so it works the same with `geno_file(id = FALSE)`), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
-#'   IID, g))`. A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) /
-#'   bim A1 (BED) dosages. Same as opening with `impute` and then [genotype_fill()] on the new object.
-#' @param af Optional anchor frequency of the counted allele (bim column 5 for
-#'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
-#'   `impute`. With a finite `af`, every missing call of that variant takes
-#'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
-#'   (stored as round(c) in the planes and the rest in D), so the filled
-#'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
-#'   (default) leaves the behaviour unchanged.
 #' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
 #'   tables (then leave `bedfile` and `pgenfile` `NULL`).
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
 #'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
 #'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
-#'   `sample` (IIDs in row order), `impute` (how the missing cells are filled now: "median", "mean", "af",
-#'   "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
+#'   `sample` (IIDs in row order), `impute` (how the missing cells are filled now: "median", "mean", or
+#'   "fill" after [geno_fill()]), `scale`, `center`, `sd`, `dosage`
 #'   (whether the PGEN holds dosages) and `dosage_nnz` (nonzero entries of the
 #'   int16 deviation D); per column also `id` (file ID; `chr:pos:a1:a2` when opened from
 #'   `geno_file(id = FALSE)`, built once at open for the opened rows only), `chr`, `pos`, `row` (file row), `flipped` (stored
@@ -78,7 +66,7 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL, af = NULL, file = NULL) {
+                      scale = TRUE, threads = 4L, file = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
   gf <- .as_geno_file(file, bedfile, pgenfile)
@@ -101,11 +89,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                            flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
-  if (!is.null(fill) || !is.null(af)) {  # on the new object, which nothing else references yet: in place
-    fs <- .geno_fill_spec(fill, X)
-    X <- .geno_refill(X, af = af, const = fs$c, cells = fs, default = "keep", inplace = TRUE,
-                      impute = if (!is.null(fill)) "custom" else "af", threads = threads)
-  }
   X
 }
 

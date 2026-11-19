@@ -5,7 +5,7 @@
 #'
 #' The selected cells are copied as stored (missing cells keep their current fill; nothing is refilled) and
 #' the rows of the missing cells follow the selection. `center`, `sd`, `n_miss` and `af` are those of the
-#' subset. Use [genotype_fill()] afterwards to refill the missing cells from the subset's own samples.
+#' subset. Use [geno_fill()] afterwards to refill the missing cells from the subset's own samples.
 #'
 #' @param X A `geno` object.
 #' @param sample_vec Rows to keep, as IIDs, `FID_IID` or 1-based row numbers of `X`, in the order wanted.
@@ -50,8 +50,7 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
 #' (palindromic variants are only marked).
 #'
 #' @param X A named list of `geno` objects (or one object), in order of priority.
-#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns as in the file route
-#'   of [genotype_fill()]: `CHR` (or chr / CHROM), `BP37` or `BP38` (or pos / POS / BP; the build of the
+#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns: `CHR` (or chr / CHROM), `BP37` or `BP38` (or pos / POS / BP; the build of the
 #'   objects' positions), `A1`, `A2`, optional `A1Freq` (frequency of A1); "chr" prefixes are removed and
 #'   alleles upper-cased.
 #' @param build 37 or 38: which of `BP37` / `BP38` to use when `ref` has both.
@@ -131,8 +130,8 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   out
 }
 
-# A SNP table as given to genotype_fill(pfile, snp) (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos,
-# a1, a2), cleaned the same way: "chr" prefix removed, alleles upper-cased, positions integer.
+# The `ref` table of geno_harmonise() (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos, a1, a2),
+# cleaned: "chr" prefix removed, alleles upper-cased, positions integer.
 .harm_ref <- function(ref, build = NULL) {
   r <- data.table::as.data.table(ref)
   pick <- function(cands, what) {
@@ -155,7 +154,7 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
 #'
 #' The cells that were missing in the file (and are carried through [geno_subset()] and
 #' [geno_harmonise()]), with the value each holds now (its fill, in the object's current counted-allele
-#' orientation). The inverse of `genotype_fill(X, cells = )`.
+#' orientation).
 #'
 #' @param X A `geno` object.
 #' @return data.table(snp, IID, g).

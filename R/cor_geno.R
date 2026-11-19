@@ -9,7 +9,7 @@
 #'
 #' Missing calls: with `af` (the counted allele's anchor frequency) every
 #' missing call of the variant takes c = (2 n af - sum of observed) /
-#' (number missing), clipped to `[0, 2]` (scheme 3), so the filled column has
+#' (number missing), clipped to `[0, 2]`, so the filled column has
 #' mean 2 af; `NA` entries of `af`, or `af = NULL`, use `impute`. The sd is
 #' always the sample sd after filling.
 #'
@@ -49,8 +49,16 @@ bed_cor <- cor_bed
   t0 <- proc.time()[["elapsed"]]
   X <- do.call(geno_open, c(file, list(snp_vec = snps, sample_vec = sample, impute = impute,
                                        scale = FALSE, threads = threads)))
-  # anchored fill through the genotype_fill routine; NA entries of af keep `impute` (in place: X is local)
-  if (!is.null(af)) X <- .geno_refill(X, af = af, default = "keep", inplace = TRUE, impute = "af", threads = threads)
+  # anchored fill (fill_value_cpp); NA entries of af keep `impute` (in place: X is local)
+  if (!is.null(af)) {
+    af <- as.numeric(af)
+    if (length(af) != X$p) stop("af needs one value per selected variant.", call. = FALSE)
+    if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
+    info <- geno_info_cpp(X$ptr)
+    f <- fill_value_cpp(X$n, info$obs_sum, info$n_miss, af, numeric(0), FALSE)
+    f[info$n_miss == 0] <- NaN
+    X <- .geno_fill_value(X, f, impute = "af", inplace = TRUE, threads = threads)
+  }
   t1 <- proc.time()[["elapsed"]]
   if (as.numeric(X$p) * X$p > max_cells) {
     stop("Requested correlation matrix is too large; subset variants first.", call. = FALSE)

@@ -65,16 +65,17 @@ geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
   .geno_index(x, .geno_vid(v), NULL, "snp_vec")
 }
 
-# Column of X (or NA) for each variant given by chr, pos and its two alleles a / b (either orientation):
-# chromosome without "chr", alleles upper-case; a column whose counted allele is a matches first, then one
-# whose counted allele is b. IDs and column names are not used.
-.geno_match_vars <- function(X, chr, pos, a, b) {
+# The one allele matcher: for each variant given by chr, pos and its two alleles a / b, the row of the variant
+# table v (chr, pos, a1, a2) holding it in either orientation, or NA. Chromosome without "chr", alleles
+# upper-case; a row whose a1 is a matches first, then one whose a1 is b (flip = TRUE: a is the row's a2).
+# IDs and names are not used; rows of v without chr or pos match nothing.
+.match_alleles <- function(v, chr, pos, a, b) {
   key <- function(c, p, x, y) paste(sub("^chr", "", as.character(c), ignore.case = TRUE), as.integer(p),
                                     toupper(x), toupper(y), sep = ":")
-  kx <- key(X$chr, X$pos, X$a1, X$a2)
-  kx[is.na(X$chr) | is.na(X$pos)] <- NA_character_  # appended columns match nothing
-  j <- match(key(chr, pos, a, b), kx, incomparables = NA)
-  miss <- is.na(j)
-  j[miss] <- match(key(chr, pos, b, a)[miss], kx, incomparables = NA)
-  j
+  kv <- key(v$chr, v$pos, v$a1, v$a2)
+  kv[is.na(v$chr) | is.na(v$pos)] <- NA_character_
+  j <- match(key(chr, pos, a, b), kv, incomparables = NA)
+  flip <- is.na(j)
+  j[flip] <- match(key(chr, pos, b, a)[flip], kv, incomparables = NA)
+  list(j = j, flip = flip & !is.na(j))
 }

@@ -15,7 +15,6 @@ namespace {
 
 // Working rows of one block / window, checked against the eigen block.
 struct ImputeJob {
-  plink4r::EigenBlock eb;
   std::vector<int> rw, sg, vi;
   std::vector<double> afv;
   std::vector<char> kr;
@@ -23,19 +22,20 @@ struct ImputeJob {
   double t_read = 0;
 };
 
-ImputeJob impute_job(const std::string& eigen_file, double thresh, const Rcpp::IntegerVector& rows,
-                     const Rcpp::IntegerVector& var_idx, const Rcpp::NumericVector& af,
-                     const Rcpp::IntegerVector& sign, const Rcpp::LogicalVector& keep_row,
-                     std::chrono::steady_clock::time_point t_all) {
+// eb: the eigen block, read by the caller (once per file, whatever the number of jobs on it); t_read: the
+// seconds that read took, booked on this job (0 for the later jobs of the same block).
+ImputeJob impute_job(const plink4r::EigenBlock& eb, const std::string& eigen_file, double t_read,
+                     const Rcpp::IntegerVector& rows, const Rcpp::IntegerVector& var_idx,
+                     const Rcpp::NumericVector& af, const Rcpp::IntegerVector& sign,
+                     const Rcpp::LogicalVector& keep_row) {
   ImputeJob J;
-  J.eb = plink4r::read_eigen_block(eigen_file, thresh);
-  J.t_read = plink4r::ik::secs(t_all);
+  J.t_read = t_read;
   J.rw.assign(rows.begin(), rows.end());
   J.m = static_cast<int>(J.rw.size());
   const int m = J.m;
   if (var_idx.size() != m || af.size() != m || sign.size() != m || keep_row.size() != m)
     Rcpp::stop("rows / var_idx / af / sign / keep_row differ in length");
-  for (int r : J.rw) if (r < 0 || r >= J.eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
+  for (int r : J.rw) if (r < 0 || r >= eb.m) Rcpp::stop("rows out of range of %s", eigen_file);
   J.sg.assign(sign.begin(), sign.end());
   J.vi.assign(var_idx.begin(), var_idx.end());
   J.afv.assign(af.begin(), af.end());
@@ -150,8 +150,9 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
-  const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
+  const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
+  const ImputeJob J = impute_job(eb, eigen_file, plink4r::ik::secs(t_all), rows, var_idx, af, sign, keep_row);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
@@ -169,8 +170,9 @@ Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const
                                     double mem_gb, Rcpp::IntegerVector rows) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
-  const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
+  const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
+  const ImputeJob J = impute_job(eb, eigen_file, plink4r::ik::secs(t_all), rows, var_idx, af, sign, keep_row);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
   const auto t0 = std::chrono::steady_clock::now();
   plink4r::BlockGenotypes B;
   int ns = 0;
@@ -182,59 +184,18 @@ Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const
   return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
 }
 
-// Observed calls and ALT sum (hard calls, or dosages when the PGEN holds them) of each variant over the selected
-// samples, for genotype_fill. var_idx / sample_idx 0-based.
-// [[Rcpp::export]]
-Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx,
-                          Rcpp::IntegerVector sample_idx, int threads) {
-  const int T = plink4r::resolve_threads(threads);
-  const int p = var_idx.size(), ns = sample_idx.size();
-  std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
-  std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
-  const bool dos = pf.dosage();
-  const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
-  const std::size_t sb = (static_cast<std::size_t>(ns) + 3) / 4;
-  std::vector<unsigned char> cbuf(dos ? 0 : static_cast<std::size_t>(T) * sb);
-  std::vector<double> nobs(p), sum(p);
-  std::vector<int> bad(T, -1);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 8) num_threads(T)
-#endif
-  for (int j = 0; j < p; ++j) {
-    long long c = 0; double s = 0;
-    if (dos) {
-      const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
-      if (!d) { bad[plink4r::thread_id()] = j; continue; }
-      for (int i = 0; i < ns; ++i) { const std::uint16_t v = d[si[i]]; if (v != plink4r::PgenFile::kMissing) { ++c; s += plink4r::dosage_grid(v); } }
-      s /= 100.0;
-    } else {
-      const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
-      if (!gv) { bad[plink4r::thread_id()] = j; continue; }
-      unsigned char* dst = &cbuf[static_cast<std::size_t>(plink4r::thread_id()) * sb];
-      plink4r::compact_genovec(gv, si.data(), ns, ident, dst);
-      long long miss = 0, alt = 0;
-      plink4r::count_genovec(dst, sb, &miss, &alt);
-      c = ns - miss; s = static_cast<double>(alt);
-    }
-    nobs[j] = static_cast<double>(c); sum[j] = s;
-  }
-  for (int t = 0; t < T; ++t) if (bad[t] >= 0) Rcpp::stop("PGEN read failed at SNP %d", bad[t] + 1);
-  return Rcpp::List::create(Rcpp::_["n_obs"] = Rcpp::wrap(nobs), Rcpp::_["sum"] = Rcpp::wrap(sum), Rcpp::_["dosage"] = dos);
-}
-
-// As genotype_impute_geno_cpp, but the final fills of the kept rows are written into the geno object ptr itself
-// (in place: give a fresh clone nobody else references) instead of being returned; the genotypes are read from
-// the same object (its missing cells, whatever they hold now). Returns the per-SNP table, info and timings.
-// [[Rcpp::export]]
-Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
-                                     Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
-                                     double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
-                                     double mem_gb, Rcpp::IntegerVector rows) {
-  const int T = plink4r::resolve_threads(threads);
-  const auto t_all = std::chrono::steady_clock::now();
-  const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
-  const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
+// One LD fill job on a geno object: stage 1 + 2 on the working rows `rows` of the eigen block eb, the final
+// fills of the kept rows written into the object ptr itself (in place: a fresh clone nobody else references).
+// The genotypes are read from the same object (its missing cells, whatever they hold now), so several jobs
+// on one object do not see each other's fills. Returns the per-SNP table, info and timings.
+namespace {
+Rcpp::List fill_ld_job(SEXP ptr, const plink4r::EigenBlock& eb, const std::string& eigen_file, double t_read,
+                       const Rcpp::IntegerVector& var_idx, const Rcpp::NumericVector& af,
+                       const Rcpp::IntegerVector& sign, double delta, double anchor_min_miss,
+                       const Rcpp::LogicalVector& keep_row, int T, int nb_people, double mem_gb,
+                       const Rcpp::IntegerVector& rows, std::chrono::steady_clock::time_point t_all) {
+  const ImputeJob J = impute_job(eb, eigen_file, t_read, rows, var_idx, af, sign, keep_row);
+  const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
   const auto t0 = std::chrono::steady_clock::now();
   plink4r::BlockGenotypes B;
   int ns = 0;
@@ -287,4 +248,31 @@ Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, cons
   }
   plink4r::geno_write_cells(ptr, cols, off, ci, cg, T);
   return impute_summary(J, L, B, O, delta, T, plink4r::ik::secs(tw), t_all);
+}
+}  // namespace
+
+// Several LD fill jobs on one eigen block: the file is read once, then each job (list(var_idx, af, sign,
+// rows): 0-based columns of ptr, anchor frequency, sign and eigen row; every working row is kept) is solved on its own
+// rows of the block and written into ptr, one after the other, each with all the threads. A later job
+// overwrites the cells of a column it shares with an earlier one. Returns one summary per job.
+// [[Rcpp::export]]
+Rcpp::List genotype_fill_ld_jobs_cpp(SEXP ptr, const std::string& eigen_file, Rcpp::List jobs, double thresh,
+                                     double delta, double anchor_min_miss, int threads, int nb_people,
+                                     double mem_gb) {
+  const int T = plink4r::resolve_threads(threads);
+  auto t_all = std::chrono::steady_clock::now();
+  const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
+  double t_read = plink4r::ik::secs(t_all);
+  Rcpp::List out(jobs.size());
+  for (R_xlen_t q = 0; q < jobs.size(); ++q) {
+    const Rcpp::List jb = jobs[q];
+    const Rcpp::IntegerVector var_idx = jb["var_idx"], sign = jb["sign"], rows = jb["rows"];
+    const Rcpp::NumericVector af = jb["af"];
+    const Rcpp::LogicalVector keep(var_idx.size(), true);
+    out[q] = fill_ld_job(ptr, eb, eigen_file, t_read, var_idx, af, sign, delta, anchor_min_miss, keep, T, nb_people,
+                         mem_gb, rows, t_all);
+    t_read = 0;
+    t_all = std::chrono::steady_clock::now();
+  }
+  return out;
 }
