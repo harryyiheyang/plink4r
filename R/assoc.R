@@ -27,8 +27,8 @@
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
-#' @param kinship `NULL` (default: the samples are taken as unrelated), or the pairwise kinship coefficients of
-#'   the related pairs (see [reml_tau()]). With `kinship` the test is that of a mixed model with a sparse kinship
+#' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
+#'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the test is that of a mixed model with a sparse kinship
 #'   matrix `K` (as fastGWA, Jiang et al. 2019): the null model `y ~ covar + b`, `b ~ N(0, tau K)` is fitted once
 #'   by REML ([reml_tau()]: linear, or logistic on the IRLS working scale), and with `V` the covariance of the
 #'   (working) response and `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least

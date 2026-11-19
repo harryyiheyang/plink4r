@@ -19,10 +19,9 @@
 #' @param pheno Name of the phenotype column. Logistic: coded 0/1 (or 1/2).
 #' @param covar Names of covariate columns (numeric, or factors / characters, expanded by `model.matrix`); an
 #'   intercept is always added. An externally estimated polygenic score is given here as a covariate.
-#' @param kinship Pairwise kinship coefficients of the related pairs, as released by the UK Biobank
-#'   (`ID1 ID2 HetHet IBS0 Kinship`) and other biobanks: a data.frame or a file with one row per related pair,
-#'   the two sample IDs in its first two columns and the kinship coefficient in the column whose name starts with
-#'   "kin" (any case; or the third column of a three-column table). The matrix `K` is built here: `K_ij =
+#' @param kinship The related pairs: a data.frame with exactly three columns, in this order: the two sample IDs
+#'   of a pair and their kinship coefficient as biobanks release it (0.25 for full siblings or parent and child,
+#'   0.125 for second-degree relatives). Column names are not used. The matrix `K` is built here: `K_ij =
 #'   para$kin_scale` (2) times the coefficient of the pair, `K_ii = para$diag` (1), 0 for every pair not listed.
 #'   Pairs with a sample outside the analysis are dropped.
 #' @param family `"gaussian"` or `"binomial"`.
@@ -166,24 +165,14 @@ reml_tau_para <- function() {
   list(ids = as.character(d[[id_col]]), y = y, X = X, srow = srow)
 }
 
-# K over the analysis samples `ids` from pairwise kinship coefficients (a data.frame or a file: two ID columns
-# first, the coefficient in the column named kin* or the third of three): off-diagonal pairs (i, j 0-based, each
-# pair once) with K_ij = scale x coefficient, and the diagonal (diag for everyone). Pairs with a sample outside
-# `ids`, self pairs and zero coefficients are dropped; a repeated pair keeps its first row.
+# K over the analysis samples `ids` from the related pairs (a three-column data.frame: ID, ID, kinship
+# coefficient): off-diagonal pairs (i, j 0-based, each pair once) with K_ij = scale x coefficient, and the diagonal
+# (diag for everyone). Pairs with a sample outside `ids`, self pairs and zero coefficients are dropped; a repeated
+# pair keeps its first row.
 .kin_prepare <- function(kinship, ids, scale, diag) {
-  if (is.character(kinship) && length(kinship) == 1L) {
-    if (!file.exists(kinship)) stop("kinship file not found: ", kinship, call. = FALSE)
-    kinship <- data.table::fread(kinship)
-  }
-  if (!is.data.frame(kinship) || ncol(kinship) < 3L)
-    stop("kinship must be a table of related pairs: two ID columns and the kinship coefficient.", call. = FALSE)
-  vc <- grep("^kin", names(kinship), ignore.case = TRUE)
-  vc <- vc[vc > 2L]
-  if (!length(vc)) {
-    if (ncol(kinship) != 3L) stop("kinship has no column named kin*; give ID1, ID2 and the coefficient.", call. = FALSE)
-    vc <- 3L
-  }
-  v <- as.numeric(kinship[[vc[1L]]])
+  if (!is.data.frame(kinship) || ncol(kinship) != 3L)
+    stop("kinship must be a data.frame with three columns: ID, ID, kinship coefficient.", call. = FALSE)
+  v <- as.numeric(kinship[[3L]])
   if (anyNA(v)) stop("kinship has missing coefficients.", call. = FALSE)
   i <- match(as.character(kinship[[1L]]), ids); j <- match(as.character(kinship[[2L]]), ids)
   ok <- !is.na(i) & !is.na(j) & i != j & v != 0
