@@ -101,3 +101,15 @@ sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, th
     .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
 }
 
+viprs_em_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_em_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
+}
+
+viprs_path_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_path_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
+}
+
+viprs_grid2d_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_grid2d_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
+}
+
