@@ -251,14 +251,13 @@ Rcpp::List fill_ld_job(SEXP ptr, const plink4r::EigenBlock& eb, const std::strin
 }
 }  // namespace
 
-// Several LD fill jobs on one eigen block: the file is read once, then each job (list(var_idx, af, sign,
-// rows): 0-based columns of ptr, anchor frequency, sign and eigen row; every working row is kept) is solved on its own
-// rows of the block and written into ptr, one after the other, each with all the threads. A later job
-// overwrites the cells of a column it shares with an earlier one. Returns one summary per job.
+// Several LD fill jobs on one eigen block: the file is read once, then each job (list(ptr, var_idx, af, sign,
+// rows): the geno object to fill in place, its 0-based columns, their anchor frequency, sign and eigen row;
+// every working row is kept) is solved on its own rows of the block and written into its object, one after
+// the other, each with all the threads. Returns one summary per job.
 // [[Rcpp::export]]
-Rcpp::List genotype_fill_ld_jobs_cpp(SEXP ptr, const std::string& eigen_file, Rcpp::List jobs, double thresh,
-                                     double delta, double anchor_min_miss, int threads, int nb_people,
-                                     double mem_gb) {
+Rcpp::List genotype_fill_ld_jobs_cpp(const std::string& eigen_file, Rcpp::List jobs, double thresh, double delta,
+                                     double anchor_min_miss, int threads, int nb_people, double mem_gb) {
   const int T = plink4r::resolve_threads(threads);
   auto t_all = std::chrono::steady_clock::now();
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
@@ -269,7 +268,8 @@ Rcpp::List genotype_fill_ld_jobs_cpp(SEXP ptr, const std::string& eigen_file, Rc
     const Rcpp::IntegerVector var_idx = jb["var_idx"], sign = jb["sign"], rows = jb["rows"];
     const Rcpp::NumericVector af = jb["af"];
     const Rcpp::LogicalVector keep(var_idx.size(), true);
-    out[q] = fill_ld_job(ptr, eb, eigen_file, t_read, var_idx, af, sign, delta, anchor_min_miss, keep, T, nb_people,
+    const SEXP jp = jb["ptr"];
+    out[q] = fill_ld_job(jp, eb, eigen_file, t_read, var_idx, af, sign, delta, anchor_min_miss, keep, T, nb_people,
                          mem_gb, rows, t_all);
     t_read = 0;
     t_all = std::chrono::steady_clock::now();

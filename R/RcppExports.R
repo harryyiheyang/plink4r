@@ -77,6 +77,10 @@ geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }
 
+geno_bind_cpp <- function(ptrs, cols, row_obj, row_idx, threads) {
+    .Call(`_plink4r_geno_bind_cpp`, ptrs, cols, row_obj, row_idx, threads)
+}
+
 geno_fill_cpp <- function(ptr, fill_c, inplace, threads) {
     .Call(`_plink4r_geno_fill_cpp`, ptr, fill_c, inplace, threads)
 }
@@ -97,8 +101,8 @@ genotype_impute_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh,
     .Call(`_plink4r_genotype_impute_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
 }
 
-genotype_fill_ld_jobs_cpp <- function(ptr, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb) {
-    .Call(`_plink4r_genotype_fill_ld_jobs_cpp`, ptr, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb)
+genotype_fill_ld_jobs_cpp <- function(eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb) {
+    .Call(`_plink4r_genotype_fill_ld_jobs_cpp`, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {

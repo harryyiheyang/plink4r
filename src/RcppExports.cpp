@@ -311,6 +311,21 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// geno_bind_cpp
+SEXP geno_bind_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerVector& row_obj, const Rcpp::IntegerVector& row_idx, int threads);
+RcppExport SEXP _plink4r_geno_bind_cpp(SEXP ptrsSEXP, SEXP colsSEXP, SEXP row_objSEXP, SEXP row_idxSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::List >::type ptrs(ptrsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type cols(colsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type row_obj(row_objSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type row_idx(row_idxSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_bind_cpp(ptrs, cols, row_obj, row_idx, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // geno_fill_cpp
 SEXP geno_fill_cpp(SEXP ptr, const Rcpp::NumericVector& fill_c, bool inplace, int threads);
 RcppExport SEXP _plink4r_geno_fill_cpp(SEXP ptrSEXP, SEXP fill_cSEXP, SEXP inplaceSEXP, SEXP threadsSEXP) {
@@ -398,12 +413,11 @@ BEGIN_RCPP
 END_RCPP
 }
 // genotype_fill_ld_jobs_cpp
-Rcpp::List genotype_fill_ld_jobs_cpp(SEXP ptr, const std::string& eigen_file, Rcpp::List jobs, double thresh, double delta, double anchor_min_miss, int threads, int nb_people, double mem_gb);
-RcppExport SEXP _plink4r_genotype_fill_ld_jobs_cpp(SEXP ptrSEXP, SEXP eigen_fileSEXP, SEXP jobsSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP) {
+Rcpp::List genotype_fill_ld_jobs_cpp(const std::string& eigen_file, Rcpp::List jobs, double thresh, double delta, double anchor_min_miss, int threads, int nb_people, double mem_gb);
+RcppExport SEXP _plink4r_genotype_fill_ld_jobs_cpp(SEXP eigen_fileSEXP, SEXP jobsSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP anchor_min_missSEXP, SEXP threadsSEXP, SEXP nb_peopleSEXP, SEXP mem_gbSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const std::string& >::type eigen_file(eigen_fileSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type jobs(jobsSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
@@ -412,7 +426,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     Rcpp::traits::input_parameter< int >::type nb_people(nb_peopleSEXP);
     Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
-    rcpp_result_gen = Rcpp::wrap(genotype_fill_ld_jobs_cpp(ptr, eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb));
+    rcpp_result_gen = Rcpp::wrap(genotype_fill_ld_jobs_cpp(eigen_file, jobs, thresh, delta, anchor_min_miss, threads, nb_people, mem_gb));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -454,12 +468,13 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_take_cpp", (DL_FUNC) &_plink4r_geno_take_cpp, 5},
+    {"_plink4r_geno_bind_cpp", (DL_FUNC) &_plink4r_geno_bind_cpp, 5},
     {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 4},
     {"_plink4r_geno_miss_cpp", (DL_FUNC) &_plink4r_geno_miss_cpp, 1},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 16},
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
-    {"_plink4r_genotype_fill_ld_jobs_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_jobs_cpp, 9},
+    {"_plink4r_genotype_fill_ld_jobs_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_jobs_cpp, 8},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
 };
