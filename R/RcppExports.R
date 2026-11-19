@@ -5,6 +5,10 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
+fastgwa_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, Q, Vb, r, d, tau, ki, kj, kv, kdiag, threads, mem_gb, block) {
+    .Call(`_plink4r_fastgwa_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, Q, Vb, r, d, tau, ki, kj, kv, kdiag, threads, mem_gb, block)
+}
+
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
 }
@@ -95,6 +99,14 @@ pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 
 genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
     .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+}
+
+reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, eta_tol, max_iter, max_eval, mu_eps) {
+    .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, eta_tol, max_iter, max_eval, mu_eps)
+}
+
+reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval) {
+    .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
