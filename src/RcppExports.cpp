@@ -311,18 +311,17 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-// geno_bind_cpp
-SEXP geno_bind_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerVector& row_obj, const Rcpp::IntegerVector& row_idx, int threads);
-RcppExport SEXP _plink4r_geno_bind_cpp(SEXP ptrsSEXP, SEXP colsSEXP, SEXP row_objSEXP, SEXP row_idxSEXP, SEXP threadsSEXP) {
+// geno_merge_cpp
+Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerMatrix& rows, int threads);
+RcppExport SEXP _plink4r_geno_merge_cpp(SEXP ptrsSEXP, SEXP colsSEXP, SEXP rowsSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< Rcpp::List >::type ptrs(ptrsSEXP);
     Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type cols(colsSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type row_obj(row_objSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type row_idx(row_idxSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type rows(rowsSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_bind_cpp(ptrs, cols, row_obj, row_idx, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_merge_cpp(ptrs, cols, rows, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -468,7 +467,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_take_cpp", (DL_FUNC) &_plink4r_geno_take_cpp, 5},
-    {"_plink4r_geno_bind_cpp", (DL_FUNC) &_plink4r_geno_bind_cpp, 5},
+    {"_plink4r_geno_merge_cpp", (DL_FUNC) &_plink4r_geno_merge_cpp, 4},
     {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 4},
     {"_plink4r_geno_miss_cpp", (DL_FUNC) &_plink4r_geno_miss_cpp, 1},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},

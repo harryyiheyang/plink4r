@@ -464,137 +464,137 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
   return g;
 }
 
-// A new geno bound from the objects ptrs; each cell is copied as stored (H, D and the rows of the missing
-// cells; nothing is refilled). The parts of a column must share the unit of D.
-//  - row_obj empty: column c is, over the objects k with cols(k, c) >= 0 in their order, column cols(k, c) of
-//    object k with all its rows, one below the other (binding columns: one object per column, all with the
-//    same rows; binding rows: every object in every column); every column must reach the same number of rows.
-//  - row_obj / row_idx given (0-based object and row of every output row): output row r of column c is row
-//    row_idx[r] of column cols(row_obj[r], c) of object row_obj[r] (rows chosen, ordered or dropped).
+// A new geno merged from the objects ptrs. cols(k, c) / rows(k, r) (0-based, -1 = none) give the column of
+// object k that is output column c and the row of object k that is output row r. Cell (r, c) is copied as
+// stored (H, D, and whether it is a missing cell) from the first object k with rows(k, r) >= 0 and
+// cols(k, c) >= 0. A cell no object holds becomes a missing cell of the result, filled with the observed mean
+// of its column (over the cells copied that are not missing cells; 0 when there is none). The objects of a
+// column must share the unit of D. A column held by one object in the output row order (rows(k, r) = r, all
+// its rows) is copied word by word. Returns list(ptr, uncovered = cells no object holds, per column).
 // [[Rcpp::export]]
-SEXP geno_bind_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerVector& row_obj,
-                   const Rcpp::IntegerVector& row_idx, int threads) {
+Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerMatrix& rows,
+                          int threads) {
   threads = resolve_threads(threads);
-  const std::size_t K = ptrs.size(), p = cols.ncol();
-  if (!K || static_cast<std::size_t>(cols.nrow()) != K) Rcpp::stop("cols must have one row per object.");
+  const std::size_t K = ptrs.size(), p = cols.ncol(), n = rows.ncol();
+  if (!K || static_cast<std::size_t>(cols.nrow()) != K || static_cast<std::size_t>(rows.nrow()) != K)
+    Rcpp::stop("cols and rows must have one row per object.");
   const int* cm = cols.begin();
+  const int* rm = rows.begin();
   auto col = [cm, K](std::size_t k, std::size_t c) { return cm[k + c * K]; };
+  auto row = [rm, K](std::size_t k, std::size_t r) { return rm[k + r * K]; };
   std::vector<const Geno*> a(K);
   for (std::size_t k = 0; k < K; ++k) a[k] = Rcpp::XPtr<Geno>(static_cast<SEXP>(ptrs[k])).get();
-  const bool pick = row_obj.size() > 0;
-  if (row_obj.size() != row_idx.size()) Rcpp::stop("row_obj and row_idx must have the same length.");
-  std::size_t n = pick ? static_cast<std::size_t>(row_obj.size()) : 0;
-  const int* ro = row_obj.begin();
-  const int* ri = row_idx.begin();
-  std::vector<char> used(K, pick ? 0 : 1);
-  for (std::size_t r = 0; r < (pick ? n : 0); ++r) {
-    if (ro[r] < 0 || static_cast<std::size_t>(ro[r]) >= K || ri[r] < 0 || static_cast<std::size_t>(ri[r]) >= a[ro[r]]->n)
-      Rcpp::stop("rows out of range.");
-    used[ro[r]] = 1;
-  }
+  std::vector<char> ident(K, 1);  // object k holds exactly the output rows, in their order
   bool dosage = false;
+  for (std::size_t k = 0; k < K; ++k) {
+    dosage = dosage || a[k]->dosage;
+    if (a[k]->n != n) ident[k] = 0;
+    for (std::size_t r = 0; r < n; ++r) {
+      const int i = row(k, r);
+      if (i >= 0 && static_cast<std::size_t>(i) >= a[k]->n) Rcpp::stop("rows out of range.");
+      if (i != static_cast<int>(r)) ident[k] = 0;
+    }
+  }
   for (std::size_t c = 0; c < p; ++c) {
-    std::size_t nc = 0;
     double unit = 0;
     bool first = true;
     for (std::size_t k = 0; k < K; ++k) {
       const int j = col(k, c);
-      if (j < 0) {
-        if (pick && used[k]) Rcpp::stop("With rows chosen every object needs every column.");
-        continue;
-      }
+      if (j < 0) continue;
       if (static_cast<std::size_t>(j) >= a[k]->p) Rcpp::stop("cols out of range.");
       const double u = a[k]->D[j].unit;
       if (!first && u != unit) Rcpp::stop("The objects hold column %d in different units (hard calls / dosages).", static_cast<int>(c) + 1);
       unit = u;
       first = false;
-      nc += a[k]->n;
     }
     if (first) Rcpp::stop("A column comes from no object.");
-    if (!pick) {
-      if (c == 0) n = nc;
-      if (nc != n) Rcpp::stop("Every column must reach the same number of rows.");
-    }
   }
-  for (std::size_t k = 0; k < K; ++k) dosage = dosage || a[k]->dosage;
   Rcpp::XPtr<Geno> g(new Geno, true);
   init_geno(*g, n, p, a[0]->mean);
   g->dosage = dosage;
   const std::size_t W = g->G.words;
   std::vector<std::size_t> base(K + 1, 0);  // start of object k in the per-thread row buffers
   for (std::size_t k = 0; k < K; ++k) base[k + 1] = base[k] + a[k]->n;
+  Rcpp::NumericVector unc(p);
+  double* uncp = unc.begin();
   #pragma omp parallel num_threads(threads)
   {
-    std::vector<std::int16_t> qbuf(pick ? base[K] : 0, 0);
-    std::vector<unsigned char> mbuf(pick ? base[K] : 0, 0);
+    std::vector<std::int16_t> qbuf, qo;
+    std::vector<unsigned char> mbuf, ho, st;  // st: 0 copied, 1 copied missing cell, 2 held by no object
+    std::vector<std::size_t> ks;
     #pragma omp for schedule(dynamic, 16)
     for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(p); ++cc) {
       const std::size_t c = static_cast<std::size_t>(cc);
       u64* lo = g->G.bits.data() + 2 * c * W;
       u64* hi = lo + W;
       std::vector<std::uint32_t>& Mc = g->M[c];
+      ks.clear();
+      for (std::size_t k = 0; k < K; ++k) if (col(k, c) >= 0) ks.push_back(k);
+      g->D[c].unit = a[ks[0]]->D[col(ks[0], c)].unit;
       DBuilder db(*g, c);
-      if (pick) {
-        bool started = false;
-        for (std::size_t k = 0; k < K; ++k) {
-          if (!used[k]) continue;
+      if (ident[ks[0]]) {  // the first object holds every row in order: its column as it is
+        const Geno& s = *a[ks[0]];
+        const std::size_t j = static_cast<std::size_t>(col(ks[0], c));
+        const DCol& dc = s.D[j];
+        std::copy(s.G.lo(j), s.G.lo(j) + (n + 63) / 64, lo);
+        std::copy(s.G.hi(j), s.G.hi(j) + (n + 63) / 64, hi);
+        g->D[c].q.reserve(dc.q.size());
+        std::size_t e = 0;
+        for (std::size_t w = 0; w < dc.mask.size(); ++w)
+          for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) {
+            const std::size_t i = 64 * w + __builtin_ctzll(bits);
+            db.add(i, h_at(s.G, j, i), dc.q[e++]);
+          }
+        Mc = s.M[j];
+      } else {
+        if (qbuf.empty()) { qbuf.assign(base[K], 0); mbuf.assign(base[K], 0); qo.resize(n); ho.resize(n); st.resize(n); }
+        for (std::size_t k : ks) {
           const DCol& dc = a[k]->D[col(k, c)];
-          if (!started) { g->D[c].unit = dc.unit; started = true; }
           std::size_t e = 0;
           for (std::size_t w = 0; w < dc.mask.size(); ++w)
             for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) qbuf[base[k] + 64 * w + __builtin_ctzll(bits)] = dc.q[e++];
           for (std::uint32_t i : a[k]->M[col(k, c)]) mbuf[base[k] + i] = 1;
         }
+        const double unit = g->D[c].unit;
+        const int us = unit_steps(unit);  // observed sum exactly in int16 steps (an appended column: in double)
+        std::int64_t ss = 0;
+        double so = 0.0;
+        std::size_t no = 0, nu = 0;
         for (std::size_t r = 0; r < n; ++r) {
-          const std::size_t k = static_cast<std::size_t>(ro[r]), i = static_cast<std::size_t>(ri[r]);
-          const unsigned int h = h_at(a[k]->G, static_cast<std::size_t>(col(k, c)), i);
-          const int q = qbuf[base[k] + i];
+          st[r] = 2;
+          for (std::size_t k : ks) {
+            const int i = row(k, r);
+            if (i < 0) continue;
+            ho[r] = static_cast<unsigned char>(h_at(a[k]->G, static_cast<std::size_t>(col(k, c)), static_cast<std::size_t>(i)));
+            qo[r] = qbuf[base[k] + i];
+            st[r] = mbuf[base[k] + i];
+            if (!st[r]) {
+              if (us) ss += us * static_cast<std::int64_t>(ho[r]) + qo[r];
+              else so += ho[r] + qo[r] * unit;
+              ++no;
+            }
+            break;
+          }
+          if (st[r] == 2) ++nu;
+        }
+        unsigned int hf = 0;
+        int qf = 0;
+        if (us) so = static_cast<double>(ss) / us;
+        if (nu) quantize_fill(no ? so / static_cast<double>(no) : 0.0, unit, hf, qf);
+        uncp[c] = static_cast<double>(nu);
+        for (std::size_t r = 0; r < n; ++r) {
+          const unsigned int h = st[r] == 2 ? hf : ho[r];
+          const int q = st[r] == 2 ? qf : qo[r];
           if (h == 1u) lo[r >> 6] |= u64(1) << (r & 63u);
           else if (h == 2u) hi[r >> 6] |= u64(1) << (r & 63u);
           if (q) db.add(r, h, q);
-          if (mbuf[base[k] + i]) Mc.push_back(static_cast<std::uint32_t>(r));
+          if (st[r]) Mc.push_back(static_cast<std::uint32_t>(r));
         }
-        for (std::size_t k = 0; k < K; ++k) {
-          if (!used[k]) continue;
+        for (std::size_t k : ks) {
           const DCol& dc = a[k]->D[col(k, c)];
           for (std::size_t w = 0; w < dc.mask.size(); ++w)
             for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) qbuf[base[k] + 64 * w + __builtin_ctzll(bits)] = 0;
           for (std::uint32_t i : a[k]->M[col(k, c)]) mbuf[base[k] + i] = 0;
-        }
-      } else {
-        std::size_t r0 = 0, nd = 0, nm = 0;
-        for (std::size_t k = 0; k < K; ++k)
-          if (col(k, c) >= 0) { nd += a[k]->D[col(k, c)].q.size(); nm += a[k]->M[col(k, c)].size(); }
-        Mc.reserve(nm);
-        bool started = false;
-        for (std::size_t k = 0; k < K; ++k) {
-          if (col(k, c) < 0) continue;
-          const Geno& s = *a[k];
-          const std::size_t j = static_cast<std::size_t>(col(k, c)), nk = s.n;
-          const DCol& dc = s.D[j];
-          if (!started) { g->D[c].unit = dc.unit; g->D[c].q.reserve(nd); started = true; }
-          const u64* slo = s.G.lo(j);
-          const u64* shi = s.G.hi(j);
-          if (r0 % 64 == 0) {  // word-aligned part: the planes are copied word by word
-            const std::size_t nw = (nk + 63) / 64;
-            std::copy(slo, slo + nw, lo + r0 / 64);
-            std::copy(shi, shi + nw, hi + r0 / 64);
-          } else {
-            for (std::size_t i = 0; i < nk; ++i) {
-              const std::size_t r = r0 + i;
-              const u64 bit = u64(1) << (r & 63u);
-              if ((slo[i >> 6] >> (i & 63u)) & 1u) lo[r >> 6] |= bit;
-              if ((shi[i >> 6] >> (i & 63u)) & 1u) hi[r >> 6] |= bit;
-            }
-          }
-          std::size_t e = 0;
-          for (std::size_t w = 0; w < dc.mask.size(); ++w)
-            for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) {
-              const std::size_t i = 64 * w + __builtin_ctzll(bits);
-              db.add(r0 + i, h_at(s.G, j, i), dc.q[e++]);
-            }
-          for (std::uint32_t i : s.M[j]) Mc.push_back(static_cast<std::uint32_t>(r0 + i));
-          r0 += nk;
         }
       }
       db.finish();
@@ -603,7 +603,7 @@ SEXP geno_bind_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp:
     }
   }
   finish_stats(*g);
-  return g;
+  return Rcpp::List::create(Rcpp::Named("ptr") = g, Rcpp::Named("uncovered") = unc);
 }
 
 namespace {

@@ -90,9 +90,11 @@ geno_fill <- function(X, fill, para = list()) {
 # The LD step of geno_fill(): for every panel folder, the jobs (object x LD block) are listed first, then each
 # eigen.bin is read once and its jobs are solved one after the other, written straight into the stores ptr.
 # A job's working rows are the SNPs of the object's group in that block (in the object and in the panel,
-# anchor strictly inside (0, 1)); a job without a missing cell is not run. Returns one entry per job run.
+# anchor strictly inside (0, 1)); a job without a missing cell is not listed, so a block without one is never
+# read. Returns one entry per job run.
 .fill_ld <- function(X, ptr, groups, P) {
-  has_ld <- which(!vapply(groups, function(g) is.null(g$ld), NA))
+  # an object whose group has no missing cell is skipped here, before any panel table or eigen.bin is read
+  has_ld <- which(vapply(groups, function(g) !is.null(g$ld) && any(g$n_miss[g$cols] > 0), NA))
   if (!length(has_ld)) return(list())
   if (any(vapply(X[has_ld], function(x) x$dosage, NA))) stop("an LD fill needs hard calls: the object holds dosages.", call. = FALSE)
   .check_delta(P$delta)
@@ -139,7 +141,7 @@ geno_fill <- function(X, fill, para = list()) {
 #' by several groups has its variant and sample tables read once. E.g.
 #' `list(X1 = list(pgenfile = f, snp = snp1, ld = dir), X2 = list(pgenfile = f, snp = snp2))` returns `X1`,
 #' the SNPs of `snp1` filled from each other through the LD panel, and `X2`, the SNPs of `snp2` at their
-#' anchored value; [geno_cbind()] puts them side by side.
+#' anchored value; [geno_merge()] puts them side by side.
 #'
 #' @param fill A group, or a list of groups.
 #' @param sample Rows to open, as in `sample_vec` of [geno_open()]; `NULL` = all, in file order.

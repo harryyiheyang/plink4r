@@ -77,8 +77,8 @@ geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }
 
-geno_bind_cpp <- function(ptrs, cols, row_obj, row_idx, threads) {
-    .Call(`_plink4r_geno_bind_cpp`, ptrs, cols, row_obj, row_idx, threads)
+geno_merge_cpp <- function(ptrs, cols, rows, threads) {
+    .Call(`_plink4r_geno_merge_cpp`, ptrs, cols, rows, threads)
 }
 
 geno_fill_cpp <- function(ptr, fill_c, inplace, threads) {
