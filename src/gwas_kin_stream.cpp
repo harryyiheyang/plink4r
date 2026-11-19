@@ -1,4 +1,5 @@
-// fastgwa_stream_cpp: mixed-model association of every selected variant of a PGEN or BED with a sparse kinship
+// gwas_kin_stream_cpp: the kinship route of gwas(): mixed-model association of every selected variant of a PGEN or
+// BED with a sparse kinship
 // (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed.
 //
 // Null model (reml_tau_gaussian.cpp / reml_tau_binomial.cpp): V = diag(d) + tau K, Omega = V^-1,
@@ -167,7 +168,7 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 // samples, each pair once), kdiag (n). block: variants per thread (0 = from mem_gb).
 // Returns per variant n_obs, a1_sum, beta, se, status (0 ok, 1 monomorphic / all missing, 2 A <= 0).
 // [[Rcpp::export]]
-Rcpp::List fastgwa_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
+Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                               const Rcpp::NumericMatrix& Q, const Rcpp::NumericMatrix& Vb,
                               const Rcpp::NumericVector& r, const Rcpp::NumericVector& d, double tau,

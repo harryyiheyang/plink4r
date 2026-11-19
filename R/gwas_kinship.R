@@ -19,10 +19,12 @@
 #' @param pheno Name of the phenotype column. Logistic: coded 0/1 (or 1/2).
 #' @param covar Names of covariate columns (numeric, or factors / characters, expanded by `model.matrix`); an
 #'   intercept is always added. An externally estimated polygenic score is given here as a covariate.
-#' @param kinship The sparse kinship: a data.frame whose first three columns are two sample IDs and the value
-#'   (each related pair once; rows with the same ID twice give the diagonal), or the prefix of a GCTA sparse GRM
-#'   (`<prefix>.grm.sp` and `<prefix>.grm.id`). Samples absent from it are unrelated to everyone, with diagonal
-#'   `para$diag`.
+#' @param kinship Pairwise kinship coefficients of the related pairs, as released by the UK Biobank
+#'   (`ID1 ID2 HetHet IBS0 Kinship`) and other biobanks: a data.frame or a file with one row per related pair,
+#'   the two sample IDs in its first two columns and the kinship coefficient in the column whose name starts with
+#'   "kin" (any case; or the third column of a three-column table). The matrix `K` is built here: `K_ij =
+#'   para$kin_scale` (2) times the coefficient of the pair, `K_ii = para$diag` (1), 0 for every pair not listed.
+#'   Pairs with a sample outside the analysis are dropped.
 #' @param family `"gaussian"` or `"binomial"`.
 #' @param id_col Column of `data` with the sample IDs.
 #' @param para named list overriding [reml_tau_para()].
@@ -40,43 +42,26 @@ reml_tau <- function(data, pheno, covar = NULL, kinship, family = c("gaussian", 
   c(nl$est, list(time = proc.time()[["elapsed"]] - t0))
 }
 
-#' Defaults of [reml_tau()] and [fastgwa()]
+#' Defaults of [reml_tau()] and of [gwas()] with `kinship`
 #'
 #' h_max 0.999 upper end of the search for h;
 #' tol 1e-6 Brent tolerance and change of h at convergence; eta_tol 1e-6 largest change of the linear
 #' predictor at convergence (logistic); max_iter 50 outer iterations (logistic); max_eval 100 likelihood
-#' evaluations per Brent search; mu_eps 1e-10 bound of the fitted probabilities; diag 1 diagonal of the kinship
-#' for samples without a diagonal entry.
+#' evaluations per Brent search; mu_eps 1e-10 bound of the fitted probabilities; kin_scale 2: K_ij = kin_scale x
+#' the pairwise kinship coefficient (0.25 for full siblings gives 0.5); diag 1 diagonal of K.
 #' @export
 reml_tau_para <- function() {
   list(h_max = 0.999, tol = 1e-6, eta_tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
-       diag = 1)
+       kin_scale = 2, diag = 1)
 }
 
-#' Mixed-model association of one trait with a sparse kinship (fastGWA)
-#'
-#' Tests every selected variant of a PGEN or BED for association with one phenotype in a sample with relatives,
-#' as fastGWA (Jiang et al. 2019): the null model `y ~ covar + b`, `b ~ N(0, tau K)` is fitted once by
-#' [reml_tau()] (linear, or logistic on the IRLS working scale), then variants are streamed as in [gwas()].
-#' With `V` the covariance of the (working) response under the null model and
-#' `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1`, a variant `g` gets `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2`
-#' and `CHISQ = BETA^2 / SE^2` (1 df): generalised least squares for the linear model, and the same on the working
-#' response (one step from the null model, a score test) for the logistic one. `g' P g` is exact (no
-#' GRAMMAR-GAMMA approximation): the samples without relatives contribute a weighted sum of squares, the related
-#' ones one sparse triangular solve per variant. A missing call takes the variant's mean among the analysed
-#' samples. With `tau = 0` the result is the ordinary regression / score test.
-#'
-#' @inheritParams gwas
-#' @inheritParams reml_tau
-#' @return data.table with one row per variant: `CHR`, `POS`, `ID`, `A1`, `A2`, `N`, `A1_FREQ`, `BETA`, `SE`,
-#'   `CHISQ`, `P`. Attribute `info`: the null model (`tau`, `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`,
-#'   `converged`), samples, covariate rank, block size, threads, memory budget, SIMD set, explicit projections,
-#'   monomorphic and skipped variants, times.
-#' @export
-fastgwa <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, kinship,
-                    family = c("gaussian", "binomial"), id_col = "IID", snp_vec = NULL, threads = 0L, mem_gb = 0,
-                    block = 0L, para = list()) {
-  family <- match.arg(family)
+# The kinship route of gwas(): the null model y ~ covar + b, b ~ N(0, tau K) is fitted once (.reml_null), then
+# variants are streamed (gwas_kin_stream_cpp). With V the covariance of the (working) response under the null
+# model and P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1, a variant g gets BETA = g' P y / g' P g and SE = (g' P g)^-1/2
+# (generalised least squares; for the logistic model on the working response, one step from the null model).
+# g' P g is exact (no GRAMMAR-GAMMA approximation). Same columns as the route without kinship.
+.gwas_kinship <- function(pfile, bfile, data, pheno, covar, kinship, family, id_col, snp_vec, threads, mem_gb, block,
+                          para) {
   t0 <- proc.time()[["elapsed"]]
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
   P <- .reml_para(para)
@@ -109,16 +94,17 @@ fastgwa <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, kinsh
   nl <- .reml_null(D, kinship, family, P)
   t1 <- proc.time()[["elapsed"]]
   f <- nl$fit; kin <- nl$kin
-  res <- fastgwa_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
+  res <- gwas_kin_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
                             as.integer(D$srow - 1L), f$Q, f$Vb, f$r, f$d, f$tau, kin$i, kin$j, kin$v, kin$diag,
                             threads, mem_gb, as.integer(block))
   out <- var[vrow, list(CHR, POS, ID, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs), BETA = res$beta, SE = res$se)]
-  out[, CHISQ := (BETA / SE)^2]
-  out[, P := stats::pchisq(CHISQ, 1, lower.tail = FALSE)]
+  stat <- if (family == "gaussian") "T" else "Z"
+  out[, (stat) := BETA / SE]
+  out[, P := 2 * stats::pnorm(-abs(get(stat)))]
   t2 <- proc.time()[["elapsed"]]
   data.table::setattr(out, "info", c(nl$est[setdiff(names(nl$est), "beta")],
-                                     list(family = family, covariate_rank = ncol(D$X), block = res$block,
+                                     list(samples = nl$est$n, family = family, covariate_rank = ncol(D$X), block = res$block,
                                           threads = res$threads, mem_gb = res$mem_gb, simd = res$simd,
                                           dosage = res$dosage, explicit_projection = res$explicit,
                                           monomorphic = sum(res$status == 1L), singular = sum(res$status == 2L),
@@ -180,39 +166,38 @@ fastgwa <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, kinsh
   list(ids = as.character(d[[id_col]]), y = y, X = X, srow = srow)
 }
 
-# The kinship over the analysis samples `ids`: off-diagonal pairs (i, j 0-based, each pair once) with their
-# values, and the diagonal (diag_default where not given). Pairs with a sample outside `ids` are dropped.
-.kin_prepare <- function(kinship, ids, diag_default) {
+# K over the analysis samples `ids` from pairwise kinship coefficients (a data.frame or a file: two ID columns
+# first, the coefficient in the column named kin* or the third of three): off-diagonal pairs (i, j 0-based, each
+# pair once) with K_ij = scale x coefficient, and the diagonal (diag for everyone). Pairs with a sample outside
+# `ids`, self pairs and zero coefficients are dropped; a repeated pair keeps its first row.
+.kin_prepare <- function(kinship, ids, scale, diag) {
   if (is.character(kinship) && length(kinship) == 1L) {
-    idf <- paste0(kinship, ".grm.id"); spf <- paste0(kinship, ".grm.sp")
-    if (!file.exists(idf) || !file.exists(spf)) stop("No ", idf, " / ", spf, call. = FALSE)
-    gid <- data.table::fread(idf, header = FALSE, colClasses = "character")
-    sp <- data.table::fread(spf, header = FALSE)
-    k <- data.table::data.table(a = gid[[ncol(gid)]][sp[[1L]] + 1L], b = gid[[ncol(gid)]][sp[[2L]] + 1L], v = sp[[3L]])
-  } else {
-    if (!is.data.frame(kinship) || ncol(kinship) < 3L)
-      stop("kinship must be a data.frame (ID1, ID2, value) or a GCTA sparse GRM prefix.", call. = FALSE)
-    k <- data.table::data.table(a = as.character(kinship[[1L]]), b = as.character(kinship[[2L]]),
-                                v = as.numeric(kinship[[3L]]))
+    if (!file.exists(kinship)) stop("kinship file not found: ", kinship, call. = FALSE)
+    kinship <- data.table::fread(kinship)
   }
-  if (anyNA(k$v)) stop("kinship has missing values.", call. = FALSE)
-  i <- match(k$a, ids); j <- match(k$b, ids)
-  ok <- !is.na(i) & !is.na(j)
-  i <- i[ok]; j <- j[ok]; v <- k$v[ok]
-  dg <- rep(as.numeric(diag_default), length(ids))
-  self <- i == j
-  dg[i[self]] <- v[self]
-  i <- i[!self]; j <- j[!self]; v <- v[!self]
+  if (!is.data.frame(kinship) || ncol(kinship) < 3L)
+    stop("kinship must be a table of related pairs: two ID columns and the kinship coefficient.", call. = FALSE)
+  vc <- grep("^kin", names(kinship), ignore.case = TRUE)
+  vc <- vc[vc > 2L]
+  if (!length(vc)) {
+    if (ncol(kinship) != 3L) stop("kinship has no column named kin*; give ID1, ID2 and the coefficient.", call. = FALSE)
+    vc <- 3L
+  }
+  v <- as.numeric(kinship[[vc[1L]]])
+  if (anyNA(v)) stop("kinship has missing coefficients.", call. = FALSE)
+  i <- match(as.character(kinship[[1L]]), ids); j <- match(as.character(kinship[[2L]]), ids)
+  ok <- !is.na(i) & !is.na(j) & i != j & v != 0
+  i <- i[ok]; j <- j[ok]; v <- v[ok]
   lo <- pmin(i, j); hi <- pmax(i, j)
-  dup <- duplicated(data.frame(lo, hi))
-  nz <- !dup & v != 0
-  list(i = as.integer(lo[nz] - 1L), j = as.integer(hi[nz] - 1L), v = v[nz], diag = dg)
+  keep <- !duplicated(data.frame(lo, hi))
+  list(i = as.integer(lo[keep] - 1L), j = as.integer(hi[keep] - 1L), v = as.numeric(scale) * v[keep],
+       diag = rep(as.numeric(diag), length(ids)))
 }
 
-# Null model of reml_tau() and fastgwa(): the estimates (est) and the quantities of the association stream (fit:
+# Null model of reml_tau() and of gwas() with kinship: the estimates (est) and the quantities of the association stream (fit:
 # tau, d, r, Q, Vb) with the kinship of its V = diag(d) + tau K (kin; scaled by W^-1/2 for the logistic model).
 .reml_null <- function(D, kinship, family, P) {
-  kin <- .kin_prepare(kinship, D$ids, P$diag)
+  kin <- .kin_prepare(kinship, D$ids, P$kin_scale, P$diag)
   n <- length(D$y)
   if (family == "gaussian") {
     f <- reml_tau_gaussian_cpp(D$y, D$X, kin$i, kin$j, kin$v, kin$diag, P$h_max, P$tol, as.integer(P$max_eval))

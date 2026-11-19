@@ -26,7 +26,18 @@
 #' @param family `"gaussian"` (linear) or `"binomial"` (logistic).
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
-#' @param robust Linear only: add sandwich standard errors.
+#' @param robust Linear only: add sandwich standard errors (not with `kinship`).
+#' @param kinship `NULL` (default: the samples are taken as unrelated), or the pairwise kinship coefficients of
+#'   the related pairs (see [reml_tau()]). With `kinship` the test is that of a mixed model with a sparse kinship
+#'   matrix `K` (as fastGWA, Jiang et al. 2019): the null model `y ~ covar + b`, `b ~ N(0, tau K)` is fitted once
+#'   by REML ([reml_tau()]: linear, or logistic on the IRLS working scale), and with `V` the covariance of the
+#'   (working) response and `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least
+#'   squares `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2` (exact, no GRAMMAR-GAMMA approximation), `T` or `Z` =
+#'   `BETA / SE` and its normal `P`. Samples without a listed relative enter as in the ordinary test; with no
+#'   related pair among the analysed samples the logistic result is that of `kinship = NULL`, and the linear one
+#'   differs only by using the null-model variance and the normal distribution. The attribute `info` then also
+#'   holds `tau`, `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`.
+#' @param para With `kinship`: named list overriding [reml_tau_para()].
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param mem_gb Memory budget in GB that sets the block size; 0 takes it from [plink4r_resources()].
 #' @param block Variants per thread and block; 0 = the largest that fits `mem_gb` (at most 4096).
@@ -38,8 +49,15 @@
 #'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
 gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
-                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L) {
+                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
+                 kinship = NULL, para = list()) {
   family <- match.arg(family)
+  if (!is.null(kinship)) {
+    if (robust) stop("Robust standard errors are not available with kinship.", call. = FALSE)
+    return(.gwas_kinship(pfile, bfile, data, pheno, covar, kinship, family, id_col, snp_vec, threads, mem_gb, block,
+                         para))
+  }
+  if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
                   robust, center = FALSE, threads, mem_gb, block)
   res <- r$res; out <- r$out

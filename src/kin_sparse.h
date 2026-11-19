@@ -10,7 +10,7 @@
 //              projection factors Q = Omega X L^-T, Vb = X L^-T (X' Omega X = L L'), so that for any g
 //              g' P g = g' Omega g - |Q' g|^2.
 // Shared by the REML estimators of tau (reml_tau_gaussian.cpp, reml_tau_binomial.cpp) and the association
-// stream (fastgwa_stream.cpp).
+// stream (gwas_kin_stream.cpp).
 #ifndef PLINK4R_KIN_SPARSE_H
 #define PLINK4R_KIN_SPARSE_H
 
