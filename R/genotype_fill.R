@@ -66,7 +66,7 @@ geno_fill <- function(X, fill, para = list()) {
     rep_drop[[k]] <- data.table::data.table(group = rep(k, sum(is.na(mt$j))), row = which(is.na(mt$j)))
   }
   f[m == 0] <- NaN
-  ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), FALSE, P$threads)
+  ptr <- geno_fill_cpp(X$ptr, f, FALSE, P$threads)
   rep_snp <- data.table::rbindlist(rep_snp)
   ld_out <- .fill_ld(X, ptr, groups, m, P)
   if (length(ld_out)) {
@@ -201,7 +201,7 @@ genotype_fill <- function(fill, sample = NULL, scale = TRUE, para = list()) {
 # Per-column values f written into the missing cells of X (NaN = keep the current fill); a new object, or X's
 # own store when inplace (only for an object nothing else references).
 .geno_fill_value <- function(X, f, impute, inplace = FALSE, threads = X$threads) {
-  ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), inplace, .threads(threads))
+  ptr <- geno_fill_cpp(X$ptr, f, inplace, .threads(threads))
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
             threads = X$threads, file = X$file, appended = X$appended)
 }

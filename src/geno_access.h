@@ -1,4 +1,4 @@
-// Access to a geno object (struct Geno stays in geno.cpp) for the other compilation units.
+// Access to a geno object (the store is in geno_store.cpp) for the other compilation units.
 #ifndef PLINK4R_GENO_ACCESS_H
 #define PLINK4R_GENO_ACCESS_H
 

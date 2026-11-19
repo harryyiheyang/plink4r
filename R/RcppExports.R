@@ -9,18 +9,6 @@ fill_value_cpp <- function(n, s_obs, m, af, cnst, mean_default, none = 0.0, lo =
     .Call(`_plink4r_fill_value_cpp`, n, s_obs, m, af, cnst, mean_default, none, lo, hi)
 }
 
-geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
-}
-
-geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads)
-}
-
-geno_info_cpp <- function(ptr) {
-    .Call(`_plink4r_geno_info_cpp`, ptr)
-}
-
 geno_xtx_cpp <- function(ptr, threads) {
     .Call(`_plink4r_geno_xtx_cpp`, ptr, threads)
 }
@@ -31,10 +19,6 @@ geno_xtm_cpp <- function(ptr, M, threads) {
 
 geno_mx_cpp <- function(ptr, B, threads) {
     .Call(`_plink4r_geno_mx_cpp`, ptr, B, threads)
-}
-
-geno_append_cpp <- function(ptr, M, threads) {
-    .Call(`_plink4r_geno_append_cpp`, ptr, M, threads)
 }
 
 geno_cross_cpp <- function(ptr_a, ptr_b, threads) {
@@ -61,22 +45,6 @@ geno_xtwx_bin_cpp <- function(ptr, w, center, div, threads) {
     .Call(`_plink4r_geno_xtwx_bin_cpp`, ptr, w, center, div, threads)
 }
 
-geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
-    .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
-}
-
-geno_fill_cpp <- function(ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads) {
-    .Call(`_plink4r_geno_fill_cpp`, ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads)
-}
-
-geno_miss_cpp <- function(ptr) {
-    .Call(`_plink4r_geno_miss_cpp`, ptr)
-}
-
-resources_cpp <- function(threads, mem_gb) {
-    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
-}
-
 score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk) {
     .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk)
 }
@@ -87,6 +55,38 @@ score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eige
 
 simd_isa_cpp <- function() {
     .Call(`_plink4r_simd_isa_cpp`)
+}
+
+geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
+    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
+}
+
+geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads) {
+    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads)
+}
+
+geno_info_cpp <- function(ptr) {
+    .Call(`_plink4r_geno_info_cpp`, ptr)
+}
+
+geno_append_cpp <- function(ptr, M, threads) {
+    .Call(`_plink4r_geno_append_cpp`, ptr, M, threads)
+}
+
+geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
+    .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
+}
+
+geno_fill_cpp <- function(ptr, fill_c, inplace, threads) {
+    .Call(`_plink4r_geno_fill_cpp`, ptr, fill_c, inplace, threads)
+}
+
+geno_miss_cpp <- function(ptr) {
+    .Call(`_plink4r_geno_miss_cpp`, ptr)
+}
+
+resources_cpp <- function(threads, mem_gb) {
+    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
 }
 
 genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
