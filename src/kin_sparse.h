@@ -1,27 +1,26 @@
 // The null model of a mixed model with a sparse kinship K over n samples, in the one form both families use:
-//   V = diag(d) + tau K,   Omega = V^-1
-// (linear model: d = s2e for everyone; logistic model on the working scale: d_i = 1 / w_i).
+//   Omega = V^-1 = S H(h)^-1 S,   H(h) = (1 - h) I + h K,   S = diag(s)
+// (linear model: s = 1 / sigma; logistic model on the working scale: s_i = sqrt(w_i)).
 //
-// Most samples have no relative in the data: their row of K is its diagonal entry kd alone, so V is the scalar
-// d_i + tau kd there. The related samples (any off-diagonal entry; a few thousand in a biobank) are held together
-// as one sparse symmetric matrix V_rr = diag(d_r) + tau K_rr, factorised by a sparse Cholesky (Eigen
-// SimplicialLLT, fill-reducing ordering analysed once, numeric factorisation per tau); no splitting into families.
+// Most samples have no relative in the data: their row of K is its diagonal entry kd alone, so H is the scalar
+// 1 - h + h kd there. The related samples (any off-diagonal entry; a few thousand in a biobank) are held together
+// as one sparse symmetric matrix H_rr, factorised by a sparse Cholesky (Eigen SimplicialLLT, fill-reducing
+// ordering analysed once, numeric factorisation per h); no splitting into families.
 //
-// With Z = [X | y] (set_data) a fit is generalised least squares from Z' Omega Z = Z_u' diag(om) Z_u +
-// |L^-1 Z_r|^2 (om_i = 1 / (d_i + tau kd), V_rr = L L'): beta, y' P y, log|X' Omega X|, log|V|.
-//   solve_const(tau, d0)  d the same for everyone: Z_u' Z_u is formed once (cross), so a fit touches the related
-//                         samples' rows only;
-//   solve(tau, d)         d per sample: the weighted cross-product over all samples is formed at every call.
+// Nothing of size n is redone per h. With the scaled data Z = [S X | S y] (set_data, once per working data):
+//   Gu = Z_u' Z_u (unrelated samples),  Zr = Z_r (related rows),
+// and at any h (solve), with c = 1 / (1 - h + h kd) and H_rr = L L':
+//   Z' H^-1 Z = c Gu + |L^-1 Zr|^2  ->  X' Omega X, X' Omega y, y' Omega y  ->  beta, y' P y, log|X' Omega X|,
+//   log|H| = (n - nr) log(1 - h + h kd) + 2 sum log L_ii.
 // project() then writes, once, what the association stream reads (gwas_kin_stream.cpp), with X' Omega X = La La':
-//   Vb = X La^-T,  L1 = [Q | r],  Q = Omega Vb,  r = Omega (y - X beta) = P y,  om (0 at related samples),
-// so that for any g:  g' P g = sum om_i g_i^2 + |L^-1 g_r|^2 - |Q' g|^2.
+//   Vb = X La^-T,  L1 = [Q | r],  Q = Omega Vb,  r = Omega (y - X beta) = P y,  om_i = s_i^2 c (0 if related),
+// so that for any g:  g' P g = sum om_i g_i^2 + |L^-1 (s_r o g_r)|^2 - |Q' g|^2.
 // One KinNull is made by a REML estimator (reml_tau_gaussian.cpp, reml_tau_binomial.cpp) and handed to the stream
 // by external pointer: the kinship is built once and its factor at the estimate is the one the stream uses.
 #ifndef PLINK4R_KIN_SPARSE_H
 #define PLINK4R_KIN_SPARSE_H
 
 #include <RcppEigen.h>
-#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -75,72 +74,83 @@ inline Kin build_kin(int n, const int* ki, const int* kj, const double* kv, std:
 struct KinNull {
   Kin K;
   int n = 0, p = 0;
-  int threads = 1;          // of solve()
 
-  // ---- V_rr = diag(d_r) + tau K_rr = L L'
-  KinSp V;                  // pattern of Krr
-  std::vector<int> dpos;    // position of each diagonal entry among the values of V
+  // ---- H_rr(h) = L L'
+  KinSp H;                  // pattern of Krr, values of H_rr(h)
+  std::vector<int> dpos;    // position of each diagonal entry among the values of H
   Eigen::SimplicialLLT<KinSp> llt;
-  std::vector<int> rs;      // related samples in the order of the factor
-  double logdet = 0;        // log|V| (all samples)
+  double h = 0, c = 1, logdet = 0;  // c = 1 / (1 - h + h kd); logdet = log|H(h)|
 
-  // ---- data Z = [X | y]
-  const double* X = nullptr;
-  const double* y = nullptr;
+  // ---- scaled data
   Eigen::MatrixXd Gall, Gu, Zr, Wr, G;  // Z'Z, Z_u'Z_u ((p + 1) x (p + 1)); Z_r, L^-1 Z_r (nr x (p + 1))
-  std::vector<double> Zs, sq;           // n x (p + 1), n: rows of Z scaled by sqrt(om) (solve)
 
-  // ---- the fit
-  Eigen::LLT<Eigen::MatrixXd> xox;      // X' Omega X = La La'
+  // ---- the fit at h
+  Eigen::LLT<Eigen::MatrixXd> xox;      // X' S H^-1 S X = La La'
   Eigen::VectorXd beta;
-  double quad = 0, logdet_xox = 0;      // y' P y; log|X' Omega X|
-  std::vector<double> om;               // n: 1 / (d_i + tau kd), 0 at related samples
+  double quad = 0, logdet_xox = 0;      // (S y)' P_H (S y); log|X' S H^-1 S X|
 
   // ---- for the association stream
-  std::vector<double> L1, Vb;           // n x (p + 1): Q, r; n x p
+  std::vector<double> om, L1, Vb;       // n; n x (p + 1): Q, r; n x p
+  std::vector<int> rs;                  // related samples in the order of the factor
+  std::vector<double> ss;               // their scale s
 
   void init(Kin&& kin) {
     K = std::move(kin);
     n = K.n;
-    V = K.Krr;
+    H = K.Krr;
     dpos.resize(K.nr);
-    rs.resize(K.nr);
     for (int a = 0; a < K.nr; ++a)
-      for (int q = V.outerIndexPtr()[a]; q < V.outerIndexPtr()[a + 1]; ++q)
-        if (V.innerIndexPtr()[q] == a) dpos[a] = q;
-    if (K.nr == 0) return;
-    llt.analyzePattern(V);
-    for (int a = 0; a < K.nr; ++a) rs[llt.permutationP().indices()[a]] = K.rel[a];
+      for (int q = H.outerIndexPtr()[a]; q < H.outerIndexPtr()[a + 1]; ++q)
+        if (H.innerIndexPtr()[q] == a) dpos[a] = q;
+    if (K.nr > 0) llt.analyzePattern(H);
   }
 
-  // The data: X (n x pp column-major), y (n); both must stay where they are while the fits are made.
-  void set_data(const double* Xp, const double* yp, int pp) {
-    X = Xp; y = yp; p = pp;
-    const int nr = K.nr, m = p + 1;
-    Zr.resize(nr, m);
-    for (int cc = 0; cc < m; ++cc) {
-      const double* col = cc < p ? X + static_cast<std::size_t>(cc) * n : y;
-      for (int a = 0; a < nr; ++a) Zr(a, cc) = col[K.rel[a]];
+  // H(h) factorised; false when it is not positive definite.
+  bool factor(double hh) {
+    h = hh;
+    const double v = 1.0 - h + h * K.kd;
+    if (!(v > 0)) return false;
+    c = 1.0 / v;
+    logdet = (n - K.nr) * std::log(v);
+    if (K.nr == 0) return true;
+    const double* kx = K.Krr.valuePtr();
+    double* hx = H.valuePtr();
+    const Eigen::Index nz = H.nonZeros();
+    for (Eigen::Index q = 0; q < nz; ++q) hx[q] = h * kx[q];
+    for (int a = 0; a < K.nr; ++a) hx[dpos[a]] += 1.0 - h;
+    llt.factorize(H);
+    if (llt.info() != Eigen::Success) return false;
+    const KinSp& L = llt.matrixL().nestedExpression();
+    for (int a = 0; a < K.nr; ++a) {
+      const double l = L.coeff(a, a);
+      if (!(l > 0)) return false;
+      logdet += 2 * std::log(l);
     }
+    return true;
   }
 
-  // Z'Z and Z_u'Z_u of the data (for independent and solve_const).
-  void cross() {
-    const int m = p + 1;
+  // The scaled data: Xs = S X (n x pp column-major), ys = S y.
+  void set_data(const double* Xs, const double* ys, int pp) {
+    p = pp;
+    const int nr = K.nr, m = p + 1;
     Gall.resize(m, m);
     const LaFns& LA = plink4r::la();
-    LA.dgemm_tn(X, n, p, n, X, p, n, Gall.data(), m, 0);
-    LA.dgemm_tn(X, n, p, n, y, 1, n, Gall.data() + static_cast<std::size_t>(p) * m, m, 0);
+    LA.dgemm_tn(Xs, n, p, n, Xs, p, n, Gall.data(), m, 0);
+    LA.dgemm_tn(Xs, n, p, n, ys, 1, n, Gall.data() + static_cast<std::size_t>(p) * m, m, 0);
     double yy = 0;
-    for (int i = 0; i < n; ++i) yy += y[i] * y[i];
+    for (int i = 0; i < n; ++i) yy += ys[i] * ys[i];
     Gall(p, p) = yy;
     for (int a = 0; a < p; ++a) Gall(p, a) = Gall(a, p);
+    Zr.resize(nr, m);
+    for (int cc = 0; cc < m; ++cc) {
+      const double* col = cc < p ? Xs + static_cast<std::size_t>(cc) * n : ys;
+      for (int a = 0; a < nr; ++a) Zr(a, cc) = col[K.rel[a]];
+    }
     Gu = Gall;
-    if (K.nr > 0) Gu.noalias() -= Zr.transpose() * Zr;
+    if (nr > 0) Gu.noalias() -= Zr.transpose() * Zr;
   }
 
-  // Columns of X that are not a linear combination of earlier ones (residual sum of squares above tol x its own);
-  // after cross().
+  // Columns of X that are not a linear combination of earlier ones (residual sum of squares above tol x its own).
   std::vector<int> independent(double tol) const {
     std::vector<int> keep;
     Eigen::MatrixXd L = Eigen::MatrixXd::Zero(p, p);
@@ -162,124 +172,10 @@ struct KinNull {
     return keep;
   }
 
-  // V = d0 I + tau K: generalised least squares of the data (after cross()); false on failure.
-  bool solve_const(double tau, double d0) {
-    const double v = d0 + tau * K.kd;
-    if (!(v > 0)) return false;
-    om.assign(n, 1.0 / v);
-    for (int a = 0; a < K.nr; ++a) om[K.rel[a]] = 0.0;
-    logdet = (n - K.nr) * std::log(v);
-    if (!factor_rr(tau, &d0, 0)) return false;
-    G = Gu / v;
-    return fit();
-  }
-
-  // V = diag(d) + tau K: generalised least squares of the data; false on failure.
-  bool solve(double tau, const double* d) {
-    const int m = p + 1;
-    const std::size_t N = n;
-    om.resize(N);
-    sq.resize(N);
-    Zs.resize(N * m);
-    logdet = 0;
-    for (int i = 0; i < n; ++i) {
-      const double v = d[i] + tau * K.kd;
-      if (!(v > 0)) return false;
-      om[i] = 1.0 / v;
-      logdet += std::log(v);
-    }
-    for (int a = 0; a < K.nr; ++a) {
-      logdet += std::log(om[K.rel[a]]);
-      om[K.rel[a]] = 0.0;
-    }
-    if (!factor_rr(tau, d, 1)) return false;
-    // Z_u' diag(om) Z_u: the rows are split between the threads, each scales its rows and forms their product
-    const int T = std::max(1, std::min(threads, n / 4096 + 1));
-    std::vector<Eigen::MatrixXd> Gt(T, Eigen::MatrixXd(m, m));
-    const LaFns& LA = plink4r::la();
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static, 1) num_threads(T)
-#endif
-    for (int t = 0; t < T; ++t) {
-      const std::size_t r0 = N * t / T, r1 = N * (t + 1) / T;
-      for (std::size_t i = r0; i < r1; ++i) sq[i] = std::sqrt(om[i]);
-      for (int cc = 0; cc < m; ++cc) {
-        const double* col = cc < p ? X + cc * N : y;
-        double* zs = &Zs[cc * N];
-        for (std::size_t i = r0; i < r1; ++i) zs[i] = sq[i] * col[i];
-      }
-      LA.dgemm_tn(&Zs[r0], static_cast<int>(r1 - r0), m, n, &Zs[r0], m, n, Gt[t].data(), m, 0);
-    }
-    G = Gt[0];
-    for (int t = 1; t < T; ++t) G += Gt[t];
-    return fit();
-  }
-
-  // x <- Omega x (n values), at the last fit.
-  void omega(double* x) const {
-    const int nr = K.nr;
-    Eigen::VectorXd t(nr);
-    for (int q = 0; q < nr; ++q) t[q] = x[rs[q]];
-    for (int i = 0; i < n; ++i) x[i] *= om[i];
-    if (nr == 0) return;
-    llt.matrixL().solveInPlace(t);
-    llt.matrixU().solveInPlace(t);
-    for (int q = 0; q < nr; ++q) x[rs[q]] = t[q];
-  }
-
-  // r = Omega (y - X beta) = P y (n values), at the last fit.
-  void residual(double* r) const {
-    Eigen::Map<const Eigen::MatrixXd> Xm(X, n, p);
-    Eigen::Map<Eigen::VectorXd> rv(r, n);
-    rv = Eigen::Map<const Eigen::VectorXd>(y, n);
-    rv.noalias() -= Xm * beta;
-    omega(r);
-  }
-
-  // After the fit at the estimate: L1 = [Q | r] and Vb.
-  void project() {
-    const int m = p + 1;
-    const std::size_t N = n;
-    Vb.resize(N * p);
-    L1.resize(N * m);
-    Eigen::Map<const Eigen::MatrixXd> Xm(X, n, p);
-    Eigen::Map<Eigen::MatrixXd> Vm(Vb.data(), n, p);
-    Eigen::MatrixXd Li = Eigen::MatrixXd::Identity(p, p);
-    xox.matrixL().solveInPlace(Li);
-    Vm.noalias() = Xm * Li.transpose();
-    std::copy(Vb.begin(), Vb.end(), L1.begin());
-    for (int cc = 0; cc < p; ++cc) omega(L1.data() + cc * N);
-    residual(L1.data() + p * N);
-  }
-
-  // |L^-1 x|^2 for the related samples' values x (in the order of rs; overwritten).
-  double quad_rel(Eigen::VectorXd& x) const {
-    llt.matrixL().solveInPlace(x);
-    return x.squaredNorm();
-  }
-
- private:
-  // V_rr factorised (d: per sample, stride 1, or one value, stride 0), its log-determinant added to logdet.
-  bool factor_rr(double tau, const double* d, int stride) {
-    if (K.nr == 0) return true;
-    const double* kx = K.Krr.valuePtr();
-    double* vx = V.valuePtr();
-    const Eigen::Index nz = V.nonZeros();
-    for (Eigen::Index q = 0; q < nz; ++q) vx[q] = tau * kx[q];
-    for (int a = 0; a < K.nr; ++a) vx[dpos[a]] += d[stride ? K.rel[a] : 0];
-    llt.factorize(V);
-    if (llt.info() != Eigen::Success) return false;
-    const KinSp& L = llt.matrixL().nestedExpression();
-    for (int a = 0; a < K.nr; ++a) {
-      const double l = L.coeff(a, a);
-      if (!(l > 0)) return false;
-      logdet += 2 * std::log(l);
-    }
-    return true;
-  }
-
-  // G holds the unrelated samples' part of Z' Omega Z: add the related part, then beta, quad, logdet_xox.
-  bool fit() {
+  // Generalised least squares of the scaled data at h: beta, quad, logdet_xox (and logdet); false on failure.
+  bool solve(double hh) {
+    if (!factor(hh)) return false;
+    G = c * Gu;
     if (K.nr > 0) {
       Wr = llt.permutationP() * Zr;
       llt.matrixL().solveInPlace(Wr);
@@ -296,6 +192,55 @@ struct KinNull {
     beta = xox.solve(G.col(p).head(p));
     quad = G(p, p) - G.col(p).head(p).dot(beta);
     return true;
+  }
+
+  // After solve(h) at the estimate: om, L1 = [Q | r], Vb for S = a diag(s0) (s0 = nullptr: 1), from the unscaled
+  // X (n x p) and y. set_data must have been given diag(s0) X, diag(s0) y.
+  void project(const double* X, const double* y, const double* s0, double a) {
+    const int nr = K.nr, m = p + 1;
+    const std::size_t N = n;
+    om.resize(N);
+    for (int i = 0; i < n; ++i) om[i] = a * a * c * (s0 ? s0[i] * s0[i] : 1.0);
+    rs.resize(nr);
+    ss.resize(nr);
+    for (int q = 0; q < nr; ++q) {
+      const int pos = llt.permutationP().indices()[q];
+      rs[pos] = K.rel[q];
+      ss[pos] = a * (s0 ? s0[K.rel[q]] : 1.0);
+    }
+    Vb.resize(N * p);
+    L1.resize(N * m);
+    Eigen::Map<const Eigen::MatrixXd> Xm(X, n, p);
+    Eigen::Map<const Eigen::VectorXd> yv(y, n);
+    Eigen::Map<Eigen::MatrixXd> Vm(Vb.data(), n, p), Lm(L1.data(), n, m);
+    Eigen::MatrixXd Li = Eigen::MatrixXd::Identity(p, p);
+    xox.matrixL().solveInPlace(Li);
+    Vm.noalias() = Xm * (Li.transpose() / a);
+    Lm.leftCols(p) = Vm;
+    Lm.col(p) = yv;
+    Lm.col(p).noalias() -= Xm * beta;
+    // Omega applied to the columns of L1
+    Eigen::MatrixXd T(nr, m);
+    for (int cc = 0; cc < m; ++cc) {
+      double* col = L1.data() + cc * N;
+      for (int q = 0; q < nr; ++q) T(q, cc) = ss[q] * col[rs[q]];
+      for (std::size_t i = 0; i < N; ++i) col[i] *= om[i];
+    }
+    if (nr > 0) {
+      llt.matrixL().solveInPlace(T);
+      llt.matrixU().solveInPlace(T);
+    }
+    for (int cc = 0; cc < m; ++cc) {
+      double* col = L1.data() + cc * N;
+      for (int q = 0; q < nr; ++q) col[rs[q]] = ss[q] * T(q, cc);
+    }
+    for (int q = 0; q < nr; ++q) om[rs[q]] = 0.0;
+  }
+
+  // |L^-1 x|^2 for the related samples' scaled values x (in the order of rs; overwritten).
+  double quad_rel(Eigen::VectorXd& x) const {
+    llt.matrixL().solveInPlace(x);
+    return x.squaredNorm();
   }
 };
 

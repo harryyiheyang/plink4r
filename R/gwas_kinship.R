@@ -1,19 +1,20 @@
 #' REML estimate of the kinship variance of a (generalised) linear mixed model
 #'
 #' Fits the null model `formula + b`, `b ~ N(0, tau K)` with a sparse kinship matrix `K` and returns `tau`.
-#' Linear (`family = "gaussian"`): `y = X beta + b + e`, `e ~ N(0, s2e I)`, so `V = s2e I + tau K`; one Brent
-#' search over `h = tau / (tau + s2e)` of the profiled REML likelihood. Logistic (`"binomial"`):
-#' `logit(mu) = X beta + b`, fitted on the IRLS working scale by penalised quasi-likelihood (as GMMAT and
-#' fastGWA-GLMM): the working response has covariance `V = W^-1 + tau K`, `W = diag(mu (1 - mu))`; `tau` by one
-#' Brent search of the working REML likelihood, alternated with the update of `beta` and `b` until both settle.
-#' `tau` is then a variance on the logit scale.
+#' Linear (`family = "gaussian"`): `y = X beta + b + e`, `e ~ N(0, s2e I)`; one Brent search over
+#' `h = tau / (tau + s2e)` of the profiled REML likelihood. Logistic (`"binomial"`): on the IRLS working scale,
+#' in marginal form: `logit(mu) = X beta` and the Pearson residuals `(y - mu) / sqrt(mu (1 - mu))` have covariance
+#' `(1 - h) I + h K`, so the working response has covariance `W^-1/2 ((1 - h) I + h K) W^-1/2`,
+#' `W = diag(mu (1 - mu))`; `h` by one Brent search of the working REML likelihood, alternated with the
+#' generalised-least-squares update of `beta` until both settle. `tau = h` and `s2e = 1 - h` are then on the
+#' Pearson-residual scale.
 #'
-#' Samples without a relative in `kinship` enter with the diagonal entry of `K` alone (a scalar variance); the
-#' related samples are held together as one sparse matrix and factorised by sparse Cholesky at every value of the
-#' variance parameter. Linear: the cross-products over all samples are formed once, and a likelihood evaluation
-#' touches the related samples' rows only. Logistic: the weights differ between samples, so every evaluation also
-#' forms the weighted cross-products over all samples (`n p^2`). With `tau = 0` the fit is ordinary least squares /
-#' logistic regression.
+#' Samples without a relative in `kinship` enter with the diagonal entry of `K` alone (a scalar variance, which
+#' does not depend on `h` when that entry is 1, so they carry no information on `h`); the related samples are
+#' held together as one sparse matrix and factorised by sparse Cholesky at every value of `h`, so the cost per
+#' likelihood evaluation is one small sparse factorisation and solves with the related samples' rows only (the
+#' cross-products over all samples are formed once per working data). With no related pair, or at `h = 0`, the
+#' fit is ordinary least squares / logistic regression.
 #'
 #' @param formula The fixed part of the model, `phenotype ~ covariates`, as in [gwas()] (factors and characters
 #'   expanded by `model.matrix`). Logistic: the phenotype is coded 0/1 (or 1/2). An externally estimated polygenic
@@ -27,25 +28,23 @@
 #' @param family `"gaussian"` or `"binomial"`.
 #' @param id_col Column of `data` with the sample IDs.
 #' @param para named list overriding [reml_tau_para()].
-#' @param threads OpenMP threads (logistic model); 0 takes them from [plink4r_resources()].
-#' @return list(tau, s2e and h2 = tau / (tau + s2e) (linear model; `NA` for the logistic model), lrt =
-#'   likelihood-ratio statistic of tau = 0 (on the working scale for the logistic model), p_lrt (half chi-square
-#'   1), beta, n, n_related, pairs, converged, iterations, evals, time).
+#' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (on the working
+#'   scale for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
+#'   evals, time).
 #' @export
-reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"), id_col = "IID", para = list(),
-                     threads = 0L) {
+reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"), id_col = "IID", para = list()) {
   family <- match.arg(family)
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
   D <- .mm_design(formula, data, family, id_col, NULL)
-  nl <- .reml_null(D, kinship, family, P, proj = FALSE, .threads(threads))
+  nl <- .reml_null(D, kinship, family, P, proj = FALSE)
   c(nl$est, list(time = proc.time()[["elapsed"]] - t0))
 }
 
 #' Defaults of [reml_tau()] and of [gwas()] with `kinship`
 #'
-#' h_max 0.999 upper end of the search for h (linear); tau_max 10 upper end of the search for tau (logistic);
-#' tol 1e-6 Brent tolerance and (relative) change of tau at convergence; eta_tol 1e-6 largest change of the linear
+#' h_max 0.999 upper end of the search for h;
+#' tol 1e-6 Brent tolerance and change of h at convergence; eta_tol 1e-6 largest change of the linear
 #' predictor at convergence (logistic); max_iter 50 outer iterations (logistic); max_eval 100 likelihood
 #' evaluations per Brent search; mu_eps 1e-10 bound of the fitted probabilities; kin_scale 2: K_ij = kin_scale x
 #' the pairwise kinship coefficient (0.25 for full siblings gives 0.5); diag 1 diagonal of K; rank_tol 1e-10 a
@@ -53,7 +52,7 @@ reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"),
 #' is below rank_tol x its own sum of squares.
 #' @export
 reml_tau_para <- function() {
-  list(h_max = 0.999, tau_max = 10, tol = 1e-6, eta_tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
+  list(h_max = 0.999, tol = 1e-6, eta_tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
        kin_scale = 2, diag = 1, rank_tol = 1e-10)
 }
 
@@ -70,7 +69,7 @@ reml_tau_para <- function() {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   gv <- .geno_variants(pfile, bfile, snp_vec)
   D <- .mm_design(formula, data, family, id_col, gv$iid)
-  nl <- .reml_null(D, kinship, family, P, proj = TRUE, threads)
+  nl <- .reml_null(D, kinship, family, P, proj = TRUE)
   t1 <- proc.time()[["elapsed"]]
   res <- gwas_kin_stream_cpp(gv$path, is.null(pfile), length(gv$iid), as.integer(gv$var$allele_ct),
                              as.integer(gv$vrow - 1L), as.integer(D$srow - 1L), nl$null, threads, mem_gb,
@@ -126,18 +125,17 @@ reml_tau_para <- function() {
 
 # Null model of reml_tau() and of gwas() with kinship: the estimates (est) and, with proj, the null-model object of
 # the association stream (null: external pointer, made and read in compiled code only).
-.reml_null <- function(D, kinship, family, P, proj, threads) {
+.reml_null <- function(D, kinship, family, P, proj) {
   kin <- .kin_prepare(kinship, D$ids, P$kin_scale)
   if (family == "gaussian") {
     f <- reml_tau_gaussian_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, as.integer(P$max_eval),
                                P$rank_tol, proj)
     est <- list(tau = f$tau, s2e = f$s2e, h2 = f$h, converged = TRUE, iterations = 1L)
   } else {
-    f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$tau_max, P$tol, P$eta_tol,
-                               as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, P$rank_tol, proj,
-                               as.integer(threads))
+    f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, P$eta_tol,
+                               as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, P$rank_tol, proj)
     if (!f$converged) warning("The logistic null model with kinship did not converge.", call. = FALSE)
-    est <- list(tau = f$tau, s2e = NA_real_, h2 = NA_real_, converged = f$converged, iterations = f$iterations)
+    est <- list(tau = f$tau, s2e = 1 - f$tau, h2 = f$tau, converged = f$converged, iterations = f$iterations)
   }
   if (length(f$keep) < ncol(D$X))
     warning("Aliased covariate column(s) dropped: ", paste(colnames(D$X)[-f$keep], collapse = ", "), call. = FALSE)

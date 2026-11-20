@@ -35,8 +35,9 @@
 #'   by REML ([reml_tau()]: linear, or logistic on the IRLS working scale), and with `V` the covariance of the
 #'   (working) response and `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least
 #'   squares `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2` (exact, no GRAMMAR-GAMMA approximation), `T` or `Z` =
-#'   `BETA / SE` and its normal `P`. When `tau` is estimated as 0 the logistic result is that of `kinship = NULL`, and the
-#'   linear one differs only by using the null-model variance and the normal distribution. The attribute `info` then also
+#'   `BETA / SE` and its normal `P`. Samples without a listed relative enter as in the ordinary test; with no
+#'   related pair among the analysed samples the logistic result is that of `kinship = NULL`, and the linear one
+#'   differs only by using the null-model variance and the normal distribution. The attribute `info` then also
 #'   holds `tau`, `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`.
 #' @param para With `kinship`: named list overriding [reml_tau_para()].
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
