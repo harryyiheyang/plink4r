@@ -7,6 +7,11 @@
 #' P(delta_j >= k | delta_j >= k - 1) = logistic(f_j' theta_k), f_j = (1, A_j), with the adaptive spike-and-slab lasso
 #' on the slopes. Blocks are sampled in parallel.
 #'
+#' LD-bin suppression: per block the kept SNPs are grouped into high-LD bins (greedy, r2 > `bin_r2` with the bin centre,
+#' as ld_bins.py). Inside a bin with at least one annotated member (any nonzero binary 0/1 annotation column), the
+#' members without annotation get no prior mass on the nonzero classes (beta = 0) in every fit and are left out of the
+#' annotation regression. Without binary annotation columns nothing is suppressed.
+#'
 #' Steps (fast_chain.py):
 #' 1. SBayesRC pseudo summaries: bhat_t = bhat + sqrt(1 / n_t - 1 / N) X z (z ~ N(0, I)), n_t = round(train_frac N),
 #'    bhat_v = (N bhat - n_t bhat_t) / (N - n_t).
@@ -30,7 +35,8 @@
 #' @param output optional output path (.parquet or text).
 #' @return data.table: ID, chr, bp37, bp38, A1, A2, freq, BETA (per A1 allele), BETA_STD; attributes `chain` (one row
 #'   per cutoff), `cutoff` (chosen), `theta` (levels x (intercept, annotations)), `sigma2`, `nnz` (mean number of
-#'   nonzero effects after burn-in) and `trace` of the main fit.
+#'   nonzero effects after burn-in), `trace` of the main fit, `n_bins` and `n_suppressed` (LD-bin suppression), and
+#'   column SUPPRESSED (TRUE: held at 0 by the suppression).
 #' @export
 sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, control = sbayesrc_control(), threads = 4L,
                      output = NULL) {
@@ -50,10 +56,13 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, control = sbayes
   t0 <- Sys.time()
   res <- sbayesrc_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, control = ctl, replay = ctl$replay,
                       threads = threads)
-  message(sprintf("sbayesrc: %d SNPs, cutoff %g, sigma2 %.3g, %.0f nonzero effects, %.1f s", nrow(d$x), res$cutoff,
-                  res$sigma2, res$nnz, as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+  n_sup <- sum(res$suppressed)
+  message(sprintf("sbayesrc: %d SNPs (%d suppressed in %.0f LD bins), cutoff %g, sigma2 %.3g, %.0f nonzero effects, %.1f s",
+                  nrow(d$x), n_sup, res$n_bins, res$cutoff, res$sigma2, res$nnz,
+                  as.numeric(difftime(Sys.time(), t0, units = "secs"))))
   out <- d$x[, .(ID, chr, bp37, bp38, A1, A2, freq)]
-  out[, `:=`(BETA = res$BETA, BETA_STD = res$BETA_STD)]
+  out[, `:=`(BETA = res$BETA, BETA_STD = res$BETA_STD,
+             SUPPRESSED = if (length(res$suppressed)) res$suppressed else FALSE)]
   th <- res$theta
   dimnames(th) <- list(paste0("level", seq_len(nrow(th))), c("intercept", colnames(A)))
   attr(out, "chain") <- data.table::as.data.table(res$chain)
@@ -62,6 +71,8 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, control = sbayes
   attr(out, "sigma2") <- res$sigma2
   attr(out, "nnz") <- res$nnz
   attr(out, "trace") <- data.table::as.data.table(res$trace)
+  attr(out, "n_bins") <- res$n_bins
+  attr(out, "n_suppressed") <- n_sup
   .prs_write(out, output)
   out[]
 }
@@ -73,6 +84,8 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, control = sbayes
 #' @param chain_iter,chain_burn iterations per chain level and burn-in of its posterior mean.
 #' @param main_iter,main_burn iterations and burn-in of the main fit.
 #' @param rel_r_min SBayesRC rule threshold on |r / r_base|.
+#' @param bin_r2 r2 threshold of the LD bins of the suppression (<= 0: no suppression).
+#' @param bin_tile rows of R formed per GEMM call when building the bins.
 #' @param train_frac,pseudo_seed pseudo training proportion and its random seed.
 #' @param seed seed of the Gibbs sampler (every fit restarts it, as the original).
 #' @param gam,pi0 mixture variances (relative to sigma^2; 0 = point mass) and their starting weights.
@@ -95,7 +108,8 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, control = sbayes
 #' @return a list.
 #' @export
 sbayesrc_control <- function(cutoffs = c(0.9, 0.95, 0.99, 0.995, 0.999), chain_iter = 10L, chain_burn = NULL,
-                             main_iter = 80L, main_burn = 30L, rel_r_min = 1.25, train_frac = 0.9, pseudo_seed = 22,
+                             main_iter = 80L, main_burn = 30L, rel_r_min = 1.25, bin_r2 = 0.99,
+                             bin_tile = 512L, train_frac = 0.9, pseudo_seed = 22,
                              seed = 1, gam = c(0, 1e-3, 1e-2, 1e-1, 1), pi0 = NULL, ve = 1, nu = 4, hess_every = 5L,
                              slope_start = 5L, warm = 10L, ridge_prec = 1, ssl_ratio = 10, ssl_l1 = 0.5,
                              ssl_beta = rbind(c(1.5, 8.5), c(7.5, 42.5), c(30, 170)), ssl_gamma = c(2, 1),
@@ -107,6 +121,7 @@ sbayesrc_control <- function(cutoffs = c(0.9, 0.95, 0.99, 0.995, 0.999), chain_i
   if (is.null(chain_burn)) chain_burn <- chain_iter %/% 2L
   list(cutoffs = as.numeric(cutoffs), chain_iter = as.integer(chain_iter), chain_burn = as.integer(chain_burn),
        main_iter = as.integer(main_iter), main_burn = as.integer(main_burn), rel_r_min = as.numeric(rel_r_min),
+       bin_r2 = as.numeric(bin_r2), bin_tile = as.integer(bin_tile),
        train_frac = as.numeric(train_frac), pseudo_seed = as.numeric(pseudo_seed), seed = as.numeric(seed),
        gam = as.numeric(gam), pi0 = as.numeric(pi0), ve = as.numeric(ve), nu = as.numeric(nu),
        hess_every = as.integer(hess_every), slope_start = as.integer(slope_start), warm = as.integer(warm),

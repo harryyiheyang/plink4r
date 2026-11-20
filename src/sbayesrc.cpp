@@ -10,6 +10,8 @@
 // with soft thresholding on the q x q quadratic model; Hessian refreshed every hess_every iterations).
 // Pipeline (fast_chain.py): SBayesRC pseudo training / validation summaries, warm-start chain over eigen cutoffs,
 // SBayesRC rule for the cutoff, main fit on the full data warm from the chosen level.
+// LD-bin suppression (ld_bins.h): inside a bin of r2 > bin_r2 with an annotated member, SNPs without annotation get
+// delta = 0 (no prior mass on the nonzero classes) in every fit and are left out of the theta regression.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -24,6 +26,7 @@
 #include <omp.h>
 #endif
 #include "eigen_int16.h"
+#include "ld_bins.h"
 #include "resources.h"
 
 using plink4r::Block16;
@@ -329,9 +332,12 @@ struct FitOut {
 
 FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const std::vector<int>& kact,
            const std::vector<std::vector<double>>& W, double n, const std::vector<double>& F, int q, int niter, int burn,
-           const FitState* init, const Ctl& c, Rng& rng, int threads) {
+           const FitState* init, const std::vector<char>& sup, const Ctl& c, Rng& rng, int threads) {
   const int nb = (int)P.size();
   const int64_t M = off[nb];
+  const bool any_sup = !sup.empty();
+  int64_t M_free = M;
+  if (any_sup) for (char x : sup) M_free -= x;
   const int K = (int)c.gam.size(), L = K - 1;
   std::vector<bool> nz(K);
   for (int k = 0; k < K; ++k) nz[k] = c.gam[k] > 0;
@@ -351,7 +357,7 @@ FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const
     vg0 += std::max(ww - kact[b] / prec, 0.0);
   }
   for (int k = 0; k < K; ++k) pg += c.pi0[k] * c.gam[k];
-  double s2 = std::max(vg0, c.vg_floor) / M / pg;
+  double s2 = std::max(vg0, c.vg_floor) / std::max<int64_t>(M_free, 1) / pg;
   const bool has_init = init != nullptr;
   if (has_init) {
     th = init->theta;
@@ -401,6 +407,12 @@ FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const
   std::vector<unsigned long long> seeds(nb);
   for (int it = 1; it <= niter; ++it) {
     logit_logpi((int)M, K, q, F.data(), th.data(), c.eta_clip, logpi.data(), threads);
+    if (any_sup)  // suppressed SNPs: all prior mass on the zero class
+      for (int64_t j = 0; j < M; ++j)
+        if (sup[j]) {
+          double* lp = logpi.data() + (size_t)j * K;
+          for (int k = 0; k < K; ++k) lp[k] = c.gam[k] == 0 ? 0.0 : -INFINITY;
+        }
     std::fill(cnts.begin(), cnts.end(), 0.0);
     std::fill(ssbs.begin(), ssbs.end(), 0.0);
     for (int b = 0; b < nb; ++b) seeds[b] = rng.block_seed();
@@ -429,6 +441,7 @@ FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const
 #pragma omp parallel for schedule(static) num_threads(threads)
 #endif
     for (int64_t j = 0; j < M; ++j) {
+      if (any_sup && sup[j]) continue;  // left out of the regression (soft counts stay 0)
       const double* p = phi.data() + (size_t)j * K;
       double up = 0;
       for (int l = K - 1; l >= 1; --l) {
@@ -598,6 +611,8 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
   const int chain_iter = Rcpp::as<int>(control["chain_iter"]), chain_burn = Rcpp::as<int>(control["chain_burn"]);
   const int main_iter = Rcpp::as<int>(control["main_iter"]), main_burn = Rcpp::as<int>(control["main_burn"]);
   const double train_frac = Rcpp::as<double>(control["train_frac"]), rel_r_min = Rcpp::as<double>(control["rel_r_min"]);
+  const double bin_r2 = Rcpp::as<double>(control["bin_r2"]);
+  const int bin_tile = Rcpp::as<int>(control["bin_tile"]);
   const int nb = blocks.size();
   if (keep.size() != nb) Rcpp::stop("blocks and keep differ in length");
   std::vector<std::vector<int>> kv(nb);
@@ -641,6 +656,33 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
       catch (const std::exception& e) { err[b] = e.what(); }
     }
     for (int b = 0; b < nb; ++b) if (!err[b].empty()) Rcpp::stop("block %d: %s", blocks[b], err[b].c_str());
+    // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column; bins at r2 > bin_r2
+    std::vector<char> sup;
+    int64_t n_bins = 0, n_sup = 0;
+    std::vector<int> bincol;
+    for (int a = 0; a < A.ncol(); ++a) {
+      bool bin01 = true;
+      for (int64_t j = 0; j < M && bin01; ++j) bin01 = A(j, a) == 0 || A(j, a) == 1;
+      if (bin01) bincol.push_back(a);
+    }
+    if (bin_r2 > 0 && !bincol.empty()) {
+      sup.assign(M, 0);
+      std::vector<int64_t> nbin(nb, 0);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
+#endif
+      for (int b = 0; b < nb; ++b) {
+        const std::vector<int> bid = plink4r::block_bins(plink4r::block_neighbours(P[b], bin_r2, bin_tile));
+        std::vector<char> ann(P[b].nk, 0);
+        for (int j = 0; j < P[b].nk; ++j)
+          for (int a : bincol) if (A(off[b] + j, a) != 0) { ann[j] = 1; break; }
+        const std::vector<char> s = plink4r::block_suppress(bid, ann);
+        std::copy(s.begin(), s.end(), sup.begin() + off[b]);
+        for (int x : bid) nbin[b] = std::max<int64_t>(nbin[b], x + 1);
+      }
+      for (int b = 0; b < nb; ++b) n_bins += nbin[b];
+      for (char x : sup) n_sup += x;
+    }
     // pseudo summaries (SBayesRC pseudoSuma): bt = X z per block, z ~ N(0, I_k) on the stored panel
     const double n_t = std::nearbyint(train_frac * N), n_v = N - n_t;
     std::vector<double> bt(M);
@@ -668,7 +710,7 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
     for (double cut : cutoffs) {
       const auto t0 = std::chrono::steady_clock::now();
       const std::vector<int> ks = kcut(P, cut);
-      FitOut r = fit(P, off, ks, W_t, n_t, F, q, chain_iter, chain_burn, init, c, *rng, T);
+      FitOut r = fit(P, off, ks, W_t, n_t, F, q, chain_iter, chain_burn, init, sup, c, *rng, T);
       double bv = 0, bb = 0;
       for (int64_t j = 0; j < M; ++j) { bv += r.beta[j] * bh_v[j]; bb += r.beta[j] * r.beta[j]; }
       states.push_back(r.st);
@@ -702,7 +744,7 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
       Rcpp::stop("chosen cutoff = smallest step %g (SBayesRC rule): widen the cutoff grid", cmin);
     // main fit on the full data at the chosen cutoff, warm from that level
     const auto t0 = std::chrono::steady_clock::now();
-    FitOut r = fit(P, off, kcut(P, cutoffs[ich]), W, N, F, q, main_iter, main_burn, &states[ich], c, *rng, T);
+    FitOut r = fit(P, off, kcut(P, cutoffs[ich]), W, N, F, q, main_iter, main_burn, &states[ich], sup, c, *rng, T);
     const double main_sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     Rcpp::NumericVector beta(M), bstd(M);
     for (int64_t j = 0; j < M; ++j) {
@@ -718,7 +760,8 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
     return Rcpp::List::create(
         Rcpp::_["BETA"] = beta, Rcpp::_["BETA_STD"] = bstd, Rcpp::_["chain"] = chain,
         Rcpp::_["cutoff"] = cutoffs[ich], Rcpp::_["theta"] = theta, Rcpp::_["sigma2"] = r.st.s2,
-        Rcpp::_["nnz"] = nnz, Rcpp::_["main_seconds"] = main_sec,
+        Rcpp::_["nnz"] = nnz, Rcpp::_["main_seconds"] = main_sec, Rcpp::_["n_bins"] = (double)n_bins,
+        Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
         Rcpp::_["trace"] = Rcpp::DataFrame::create(Rcpp::_["vg"] = r.tr_vg, Rcpp::_["nnz"] = r.tr_nnz,
                                                    Rcpp::_["sigma2"] = r.tr_s2));
   } catch (const std::exception& e) {
