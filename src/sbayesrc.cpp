@@ -337,8 +337,6 @@ FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const
   const int nb = (int)P.size();
   const int64_t M = off[nb];
   const bool any_sup = !sup.empty();
-  int64_t M_free = M;
-  if (any_sup) for (char x : sup) M_free -= x;
   const int K = (int)c.gam.size(), L = K - 1;
   std::vector<bool> nz(K);
   for (int k = 0; k < K; ++k) nz[k] = c.gam[k] > 0;
@@ -358,7 +356,7 @@ FitOut fit(const std::vector<Block16>& P, const std::vector<int64_t>& off, const
     vg0 += std::max(ww - kact[b] / prec, 0.0);
   }
   for (int k = 0; k < K; ++k) pg += c.pi0[k] * c.gam[k];
-  double s2 = std::max(vg0, c.vg_floor) / std::max<int64_t>(M_free, 1) / pg;
+  double s2 = std::max(vg0, c.vg_floor) / M / pg;
   const bool has_init = init != nullptr;
   if (has_init) {
     th = init->theta;
