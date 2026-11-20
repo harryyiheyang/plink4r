@@ -2,10 +2,11 @@
 // BED with a sparse kinship
 // (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed.
 //
-// Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp (kin_sparse.h), used as
+// Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp / reml_tau_cox.cpp /
+// cox_null.cpp (kin_sparse.h), used as
 // it is: Omega = V^-1 = S H^-1 S, P = Omega - Omega X (X' Omega X)^-1 X' Omega, r = P y (y the response, or the
-// working response of the logistic model), Q = Omega X La^-T and Vb = X La^-T with X' Omega X = La La'. For a
-// variant g (centred, missing call = mean):
+// working response of the logistic and Cox models), Q = Omega X La^-T and Vb = X La^-T with X' Omega X = La La'.
+// For a variant g (centred, missing call = mean):
 //   c = g' r,   A = g' P g = g' Omega g - |Q' g|^2,   beta = c / A,   se = A^-1/2,   chi2 = c^2 / A
 // (generalised least squares; for the logistic model on the working response, one step from the null). The exact
 // statistic, not the GRAMMAR-GAMMA approximation.
@@ -14,7 +15,8 @@
 // sums of the first part, Q' g and g' r are entries of L1' G and L2' (G o G) per block of variants, L1 = [Q | r],
 // L2 = [om] (0 at related samples), as in assoc_stream.cpp, from which the reading and blocking are taken. A
 // variant whose A lost more than 1 - 1 / kKappaMax of g' Omega g to the subtraction is recomputed from
-// g - Vb Q' g.
+// g - Vb Q' g. The life-table Cox model has no Vb (its columns vary within a sample): there A is kept, and taken
+// as 0 (status 2) below kSingular of g' Omega g.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -36,6 +38,7 @@ namespace {
 constexpr int kRowChunk = 2048;          // rows of G expanded at a time (multiple of 4)
 constexpr int kBlockMax = 4096;          // largest automatic block per thread
 constexpr double kKappaMax = 1e4;        // explicit projection when g' Omega g / A exceeds this
+constexpr double kSingular = 1e-9;       // without Vb: A below this share of g' Omega g is taken as 0
 constexpr std::uint16_t kDosMiss = plink4r::PgenFile::kMissing;
 
 inline double dot(const double* a, const double* b, int len) {
@@ -49,7 +52,7 @@ struct Pre {
   int n = 0, k = 0, m1 = 0, nr = 0;
   const plink4r::KinNull* N = nullptr;
   const double* L1 = nullptr;  // n x (k + 1): Q, r
-  const double* Vb = nullptr;  // n x k
+  const double* Vb = nullptr;  // n x k; nullptr when the null model has no sample-level basis of its columns
   const double* om = nullptr;  // n
 };
 
@@ -152,7 +155,10 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
       gog += pre.N->quad_rel(wk.gr);
     }
     double A = gog - dot(M, M, k);
-    if (!(A > gog / kKappaMax)) { A = explicit_projection(pre, wk, s, M); ++nexp; }
+    if (!(A > gog / kKappaMax)) {
+      if (pre.Vb) { A = explicit_projection(pre, wk, s, M); ++nexp; }
+      else if (!(A > gog * kSingular)) A = 0.0;
+    }
     cc[s] = M[k];
     AA[s] = A;
   }
@@ -190,7 +196,7 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcp
   const std::size_t N = ns;
   Pre pre;
   pre.n = ns; pre.k = k; pre.m1 = k + 1; pre.nr = K.nr; pre.N = &NM;
-  pre.L1 = NM.L1.data(); pre.Vb = NM.Vb.data(); pre.om = NM.om.data();
+  pre.L1 = NM.L1.data(); pre.Vb = NM.Vb.empty() ? nullptr : NM.Vb.data(); pre.om = NM.om.data();
 
   // block size from the memory budget
   const double GiB = 1073741824.0;

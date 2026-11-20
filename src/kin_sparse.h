@@ -15,8 +15,10 @@
 // project() then writes, once, what the association stream reads (gwas_kin_stream.cpp), with X' Omega X = La La':
 //   Vb = X La^-T,  L1 = [Q | r],  Q = Omega Vb,  r = Omega (y - X beta) = P y,  om_i = s_i^2 c (0 if related),
 // so that for any g:  g' P g = sum om_i g_i^2 + |L^-1 (s_r o g_r)|^2 - |Q' g|^2.
-// One KinNull is made by a REML estimator (reml_tau_gaussian.cpp, reml_tau_binomial.cpp) and handed to the stream
-// by external pointer: the kinship is built once and its factor at the estimate is the one the stream uses.
+// One KinNull is made by a null-model estimator (reml_tau_gaussian.cpp, reml_tau_binomial.cpp, reml_tau_cox.cpp,
+// cox_null.cpp) and handed to the stream by external pointer: the kinship is built once and its factor at the
+// estimate is the one the stream uses. The stream reads om, L1 = [Q | r], rs, ss, the factor (quad_rel) and, when
+// the estimator has one, Vb (empty: no sample-level basis of the projected columns; see reml_tau_cox.cpp).
 #ifndef PLINK4R_KIN_SPARSE_H
 #define PLINK4R_KIN_SPARSE_H
 
@@ -161,6 +163,17 @@ struct KinNull {
     }
     Gu = Gall;
     if (nr > 0) Gu.noalias() -= Zr.transpose() * Zr;
+  }
+
+  // The scaled data given by its cross-products, for a model whose rows are not the samples (reml_tau_cox.cpp):
+  // ZtZ = Z'Z over all rows ((pp + 1) x (pp + 1)) and Zrel (nr x (pp + 1)), the related samples' rows of the part of
+  // Z on which H acts, so that Z' H^-1 Z = (ZtZ - Zrel' Zrel) + |L^-1 Zrel|^2.
+  void set_cross(const Eigen::MatrixXd& ZtZ, const Eigen::MatrixXd& Zrel, int pp) {
+    p = pp;
+    Gall = ZtZ;
+    Zr = Zrel;
+    Gu = Gall;
+    if (K.nr > 0) Gu.noalias() -= Zr.transpose() * Zr;
   }
 
   // Columns of X that are not a linear combination of earlier ones (residual sum of squares above tol x its own).

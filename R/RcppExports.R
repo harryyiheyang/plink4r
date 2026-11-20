@@ -5,6 +5,10 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
+cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
+}
+
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
 }
@@ -105,8 +109,8 @@ reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter,
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }
 
-reml_tau_cox_cpp <- function(time, status, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
-    .Call(`_plink4r_reml_tau_cox_cpp`, time, status, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
+reml_tau_cox_cpp <- function(time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_cox_cpp`, time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj)
 }
 
 reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj) {

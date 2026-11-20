@@ -27,10 +27,14 @@
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
 #' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards; [gwas()] and
 #'   [reml_tau()] only). Cox: the phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
-#'   status)`), `status` 1 for an event and 0 for censoring. The null model (covariate effects, the Breslow
-#'   baseline cumulative hazard `Lambda0` and, with `kinship`, the kinship correlation; see [reml_tau()]) is fitted
-#'   once; every variant is then tested in the Poisson model of the event indicator with `log Lambda0(time)` as an
-#'   offset (`BETA` a log hazard ratio, one step from the null model; `Z` and its normal `P`).
+#'   status)`), `status` 1 for an event and 0 for censoring. The null model is fitted once and every variant is
+#'   then tested one step from it (`BETA` a log hazard ratio; `Z` and its normal `P`). Without `kinship` (or with
+#'   no related pair among the analysed samples) the null model is the Cox partial-likelihood fit with the Breslow
+#'   baseline cumulative hazard `Lambda0`, and a variant is tested in the Poisson model of the event indicator
+#'   with `log Lambda0(time)` as an offset. With `kinship` the null model is that of the life table of the data
+#'   (binary records of the samples in `para$n_interval` intervals, complementary log-log link, interval
+#'   intercepts as the baseline, the kinship correlation between the records of relatives; see [reml_tau()]), and
+#'   a variant is tested in that model of the records.
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).

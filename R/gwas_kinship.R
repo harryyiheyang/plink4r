@@ -9,10 +9,15 @@
 #' `f(h) = log|H| + sum log w + log|X' W^1/2 H^-1 W^1/2 X| + e' H^-1 e` at `beta_hat(h)` (the Gaussian restricted
 #' quasi-likelihood of `y` with these two moments) by a Brent search started from a few steps of the alternating
 #' scheme. `tau = h` and `s2e = 1 - h` are then on the Pearson-residual scale. Cox (`"cox"`; phenotype
-#' `cbind(time, status)`): the same marginal form on the Poisson form of the Cox likelihood: the event indicator
-#' has mean `mu = Lambda0(time) exp(X beta)` and `Var = W^1/2 ((1 - h) I + h K) W^1/2`, `W = diag(mu)`; for a given
-#' `h`, `beta_hat(h)` and the Breslow baseline `Lambda0_hat(h)` are found together, and `h` minimises the same
-#' `f`. With `h = 0` this is the Cox partial-likelihood fit.
+#' `cbind(time, status)`): the same marginal form on the life table of the data. Follow-up is cut into
+#' `para$n_interval` intervals at quantiles of the event times and a sample contributes one binary record to every
+#' interval at whose start it is at risk (1 when its event falls in the interval), with
+#' `P(event) = 1 - exp(-exp(alpha_j + X beta))` (complementary log-log link; the interval intercepts `alpha_j` are
+#' the baseline). The records of one sample are uncorrelated, and the Pearson residuals of the records of two
+#' relatives have correlation `h K_ij` whatever the two intervals. `h` and `(alpha, beta)` are found in turn until
+#' the criterion settles: at the current working weights `h` minimises the working restricted likelihood by a
+#' Brent search, then `(alpha, beta)` are updated by generalised least squares. With no related pair among the
+#' analysed samples the fit is the Cox partial-likelihood fit (Breslow ties).
 #'
 #' Samples without a relative in `kinship` enter with the diagonal entry of `K` alone (a scalar variance, which
 #' does not depend on `h` when that entry is 1, so they carry no information on `h`); the related samples are
@@ -36,8 +41,9 @@
 #' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (of the
 #'   restricted quasi-likelihood for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
 #'   evals, h_bound = upper end of the search actually used, time; Cox: also baseline = data.frame(time,
-#'   cumhaz), the cumulative baseline hazard at the event times, and beta's intercept is the log of the factor by
-#'   which the Poisson fit rescales that baseline).
+#'   cumhaz), the cumulative baseline hazard at the end of every interval of the life table, whose log increments
+#'   are the first entries of beta (with no related pair: at the event times, and beta's intercept is the log of
+#'   the factor by which the Poisson fit rescales that baseline)).
 #' @export
 reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial", "cox"), id_col = "IID",
                      para = list()) {
@@ -63,12 +69,14 @@ reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial", 
 #' kin_scale 2: K_ij = kin_scale x
 #' the pairwise kinship coefficient (0.25 for full siblings gives 0.5); diag 1 diagonal of K; rank_tol 1e-10 a
 #' covariate column is aliased (dropped with a warning) when its residual sum of squares on the earlier columns
-#' is below rank_tol x its own sum of squares.
+#' is below rank_tol x its own sum of squares; n_interval 10 intervals of the life table of the Cox model with
+#' kinship (cut at quantiles of the event times; fewer when there are fewer distinct event times). For the Cox
+#' model h is a correlation of records, of the order of 1 / n_interval, and max_iter counts the iterations.
 #' @export
 reml_tau_para <- function() {
   list(h_max = 0.999, tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
        start_iter = 2L, h_window = 0.1, f_tol = 1e-8,
-       kin_scale = 2, diag = 1, rank_tol = 1e-10)
+       kin_scale = 2, diag = 1, rank_tol = 1e-10, n_interval = 10L)
 }
 
 # The kinship route of gwas(): the null model formula + b, b ~ N(0, tau K) is fitted once (.reml_null), then
@@ -146,10 +154,16 @@ reml_tau_para <- function() {
     f <- reml_tau_gaussian_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, as.integer(P$max_eval),
                                P$rank_tol, proj)
     est <- list(tau = f$tau, s2e = f$s2e, h2 = f$h, converged = TRUE, iterations = 1L)
+  } else if (family == "cox" && !length(kin$i)) {  # no related pair: the Cox partial-likelihood fit
+    f <- cox_null_cpp(D$y, D$status, D$X, as.integer(P$max_iter), P$mu_eps, P$f_tol, P$rank_tol, proj)
+    if (!f$converged) warning("The Cox null model did not converge.", call. = FALSE)
+    f <- c(f, list(tau = 0, m2l_0 = f$m2l, n_related = 0L, pairs = 0, evals = 0L, h_bound = NA_real_))
+    est <- list(tau = 0, s2e = 1, h2 = 0, converged = f$converged, iterations = f$iterations,
+                baseline = data.frame(time = f$base_time, cumhaz = f$base_cumhaz))
   } else if (family == "cox") {
-    f <- reml_tau_cox_cpp(D$y, D$status, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, as.integer(P$max_iter),
-                          as.integer(P$max_eval), P$mu_eps, as.integer(P$start_iter), P$h_window, P$f_tol,
-                          P$rank_tol, proj)
+    if (P$diag != 1) stop("The Cox model with kinship takes diag = 1.", call. = FALSE)
+    f <- reml_tau_cox_cpp(D$y, D$status, D$X, kin$i, kin$j, kin$v, as.integer(P$n_interval), P$h_max, P$tol,
+                          as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, P$f_tol, P$rank_tol, proj)
     if (!f$converged) warning("The Cox null model with kinship did not converge.", call. = FALSE)
     est <- list(tau = f$tau, s2e = 1 - f$tau, h2 = f$tau, converged = f$converged, iterations = f$iterations,
                 baseline = data.frame(time = f$base_time, cumhaz = f$base_cumhaz))
@@ -163,8 +177,11 @@ reml_tau_para <- function() {
   if (length(f$keep) < ncol(D$X))
     warning("Aliased covariate column(s) dropped: ", paste(colnames(D$X)[-f$keep], collapse = ", "), call. = FALSE)
   lrt <- max(0, f$m2l_0 - f$m2l)
+  bn <- colnames(D$X)[f$keep]
+  if (!is.null(f$n_interval))  # life table: the interval intercepts take the place of the intercept
+    bn <- c(paste0("(Interval ", seq_len(f$n_interval), ")"), bn[-1L])
   est <- c(est, list(lrt = lrt, p_lrt = if (lrt > 0) 0.5 * stats::pchisq(lrt, 1, lower.tail = FALSE) else 1,
-                     beta = stats::setNames(f$beta, colnames(D$X)[f$keep]), n = length(D$y),
+                     beta = stats::setNames(f$beta, bn), n = length(D$y),
                      n_related = f$n_related, pairs = f$pairs, evals = f$evals, h_bound = f$h_bound))
   list(est = est, null = f$null)
 }
