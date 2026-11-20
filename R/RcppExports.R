@@ -97,8 +97,8 @@ genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh
     .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
 }
 
-sbayesrc_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bins, control, replay, threads) {
-    .Call(`_plink4r_sbayesrc_cpp`, ld_dir, blocks, keep, z, n, af, A, bins, control, replay, threads)
+sbayesrc_cpp <- function(ld_dir, blocks, keep, z, n, af, A, pw_i, pw_j, pw_r, control, replay, threads) {
+    .Call(`_plink4r_sbayesrc_cpp`, ld_dir, blocks, keep, z, n, af, A, pw_i, pw_j, pw_r, control, replay, threads)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {

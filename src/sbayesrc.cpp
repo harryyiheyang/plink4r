@@ -10,9 +10,9 @@
 // with soft thresholding on the q x q quadratic model; Hessian refreshed every hess_every iterations).
 // Pipeline (fast_chain.py): SBayesRC pseudo training / validation summaries, warm-start chain over eigen cutoffs,
 // SBayesRC rule for the cutoff, main fit on the full data warm from the chosen level.
-// LD-bin suppression: bins are given (precomputed, one id per kept SNP, -1 = no bin). Inside a bin with an annotated
-// member (any nonzero binary 0/1 annotation column), SNPs without annotation get delta = 0 (no prior mass on the
-// nonzero classes) in every fit and are left out of the theta regression.
+// LD-bin suppression (ld_bins.h): bins from the given pairwise LD (GCTB .pwld) at r^2 > bin_r2. Inside a bin with an
+// annotated member (any nonzero binary 0/1 annotation column), SNPs without annotation get delta = 0 (no prior mass on
+// the nonzero classes) in every fit and are left out of the theta regression.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -27,6 +27,7 @@
 #include <omp.h>
 #endif
 #include "eigen_int16.h"
+#include "ld_bins.h"
 #include "resources.h"
 
 using plink4r::Block16;
@@ -599,13 +600,13 @@ Ctl read_ctl(const Rcpp::List& x) {
 
 // SBayesRC pipeline of fast_chain.py. blocks / keep: panel blocks and their 0-based eigen rows with data; z, n: z-score
 // and sample size per kept SNP (blocks concatenated): bhat = z / sqrt(n + z^2) (summarystat_impute BETA), N = median n;
-// af: effect-allele frequency; A: kept SNPs x C annotation matrix (C may be 0); bins: LD bin id per kept SNP (0-based,
-// -1 = none; empty = no suppression); control: sbayesrc_control();
+// af: effect-allele frequency; A: kept SNPs x C annotation matrix (C may be 0); pw_i, pw_j, pw_r: pairwise LD (0-based
+// kept SNP indices, -1 = not kept; LD correlation; empty = no suppression); control: sbayesrc_control();
 // replay: NULL, or list(normal, seed (character), chisq) of recorded draws (validation against the original only).
 // [[Rcpp::export]]
 Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
-                        Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::IntegerVector bins,
-                        Rcpp::List control,
+                        Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::IntegerVector pw_i,
+                        Rcpp::IntegerVector pw_j, Rcpp::NumericVector pw_r,                        Rcpp::List control,
                         Rcpp::Nullable<Rcpp::List> replay, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const Ctl c = read_ctl(control);
@@ -619,8 +620,10 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
   std::vector<int64_t> off(nb + 1, 0);
   for (int b = 0; b < nb; ++b) { kv[b] = Rcpp::as<std::vector<int>>(keep[b]); off[b + 1] = off[b] + (int64_t)kv[b].size(); }
   const int64_t M = off[nb];
-  if (z.size() != M || n.size() != M || af.size() != M || A.nrow() != M || (bins.size() && bins.size() != M))
-    Rcpp::stop("z, n, af, A and bins must have one row per kept SNP");
+  if (z.size() != M || n.size() != M || af.size() != M || A.nrow() != M)
+    Rcpp::stop("z, n, af and A must have one row per kept SNP");
+  if (pw_j.size() != pw_i.size() || pw_r.size() != pw_i.size()) Rcpp::stop("pw_i, pw_j and pw_r differ in length");
+  const double bin_r2 = Rcpp::as<double>(control["bin_r2"]);
   std::vector<double> bh(M), nn(n.begin(), n.end());
   for (int64_t j = 0; j < M; ++j) bh[j] = z[j] / std::sqrt(n[j] + z[j] * z[j]);
   std::nth_element(nn.begin(), nn.begin() + M / 2, nn.end());
@@ -665,17 +668,14 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
       for (int64_t j = 0; j < M && bin01; ++j) bin01 = A(j, a) == 0 || A(j, a) == 1;
       if (bin01) bincol.push_back(a);
     }
-    if (bins.size() && !bincol.empty()) {
-      int nbin = 0;
-      for (int64_t j = 0; j < M; ++j) nbin = std::max(nbin, bins[j] + 1);
-      n_bins = nbin;
-      std::vector<char> ann(M, 0), has(nbin, 0);
-      for (int64_t j = 0; j < M; ++j) {
+    if (pw_i.size() && !bincol.empty()) {
+      const std::vector<int> bid = plink4r::greedy_bins(
+          plink4r::pair_neighbours(M, pw_i.begin(), pw_j.begin(), pw_r.begin(), pw_i.size(), bin_r2));
+      std::vector<char> ann(M, 0);
+      for (int64_t j = 0; j < M; ++j)
         for (int a : bincol) if (A(j, a) != 0) { ann[j] = 1; break; }
-        if (ann[j] && bins[j] >= 0) has[bins[j]] = 1;
-      }
-      sup.assign(M, 0);
-      for (int64_t j = 0; j < M; ++j) sup[j] = !ann[j] && bins[j] >= 0 && has[bins[j]];
+      sup = plink4r::bin_suppress(bid, ann);
+      for (int x : bid) n_bins = std::max<int64_t>(n_bins, x + 1);
     }
     // pseudo summaries (SBayesRC pseudoSuma): bt = X z per block, z ~ N(0, I_k) on the stored panel
     const double n_t = std::nearbyint(train_frac * N), n_v = N - n_t;
