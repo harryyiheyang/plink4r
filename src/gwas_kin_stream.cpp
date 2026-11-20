@@ -3,14 +3,14 @@
 // (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed.
 //
 // Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp (kin_sparse.h), used as
-// it is: Omega = V^-1 = S H^-1 S, P = Omega - Omega X (X' Omega X)^-1 X' Omega, r = P y (y the response, or the
+// it is: Omega = V^-1, V = diag(d) + tau K, P = Omega - Omega X (X' Omega X)^-1 X' Omega, r = P y (y the response, or the
 // working response of the logistic model), Q = Omega X La^-T and Vb = X La^-T with X' Omega X = La La'. For a
 // variant g (centred, missing call = mean):
 //   c = g' r,   A = g' P g = g' Omega g - |Q' g|^2,   beta = c / A,   se = A^-1/2,   chi2 = c^2 / A
 // (generalised least squares; for the logistic model on the working response, one step from the null). The exact
 // statistic, not the GRAMMAR-GAMMA approximation.
-// g' Omega g has two parts. Samples without a relative: sum_i om_i g_i^2. Related samples: |L^-1 (s_r o g_r)|^2,
-// one sparse triangular solve per variant with the Cholesky factor of H_rr found by the null model. The n-long
+// g' Omega g has two parts. Samples without a relative: sum_i om_i g_i^2. Related samples: |L^-1 g_r|^2,
+// one sparse triangular solve per variant with the Cholesky factor of V_rr found by the null model. The n-long
 // sums of the first part, Q' g and g' r are entries of L1' G and L2' (G o G) per block of variants, L1 = [Q | r],
 // L2 = [om] (0 at related samples), as in assoc_stream.cpp, from which the reading and blocking are taken. A
 // variant whose A lost more than 1 - 1 / kKappaMax of g' Omega g to the subtraction is recomputed from
@@ -100,11 +100,10 @@ struct Worker {
     const unsigned code = (g8[s * sb + (i >> 2)] >> ((i & 3) << 1)) & 3;
     return code == 3 ? 0.0 : static_cast<double>(code) - mu;
   }
-  // the related samples' centred values of slot s, scaled, into gr (in the order of the factor)
+  // the related samples' centred values of slot s into gr (in the order of the factor)
   void related(const Pre& pre, int s) {
     const int* rs = pre.N->rs.data();
-    const double* ss = pre.N->ss.data();
-    for (int q = 0; q < pre.nr; ++q) gr[q] = ss[q] * value(s, rs[q]);
+    for (int q = 0; q < pre.nr; ++q) gr[q] = value(s, rs[q]);
   }
 };
 
@@ -122,7 +121,7 @@ double explicit_projection(const Pre& pre, Worker& wk, int s, const double* M) {
   double a = 0.0;
   for (std::size_t i = 0; i < N; ++i) a += pre.om[i] * wk.z[i] * wk.z[i];
   if (pre.nr == 0) return a;
-  for (int q = 0; q < pre.nr; ++q) wk.gr[q] = pre.N->ss[q] * wk.z[pre.N->rs[q]];
+  for (int q = 0; q < pre.nr; ++q) wk.gr[q] = wk.z[pre.N->rs[q]];
   return a + pre.N->quad_rel(wk.gr);
 }
 

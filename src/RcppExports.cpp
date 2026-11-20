@@ -426,8 +426,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // reml_tau_binomial_cpp
-Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, double eta_tol, int max_iter, int max_eval, double mu_eps, double rank_tol, bool proj);
-RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP eta_tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
+Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double tau_max, double tol, double eta_tol, int max_iter, int max_eval, double mu_eps, double rank_tol, bool proj, int threads);
+RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP tau_maxSEXP, SEXP tolSEXP, SEXP eta_tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP rank_tolSEXP, SEXP projSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -437,7 +437,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type kj(kjSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type kv(kvSEXP);
     Rcpp::traits::input_parameter< double >::type kdiag(kdiagSEXP);
-    Rcpp::traits::input_parameter< double >::type h_max(h_maxSEXP);
+    Rcpp::traits::input_parameter< double >::type tau_max(tau_maxSEXP);
     Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
     Rcpp::traits::input_parameter< double >::type eta_tol(eta_tolSEXP);
     Rcpp::traits::input_parameter< int >::type max_iter(max_iterSEXP);
@@ -445,7 +445,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type mu_eps(mu_epsSEXP);
     Rcpp::traits::input_parameter< double >::type rank_tol(rank_tolSEXP);
     Rcpp::traits::input_parameter< bool >::type proj(projSEXP);
-    rcpp_result_gen = Rcpp::wrap(reml_tau_binomial_cpp(y, X, ki, kj, kv, kdiag, h_max, tol, eta_tol, max_iter, max_eval, mu_eps, rank_tol, proj));
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(reml_tau_binomial_cpp(y, X, ki, kj, kv, kdiag, tau_max, tol, eta_tol, max_iter, max_eval, mu_eps, rank_tol, proj, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -514,7 +515,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 10},
-    {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 14},
+    {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}
