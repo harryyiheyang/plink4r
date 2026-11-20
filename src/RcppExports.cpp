@@ -406,8 +406,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // sbayesrc_cpp
-Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::List control, Rcpp::Nullable<Rcpp::List> replay, int threads);
-RcppExport SEXP _plink4r_sbayesrc_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP controlSEXP, SEXP replaySEXP, SEXP threadsSEXP) {
+Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::IntegerVector bins, Rcpp::List control, Rcpp::Nullable<Rcpp::List> replay, int threads);
+RcppExport SEXP _plink4r_sbayesrc_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP binsSEXP, SEXP controlSEXP, SEXP replaySEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -418,10 +418,11 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type n(nSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type af(afSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type A(ASEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type bins(binsSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type control(controlSEXP);
     Rcpp::traits::input_parameter< Rcpp::Nullable<Rcpp::List> >::type replay(replaySEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(sbayesrc_cpp(ld_dir, blocks, keep, z, n, af, A, control, replay, threads));
+    rcpp_result_gen = Rcpp::wrap(sbayesrc_cpp(ld_dir, blocks, keep, z, n, af, A, bins, control, replay, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -488,7 +489,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
-    {"_plink4r_sbayesrc_cpp", (DL_FUNC) &_plink4r_sbayesrc_cpp, 10},
+    {"_plink4r_sbayesrc_cpp", (DL_FUNC) &_plink4r_sbayesrc_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {"_plink4r_viprs_cpp", (DL_FUNC) &_plink4r_viprs_cpp, 10},
     {NULL, NULL, 0}

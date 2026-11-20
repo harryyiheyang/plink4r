@@ -10,8 +10,9 @@
 // with soft thresholding on the q x q quadratic model; Hessian refreshed every hess_every iterations).
 // Pipeline (fast_chain.py): SBayesRC pseudo training / validation summaries, warm-start chain over eigen cutoffs,
 // SBayesRC rule for the cutoff, main fit on the full data warm from the chosen level.
-// LD-bin suppression (ld_bins.h): inside a bin of r2 > bin_r2 with an annotated member, SNPs without annotation get
-// delta = 0 (no prior mass on the nonzero classes) in every fit and are left out of the theta regression.
+// LD-bin suppression: bins are given (precomputed, one id per kept SNP, -1 = no bin). Inside a bin with an annotated
+// member (any nonzero binary 0/1 annotation column), SNPs without annotation get delta = 0 (no prior mass on the
+// nonzero classes) in every fit and are left out of the theta regression.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -26,7 +27,6 @@
 #include <omp.h>
 #endif
 #include "eigen_int16.h"
-#include "ld_bins.h"
 #include "resources.h"
 
 using plink4r::Block16;
@@ -599,11 +599,13 @@ Ctl read_ctl(const Rcpp::List& x) {
 
 // SBayesRC pipeline of fast_chain.py. blocks / keep: panel blocks and their 0-based eigen rows with data; z, n: z-score
 // and sample size per kept SNP (blocks concatenated): bhat = z / sqrt(n + z^2) (summarystat_impute BETA), N = median n;
-// af: effect-allele frequency; A: kept SNPs x C annotation matrix (C may be 0); control: sbayesrc_control();
+// af: effect-allele frequency; A: kept SNPs x C annotation matrix (C may be 0); bins: LD bin id per kept SNP (0-based,
+// -1 = none; empty = no suppression); control: sbayesrc_control();
 // replay: NULL, or list(normal, seed (character), chisq) of recorded draws (validation against the original only).
 // [[Rcpp::export]]
 Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
-                        Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::List control,
+                        Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, Rcpp::IntegerVector bins,
+                        Rcpp::List control,
                         Rcpp::Nullable<Rcpp::List> replay, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const Ctl c = read_ctl(control);
@@ -611,16 +613,14 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
   const int chain_iter = Rcpp::as<int>(control["chain_iter"]), chain_burn = Rcpp::as<int>(control["chain_burn"]);
   const int main_iter = Rcpp::as<int>(control["main_iter"]), main_burn = Rcpp::as<int>(control["main_burn"]);
   const double train_frac = Rcpp::as<double>(control["train_frac"]), rel_r_min = Rcpp::as<double>(control["rel_r_min"]);
-  const double bin_r2 = Rcpp::as<double>(control["bin_r2"]);
-  const int bin_tile = Rcpp::as<int>(control["bin_tile"]);
   const int nb = blocks.size();
   if (keep.size() != nb) Rcpp::stop("blocks and keep differ in length");
   std::vector<std::vector<int>> kv(nb);
   std::vector<int64_t> off(nb + 1, 0);
   for (int b = 0; b < nb; ++b) { kv[b] = Rcpp::as<std::vector<int>>(keep[b]); off[b + 1] = off[b] + (int64_t)kv[b].size(); }
   const int64_t M = off[nb];
-  if (z.size() != M || n.size() != M || af.size() != M || A.nrow() != M)
-    Rcpp::stop("z, n, af and A must have one row per kept SNP");
+  if (z.size() != M || n.size() != M || af.size() != M || A.nrow() != M || (bins.size() && bins.size() != M))
+    Rcpp::stop("z, n, af, A and bins must have one row per kept SNP");
   std::vector<double> bh(M), nn(n.begin(), n.end());
   for (int64_t j = 0; j < M; ++j) bh[j] = z[j] / std::sqrt(n[j] + z[j] * z[j]);
   std::nth_element(nn.begin(), nn.begin() + M / 2, nn.end());
@@ -656,32 +656,26 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
       catch (const std::exception& e) { err[b] = e.what(); }
     }
     for (int b = 0; b < nb; ++b) if (!err[b].empty()) Rcpp::stop("block %d: %s", blocks[b], err[b].c_str());
-    // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column; bins at r2 > bin_r2
+    // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column
     std::vector<char> sup;
-    int64_t n_bins = 0, n_sup = 0;
+    int64_t n_bins = 0;
     std::vector<int> bincol;
     for (int a = 0; a < A.ncol(); ++a) {
       bool bin01 = true;
       for (int64_t j = 0; j < M && bin01; ++j) bin01 = A(j, a) == 0 || A(j, a) == 1;
       if (bin01) bincol.push_back(a);
     }
-    if (bin_r2 > 0 && !bincol.empty()) {
-      sup.assign(M, 0);
-      std::vector<int64_t> nbin(nb, 0);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
-#endif
-      for (int b = 0; b < nb; ++b) {
-        const std::vector<int> bid = plink4r::block_bins(plink4r::block_neighbours(P[b], bin_r2, bin_tile));
-        std::vector<char> ann(P[b].nk, 0);
-        for (int j = 0; j < P[b].nk; ++j)
-          for (int a : bincol) if (A(off[b] + j, a) != 0) { ann[j] = 1; break; }
-        const std::vector<char> s = plink4r::block_suppress(bid, ann);
-        std::copy(s.begin(), s.end(), sup.begin() + off[b]);
-        for (int x : bid) nbin[b] = std::max<int64_t>(nbin[b], x + 1);
+    if (bins.size() && !bincol.empty()) {
+      int nbin = 0;
+      for (int64_t j = 0; j < M; ++j) nbin = std::max(nbin, bins[j] + 1);
+      n_bins = nbin;
+      std::vector<char> ann(M, 0), has(nbin, 0);
+      for (int64_t j = 0; j < M; ++j) {
+        for (int a : bincol) if (A(j, a) != 0) { ann[j] = 1; break; }
+        if (ann[j] && bins[j] >= 0) has[bins[j]] = 1;
       }
-      for (int b = 0; b < nb; ++b) n_bins += nbin[b];
-      for (char x : sup) n_sup += x;
+      sup.assign(M, 0);
+      for (int64_t j = 0; j < M; ++j) sup[j] = !ann[j] && bins[j] >= 0 && has[bins[j]];
     }
     // pseudo summaries (SBayesRC pseudoSuma): bt = X z per block, z ~ N(0, I_k) on the stored panel
     const double n_t = std::nearbyint(train_frac * N), n_v = N - n_t;
