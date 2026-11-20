@@ -2,18 +2,19 @@
 #'
 #' Fits the null model `formula + b`, `b ~ N(0, tau K)` with a sparse kinship matrix `K` and returns `tau`.
 #' Linear (`family = "gaussian"`): `y = X beta + b + e`, `e ~ N(0, s2e I)`; one Brent search over
-#' `h = tau / (tau + s2e)` of the profiled REML likelihood. Logistic (`"binomial"`): on the IRLS working scale,
-#' in marginal form: `logit(mu) = X beta` and the Pearson residuals `(y - mu) / sqrt(mu (1 - mu))` have covariance
-#' `(1 - h) I + h K`, so the working response has covariance `W^-1/2 ((1 - h) I + h K) W^-1/2`,
-#' `W = diag(mu (1 - mu))`; `h` by one Brent search of the working REML likelihood, alternated with the
-#' generalised-least-squares update of `beta` until both settle. `tau = h` and `s2e = 1 - h` are then on the
-#' Pearson-residual scale.
+#' `h = tau / (tau + s2e)` of the profiled REML likelihood. Logistic (`"binomial"`): marginal
+#' form, `logit(mu) = X beta` and `Var(y) = W^1/2 ((1 - h) I + h K) W^1/2`, `W = diag(mu (1 - mu))`, i.e. the
+#' Pearson residuals `e = (y - mu) / sqrt(mu (1 - mu))` have covariance `H = (1 - h) I + h K`. Nested: for a given
+#' `h`, `beta_hat(h)` solves `X' W^1/2 H^-1 e = 0` by Fisher scoring to convergence; `h` minimises
+#' `f(h) = log|H| + sum log w + log|X' W^1/2 H^-1 W^1/2 X| + e' H^-1 e` at `beta_hat(h)` (the Gaussian restricted
+#' quasi-likelihood of `y` with these two moments) by a Brent search started from a few steps of the alternating
+#' scheme. `tau = h` and `s2e = 1 - h` are then on the Pearson-residual scale.
 #'
 #' Samples without a relative in `kinship` enter with the diagonal entry of `K` alone (a scalar variance, which
 #' does not depend on `h` when that entry is 1, so they carry no information on `h`); the related samples are
 #' held together as one sparse matrix and factorised by sparse Cholesky at every value of `h`, so the cost per
 #' likelihood evaluation is one small sparse factorisation and solves with the related samples' rows only (the
-#' cross-products over all samples are formed once per working data). With no related pair, or at `h = 0`, the
+#' cross-products over all samples are formed once per scoring step). With no related pair, or at `h = 0`, the
 #' fit is ordinary least squares / logistic regression.
 #'
 #' @param formula The fixed part of the model, `phenotype ~ covariates`, as in [gwas()] (factors and characters
@@ -28,8 +29,8 @@
 #' @param family `"gaussian"` or `"binomial"`.
 #' @param id_col Column of `data` with the sample IDs.
 #' @param para named list overriding [reml_tau_para()].
-#' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (on the working
-#'   scale for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
+#' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (of the
+#'   restricted quasi-likelihood for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
 #'   evals, h_bound = upper end of the search actually used, time).
 #' @export
 reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"), id_col = "IID", para = list()) {
@@ -45,15 +46,19 @@ reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"),
 #'
 #' h_max 0.999 upper end of the search for h (the search stops earlier, at `h_bound`, when `(1 - h) I + h K` is
 #' not positive definite up to h_max, e.g. with a pair whose K_ij exceeds the diagonal);
-#' tol 1e-6 Brent tolerance and change of h at convergence; eta_tol 1e-6 largest change of the linear
-#' predictor at convergence (logistic); max_iter 50 outer iterations (logistic); max_eval 100 likelihood
-#' evaluations per Brent search; mu_eps 1e-10 bound of the fitted probabilities; kin_scale 2: K_ij = kin_scale x
+#' tol 1e-6 Brent tolerance; eta_tol 1e-6 largest change of the linear predictor at convergence of the scoring
+#' (logistic); max_iter 50 scoring steps per value of h (logistic); max_eval 100 evaluations per Brent search;
+#' mu_eps 1e-10 bound of the fitted probabilities; start_iter 2 steps of the alternating scheme that give the
+#' start value of h (logistic); h_window 0.1 half-width of the search around it (the whole interval is searched
+#' when the minimum falls on the edge of the window); f_tol 1e-6 h is exactly 0 unless it improves the criterion
+#' at h = 0 by more than this (logistic); kin_scale 2: K_ij = kin_scale x
 #' the pairwise kinship coefficient (0.25 for full siblings gives 0.5); diag 1 diagonal of K; rank_tol 1e-10 a
 #' covariate column is aliased (dropped with a warning) when its residual sum of squares on the earlier columns
 #' is below rank_tol x its own sum of squares.
 #' @export
 reml_tau_para <- function() {
   list(h_max = 0.999, tol = 1e-6, eta_tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
+       start_iter = 2L, h_window = 0.1, f_tol = 1e-6,
        kin_scale = 2, diag = 1, rank_tol = 1e-10)
 }
 
@@ -134,7 +139,8 @@ reml_tau_para <- function() {
     est <- list(tau = f$tau, s2e = f$s2e, h2 = f$h, converged = TRUE, iterations = 1L)
   } else {
     f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, P$eta_tol,
-                               as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, P$rank_tol, proj)
+                               as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, as.integer(P$start_iter),
+                               P$h_window, P$f_tol, P$rank_tol, proj)
     if (!f$converged) warning("The logistic null model with kinship did not converge.", call. = FALSE)
     est <- list(tau = f$tau, s2e = 1 - f$tau, h2 = f$tau, converged = f$converged, iterations = f$iterations)
   }
