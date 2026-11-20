@@ -451,6 +451,33 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// reml_tau_cox_cpp
+Rcpp::List reml_tau_cox_cpp(const Rcpp::NumericVector& time, const Rcpp::NumericVector& status, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_iter, int max_eval, double mu_eps, int start_iter, double h_window, double f_tol, double rank_tol, bool proj);
+RcppExport SEXP _plink4r_reml_tau_cox_cpp(SEXP timeSEXP, SEXP statusSEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP start_iterSEXP, SEXP h_windowSEXP, SEXP f_tolSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type time(timeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type status(statusSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type X(XSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type ki(kiSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type kj(kjSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type kv(kvSEXP);
+    Rcpp::traits::input_parameter< double >::type kdiag(kdiagSEXP);
+    Rcpp::traits::input_parameter< double >::type h_max(h_maxSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    Rcpp::traits::input_parameter< int >::type max_iter(max_iterSEXP);
+    Rcpp::traits::input_parameter< int >::type max_eval(max_evalSEXP);
+    Rcpp::traits::input_parameter< double >::type mu_eps(mu_epsSEXP);
+    Rcpp::traits::input_parameter< int >::type start_iter(start_iterSEXP);
+    Rcpp::traits::input_parameter< double >::type h_window(h_windowSEXP);
+    Rcpp::traits::input_parameter< double >::type f_tol(f_tolSEXP);
+    Rcpp::traits::input_parameter< double >::type rank_tol(rank_tolSEXP);
+    Rcpp::traits::input_parameter< bool >::type proj(projSEXP);
+    rcpp_result_gen = Rcpp::wrap(reml_tau_cox_cpp(time, status, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj));
+    return rcpp_result_gen;
+END_RCPP
+}
 // reml_tau_gaussian_cpp
 Rcpp::List reml_tau_gaussian_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_eval, double rank_tol, bool proj);
 RcppExport SEXP _plink4r_reml_tau_gaussian_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_evalSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
@@ -517,6 +544,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 10},
     {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 16},
+    {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 17},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {NULL, NULL, 0}

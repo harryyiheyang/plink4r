@@ -8,7 +8,11 @@
 #' `h`, `beta_hat(h)` solves `X' W^1/2 H^-1 e = 0` by Fisher scoring to convergence; `h` minimises
 #' `f(h) = log|H| + sum log w + log|X' W^1/2 H^-1 W^1/2 X| + e' H^-1 e` at `beta_hat(h)` (the Gaussian restricted
 #' quasi-likelihood of `y` with these two moments) by a Brent search started from a few steps of the alternating
-#' scheme. `tau = h` and `s2e = 1 - h` are then on the Pearson-residual scale.
+#' scheme. `tau = h` and `s2e = 1 - h` are then on the Pearson-residual scale. Cox (`"cox"`; phenotype
+#' `cbind(time, status)`): the same marginal form on the Poisson form of the Cox likelihood: the event indicator
+#' has mean `mu = Lambda0(time) exp(X beta)` and `Var = W^1/2 ((1 - h) I + h K) W^1/2`, `W = diag(mu)`; for a given
+#' `h`, `beta_hat(h)` and the Breslow baseline `Lambda0_hat(h)` are found together, and `h` minimises the same
+#' `f`. With `h = 0` this is the Cox partial-likelihood fit.
 #'
 #' Samples without a relative in `kinship` enter with the diagonal entry of `K` alone (a scalar variance, which
 #' does not depend on `h` when that entry is 1, so they carry no information on `h`); the related samples are
@@ -26,14 +30,17 @@
 #'   0.125 for second-degree relatives). Column names are not used. The matrix `K` is built here: `K_ij =
 #'   para$kin_scale` (2) times the coefficient of the pair, `K_ii = para$diag` (1), 0 for every pair not listed.
 #'   Pairs with a sample outside the analysis are dropped.
-#' @param family `"gaussian"` or `"binomial"`.
+#' @param family `"gaussian"`, `"binomial"` or `"cox"`.
 #' @param id_col Column of `data` with the sample IDs.
 #' @param para named list overriding [reml_tau_para()].
 #' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (of the
 #'   restricted quasi-likelihood for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
-#'   evals, h_bound = upper end of the search actually used, time).
+#'   evals, h_bound = upper end of the search actually used, time; Cox: also baseline = data.frame(time,
+#'   cumhaz), the cumulative baseline hazard at the event times, and beta's intercept is the log of the factor by
+#'   which the Poisson fit rescales that baseline).
 #' @export
-reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"), id_col = "IID", para = list()) {
+reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial", "cox"), id_col = "IID",
+                     para = list()) {
   family <- match.arg(family)
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
@@ -88,7 +95,7 @@ reml_tau_para <- function() {
   out[, (stat) := BETA / SE]
   out[, P := 2 * stats::pnorm(-abs(get(stat)))]
   t2 <- proc.time()[["elapsed"]]
-  data.table::setattr(out, "info", c(nl$est[setdiff(names(nl$est), "beta")],
+  data.table::setattr(out, "info", c(nl$est[setdiff(names(nl$est), c("beta", "baseline"))],
                                      list(samples = nl$est$n, family = family, covariate_rank = length(nl$est$beta),
                                           block = res$block, threads = res$threads, mem_gb = res$mem_gb,
                                           simd = res$simd, dosage = res$dosage, explicit_projection = res$explicit,
@@ -112,7 +119,7 @@ reml_tau_para <- function() {
   s <- .pheno_samples(as.data.frame(data), formula, family, id_col, iid)
   X <- stats::model.matrix(stats::delete.response(stats::terms(formula)), data = s$d)
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
-  list(ids = as.character(s$d[[id_col]]), y = s$y, X = X, srow = s$srow)
+  list(ids = as.character(s$d[[id_col]]), y = s$y, status = s$status, X = X, srow = s$srow)
 }
 
 # K over the analysis samples `ids` from the related pairs (a three-column data.frame: ID, ID, kinship
@@ -139,6 +146,13 @@ reml_tau_para <- function() {
     f <- reml_tau_gaussian_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, as.integer(P$max_eval),
                                P$rank_tol, proj)
     est <- list(tau = f$tau, s2e = f$s2e, h2 = f$h, converged = TRUE, iterations = 1L)
+  } else if (family == "cox") {
+    f <- reml_tau_cox_cpp(D$y, D$status, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, as.integer(P$max_iter),
+                          as.integer(P$max_eval), P$mu_eps, as.integer(P$start_iter), P$h_window, P$f_tol,
+                          P$rank_tol, proj)
+    if (!f$converged) warning("The Cox null model with kinship did not converge.", call. = FALSE)
+    est <- list(tau = f$tau, s2e = 1 - f$tau, h2 = f$tau, converged = f$converged, iterations = f$iterations,
+                baseline = data.frame(time = f$base_time, cumhaz = f$base_cumhaz))
   } else {
     f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol,
                                as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, as.integer(P$start_iter),

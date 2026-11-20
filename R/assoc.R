@@ -25,7 +25,12 @@
 #'   missing value in any of them, or not in the genotype file, are left out.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
-#' @param family `"gaussian"` (linear) or `"binomial"` (logistic).
+#' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards; [gwas()] and
+#'   [reml_tau()] only). Cox: the phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
+#'   status)`), `status` 1 for an event and 0 for censoring. The null model (covariate effects, the Breslow
+#'   baseline cumulative hazard `Lambda0` and, with `kinship`, the kinship correlation; see [reml_tau()]) is fitted
+#'   once; every variant is then tested in the Poisson model of the event indicator with `log Lambda0(time)` as an
+#'   offset (`BETA` a log hazard ratio, one step from the null model; `Z` and its normal `P`).
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
@@ -50,12 +55,14 @@
 #'   samples, covariate rank, block size, threads, memory budget, SIMD set, variants recomputed by explicit
 #'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
-gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial"),
+gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
                  kinship = NULL, para = list()) {
   family <- match.arg(family)
+  if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
+    kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
-    if (robust) stop("Robust standard errors are not available with kinship.", call. = FALSE)
+    if (robust) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
     return(.gwas_kinship(formula, data, pfile, bfile, kinship, family, id_col, snp_vec, threads, mem_gb, block,
                          para))
   }
@@ -164,7 +171,8 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
 # value in the variables of the formula (and, with iid, present in the genotype file, in file order; srow = their
-# file rows), a finite phenotype after any transformation, and that phenotype (0/1 for a logistic model).
+# file rows), a finite phenotype after any transformation, and that phenotype (0/1 for a logistic model; the
+# follow-up time, with status the 0/1 event indicator, for a Cox model).
 .pheno_samples <- function(d, formula, family, id_col, iid = NULL) {
   if (!inherits(formula, "formula") || length(formula) != 3L)
     stop("formula must be two-sided: phenotype ~ covariates.", call. = FALSE)
@@ -182,15 +190,22 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
     ok <- ok & !is.na(srow)
   }
   y <- eval(formula[[2L]], d, environment(formula))
+  status <- NULL
+  if (family == "cox") {  # time and event indicator: cbind(time, status), or survival::Surv(time, status)
+    if (!is.matrix(y) || ncol(y) != 2L || nrow(y) != nrow(d) || !(is.numeric(y) || is.logical(y)))
+      stop("A Cox model takes cbind(time, status) (or Surv(time, status)) as its phenotype.", call. = FALSE)
+    status <- as.numeric(y[, 2L]); y <- as.numeric(y[, 1L])
+    ok <- ok & is.finite(status)
+  }
   if ((!is.numeric(y) && !is.logical(y)) || length(y) != nrow(d)) stop("The phenotype must be numeric.", call. = FALSE)
   y <- as.numeric(y)
   ok <- ok & is.finite(y)
   if (!any(ok)) stop("No sample of data has complete data", if (!is.null(iid)) " and is in the genotype file", ".",
                      call. = FALSE)
-  d <- d[ok, , drop = FALSE]; y <- y[ok]
+  d <- d[ok, , drop = FALSE]; y <- y[ok]; status <- status[ok]
   if (!is.null(iid)) {
     srow <- srow[ok]
-    o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]; y <- y[o]
+    o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]; y <- y[o]; status <- status[o]
   }
   if (family == "binomial") {
     u <- sort(unique(y))
@@ -198,10 +213,15 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
       stop("A logistic phenotype must be coded 0/1 or 1/2.", call. = FALSE)
     if (length(unique(y)) < 2L) stop("The phenotype has one class only.", call. = FALSE)
   }
+  if (family == "cox") {
+    if (!all(status %in% c(0, 1))) stop("The event indicator of a Cox model must be coded 0/1.", call. = FALSE)
+    if (!any(status == 1)) stop("No event among the analysed samples.", call. = FALSE)
+    if (any(y < 0)) stop("Follow-up times must not be negative.", call. = FALSE)
+  }
   for (cl in all.vars(formula[[3L]]))
     if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
       stop("Column ", cl, " has a single level among the analysed samples.", call. = FALSE)
-  list(d = d, srow = srow, y = y)
+  list(d = d, srow = srow, y = y, status = status)
 }
 
 # Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.

@@ -105,6 +105,10 @@ reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter,
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }
 
+reml_tau_cox_cpp <- function(time, status, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_cox_cpp`, time, status, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
+}
+
 reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj) {
     .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj)
 }
