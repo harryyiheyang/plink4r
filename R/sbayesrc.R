@@ -7,12 +7,11 @@
 #' P(delta_j >= k | delta_j >= k - 1) = logistic(f_j' theta_k), f_j = (1, A_j), with the adaptive spike-and-slab lasso
 #' on the slopes. Blocks are sampled in parallel.
 #'
-#' LD-bin suppression: the pairwise LD of GCTB GWFM (`.pwld`: SNP1 SNP2 LDcorrelation, from `gctb --get-pwld`) is
-#' filtered at r2 > `bin_r2` and the SNPs are grouped into high-LD bins (greedy, as ld_bins.py: the SNP with the most
-#' unassigned neighbours becomes a bin centre, its bin = itself + those neighbours). Inside a bin with at least one
-#' annotated member (any nonzero binary 0/1 annotation column), the members without annotation get no prior mass on
-#' the nonzero classes (beta = 0) in every fit and are left out of the annotation regression. SNPs without a pair are
-#' singletons; without binary annotation columns nothing is suppressed.
+#' LD-bin suppression: the panel's LD-bin list `ld_dir`/ldbin<bin_r2>.bin (default ldbin0.95.bin) gives, for every
+#' panel SNP in panel order (block, ld_index), its bin id inside its block as int16 (-1 = no bin). Inside a bin with at
+#' least one annotated member (any nonzero binary 0/1 annotation column), the members without annotation get no prior
+#' mass on the nonzero classes (beta = 0) in every fit and are left out of the annotation regression. Without binary
+#' annotation columns nothing is suppressed.
 #'
 #' Steps (fast_chain.py):
 #' 1. SBayesRC pseudo summaries: bhat_t = bhat + sqrt(1 / n_t - 1 / N) X z (z ~ N(0, I)), n_t = round(train_frac N),
@@ -32,8 +31,7 @@
 #' @param ref panel SNP table in place of the .parquet in `ld_dir`.
 #' @param annot NULL, or a data.frame with ID and one numeric column per annotation (continuous columns as given);
 #'   panel SNPs absent from it get 0.
-#' @param pwld pairwise LD with `annot` (GCTB .pwld file or a data.frame with SNP1, SNP2, LDcorrelation); default
-#'   `ld_dir`/rsq0.5.pwld (the GCTB GWFM default).
+#' @param bin_file LD-bin list used with `annot` (default `ld_dir`/ldbin<bin_r2>.bin, see above).
 #' @param control [sbayesrc_control()].
 #' @param threads OpenMP threads (0: [plink4r_resources()]).
 #' @param output optional output path (.parquet or text).
@@ -42,7 +40,7 @@
 #'   nonzero effects after burn-in), `trace` of the main fit, `n_bins` and `n_suppressed` (LD-bin suppression), and
 #'   column SUPPRESSED (TRUE: held at 0 by the suppression).
 #' @export
-sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, pwld = NULL, control = sbayesrc_control(),
+sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, bin_file = NULL, control = sbayesrc_control(),
                      threads = 4L, output = NULL) {
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
@@ -57,23 +55,13 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, pwld = NULL, con
     storage.mode(A) <- "double"
     message(length(cols), " annotation columns; ", sum(!d$x$ID %in% an$ID), " SNPs without annotation (set to 0)")
   }
-  pw <- list(i = integer(0), j = integer(0), r = numeric(0))
-  if (!is.null(annot)) {
-    if (is.null(pwld)) pwld <- file.path(ld_dir, "rsq0.5.pwld")
-    if (is.character(pwld) && !file.exists(pwld)) stop("pairwise LD file not found: ", pwld, call. = FALSE)
-    p <- if (is.character(pwld)) data.table::fread(pwld, header = TRUE, col.names = c("SNP1", "SNP2", "LDcorrelation"))
-         else data.table::as.data.table(pwld)
-    if (!all(c("SNP1", "SNP2", "LDcorrelation") %in% names(p))) stop("pwld needs SNP1, SNP2, LDcorrelation", call. = FALSE)
-    pw <- list(i = match(p$SNP1, d$x$ID) - 1L, j = match(p$SNP2, d$x$ID) - 1L, r = as.numeric(p$LDcorrelation))
-    pw$i[is.na(pw$i)] <- -1L
-    pw$j[is.na(pw$j)] <- -1L
-    message(nrow(p), " LD pairs read; ", sum(pw$i >= 0 & pw$j >= 0 & pw$r^2 > ctl$bin_r2), " at r2 > ", ctl$bin_r2,
-            " among the fitted SNPs")
+  if (is.null(annot)) bin_file <- "" else {
+    if (is.null(bin_file)) bin_file <- file.path(ld_dir, paste0("ldbin", ctl$bin_r2, ".bin"))
+    if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   }
   t0 <- Sys.time()
-  res <- sbayesrc_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, pw$i, pw$j, pw$r, control = ctl,
-                      replay = ctl$replay,
-                      threads = threads)
+  res <- sbayesrc_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, bin_file, d$start, d$n_panel,
+                      control = ctl, replay = ctl$replay, threads = threads)
   n_sup <- sum(res$suppressed)
   message(sprintf("sbayesrc: %d SNPs (%d suppressed in %.0f LD bins), cutoff %g, sigma2 %.3g, %.0f nonzero effects, %.1f s",
                   nrow(d$x), n_sup, res$n_bins, res$cutoff, res$sigma2, res$nnz,
@@ -102,7 +90,7 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, pwld = NULL, con
 #' @param chain_iter,chain_burn iterations per chain level and burn-in of its posterior mean.
 #' @param main_iter,main_burn iterations and burn-in of the main fit.
 #' @param rel_r_min SBayesRC rule threshold on |r / r_base|.
-#' @param bin_r2 r2 threshold of the LD bins of the suppression (pairs of `pwld` at r2 > bin_r2).
+#' @param bin_r2 r2 threshold of the LD bins of the suppression (selects `ld_dir`/ldbin<bin_r2>.bin).
 #' @param train_frac,pseudo_seed pseudo training proportion and its random seed.
 #' @param seed seed of the Gibbs sampler (every fit restarts it, as the original).
 #' @param gam,pi0 mixture variances (relative to sigma^2; 0 = point mass) and their starting weights.
@@ -125,7 +113,7 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, pwld = NULL, con
 #' @return a list.
 #' @export
 sbayesrc_control <- function(cutoffs = c(0.9, 0.95, 0.99, 0.995, 0.999), chain_iter = 10L, chain_burn = NULL,
-                             main_iter = 80L, main_burn = 30L, rel_r_min = 1.25, bin_r2 = 0.99,
+                             main_iter = 80L, main_burn = 30L, rel_r_min = 1.25, bin_r2 = 0.95,
                              train_frac = 0.9, pseudo_seed = 22,
                              seed = 1, gam = c(0, 1e-3, 1e-2, 1e-1, 1), pi0 = NULL, ve = 1, nu = 4, hess_every = 5L,
                              slope_start = 5L, warm = 10L, ridge_prec = 1, ssl_ratio = 10, ssl_l1 = 0.5,

@@ -4,7 +4,8 @@
 # rows with r2 <= 0 carry no data, e.g. imputed rows in blocks without typed SNPs, and are dropped). Rows are matched
 # to the panel by ID; A1 / A2 equal to the panel alt / ref keep Z, the swapped pair flips it, other rows are dropped.
 # Returns x (panel order: block, ld_index; columns ID chr bp37 bp38 A1 A2 freq Z N block ld_index, A1 = panel alt,
-# freq = AF_PanUKB), blocks (ids with at least one SNP) and keep (0-based eigen rows per block).
+# freq = AF_PanUKB), blocks (ids with at least one SNP), keep (0-based eigen rows per block), n_panel (panel SNPs) and
+# start (first row of each of `blocks` in the panel order block, ld_index; per-SNP panel files are indexed by it).
 .prs_inputs <- function(sumstat, ref, ld_dir) {
   s <- .read_table(sumstat)
   need <- c("ID", "A1", "A2", "Z", "N")
@@ -26,7 +27,9 @@
   if (!nrow(x)) stop("no sumstat row matches the panel", call. = FALSE)
   message(nrow(x), " SNPs matched to the panel (", sum(sw), " with A1 / A2 swapped)")
   bl <- x[, .(keep = list(ld_index)), by = block]
-  list(x = x, blocks = bl$block, keep = bl$keep)
+  pn <- r[, .N, keyby = .(block = as.integer(block))]
+  st <- c(0, cumsum(as.numeric(pn$N)))[match(bl$block, pn$block)]
+  list(x = x, blocks = bl$block, keep = bl$keep, n_panel = nrow(r), start = st)
 }
 
 .prs_write <- function(out, output) {
