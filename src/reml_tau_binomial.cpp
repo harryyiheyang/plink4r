@@ -20,7 +20,7 @@
 #include "kin_sparse.h"
 
 // y: n values 0 / 1; X: n x p (with the intercept); kinship and rank_tol as reml_tau_gaussian_cpp.
-// h_max: upper end of the search; tol: Brent tolerance and the change of h at convergence; eta_tol: largest
+// h_max: upper end of the search (or the largest h with H(h) positive definite, h_bound); tol: Brent tolerance and the change of h at convergence; eta_tol: largest
 // change of eta at convergence; max_iter: outer iterations (each of the two phases); mu_eps: fitted
 // probabilities are kept in [mu_eps, 1 - mu_eps]. proj: also the null model for the association stream.
 // Returns h (= tau), the -2 working REML log-likelihood at h and at 0 (same working data), beta, keep (1-based
@@ -48,6 +48,7 @@ Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   } catch (const std::exception& e) { Rcpp::stop(e.what()); }
 
   const double big = 1e300;
+  const double h_top = M.h_bound(h_max, tol);  // H(h) is positive definite on [0, h_top]
   const double* Xp = X.begin();
   std::vector<double> Xc, eta(N, std::log(ybar / (1 - ybar))), sw(N), yt(N), ys(N), Xs(N * p);
   // working data at the current eta, scaled by S
@@ -112,7 +113,7 @@ Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
     ++iters;
     working();
     const double f0 = m2l(0.0);
-    plink4r::BrentResult br = plink4r::brent_min(m2l, 0.0, h_max, tol, tol * 1e-2, max_eval);
+    plink4r::BrentResult br = plink4r::brent_min(m2l, 0.0, h_top, tol, tol * 1e-2, max_eval);
     evals += br.evals + 1;
     const double h_new = br.fx < f0 ? br.x : 0.0;
     const double ch = update(h_new);
@@ -129,7 +130,7 @@ Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   Rcpp::IntegerVector kp(keep.begin(), keep.end());
   kp = kp + 1;
   return Rcpp::List::create(
-      Rcpp::Named("tau") = h, Rcpp::Named("m2l") = fh, Rcpp::Named("m2l_0") = f0,
+      Rcpp::Named("tau") = h, Rcpp::Named("h_bound") = h_top, Rcpp::Named("m2l") = fh, Rcpp::Named("m2l_0") = f0,
       Rcpp::Named("iterations") = iters, Rcpp::Named("evals") = evals, Rcpp::Named("converged") = conv && conv0,
       Rcpp::Named("beta") = Rcpp::NumericVector(M.beta.data(), M.beta.data() + p), Rcpp::Named("keep") = kp,
       Rcpp::Named("n_related") = M.K.nr, Rcpp::Named("pairs") = static_cast<double>(M.K.pairs),

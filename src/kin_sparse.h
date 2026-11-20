@@ -129,6 +129,19 @@ struct KinNull {
     return true;
   }
 
+  // The upper end of the search for h: the largest h <= h_max at which H(h) is positive definite. The eigenvalues
+  // of H(h) are 1 + h (lambda - 1), lambda those of K, so H is positive definite on [0, 1 / (1 - lambda_min)) and
+  // the end is found by bisection on the factorisation (to tol).
+  double h_bound(double h_max, double tol) {
+    if (factor(h_max)) return h_max;
+    double lo = 0.0, hi = h_max;
+    while (hi - lo > tol) {
+      const double mid = 0.5 * (lo + hi);
+      if (factor(mid)) lo = mid; else hi = mid;
+    }
+    return lo;
+  }
+
   // The scaled data: Xs = S X (n x pp column-major), ys = S y.
   void set_data(const double* Xs, const double* ys, int pp) {
     p = pp;

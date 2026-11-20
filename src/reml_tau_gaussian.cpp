@@ -13,7 +13,8 @@
 #include "kin_sparse.h"
 
 // y: n; X: n x p (with the intercept); ki, kj, kv: off-diagonal kinship entries (0-based samples, each pair
-// once); kdiag: the diagonal of K. h is searched on [0, h_max]. Columns of X that are a linear combination of
+// once); kdiag: the diagonal of K. h is searched on [0, h_max], or up to the largest h at which
+// H(h) is positive definite when that is smaller (h_bound). Columns of X that are a linear combination of
 // earlier ones (rank_tol) are left out. proj: also the null model for the association stream.
 // Returns s2g (= tau), s2e, h, the -2 REML log-likelihood at h and at 0 (same constant), beta, keep (1-based
 // columns of X used) and null (external pointer to the plink4r::KinNull; V^-1 = H^-1 / s2).
@@ -46,6 +47,7 @@ Rcpp::List reml_tau_gaussian_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   }
   if (n <= p) Rcpp::stop("more covariates than samples");
   const double big = 1e300;
+  const double h_top = N.h_bound(h_max, tol);  // H(h) is positive definite on [0, h_top]
   const double df = static_cast<double>(n - p);
   auto m2l = [&](double h) {
     if (!N.solve(h) || !(N.quad > 0)) return big;
@@ -53,7 +55,7 @@ Rcpp::List reml_tau_gaussian_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   };
   const double f0 = m2l(0.0);
   if (f0 >= big) Rcpp::stop("the null model without kinship cannot be fitted");
-  plink4r::BrentResult br = plink4r::brent_min(m2l, 0.0, h_max, tol, tol * 1e-2, max_eval);
+  plink4r::BrentResult br = plink4r::brent_min(m2l, 0.0, h_top, tol, tol * 1e-2, max_eval);
   double h = br.x, fh = br.fx;
   if (!(fh < f0)) { h = 0.0; fh = f0; }
   if (!N.solve(h)) Rcpp::stop("V is not positive definite at the estimate");
@@ -64,7 +66,7 @@ Rcpp::List reml_tau_gaussian_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   kp = kp + 1;
   return Rcpp::List::create(
       Rcpp::Named("tau") = h * s2, Rcpp::Named("s2e") = (1.0 - h) * s2, Rcpp::Named("h") = h,
-      Rcpp::Named("m2l") = fh, Rcpp::Named("m2l_0") = f0, Rcpp::Named("evals") = br.evals + 1,
+      Rcpp::Named("h_bound") = h_top, Rcpp::Named("m2l") = fh, Rcpp::Named("m2l_0") = f0, Rcpp::Named("evals") = br.evals + 1,
       Rcpp::Named("beta") = Rcpp::NumericVector(N.beta.data(), N.beta.data() + p), Rcpp::Named("keep") = kp,
       Rcpp::Named("n_related") = N.K.nr, Rcpp::Named("pairs") = static_cast<double>(N.K.pairs),
       Rcpp::Named("null") = null);

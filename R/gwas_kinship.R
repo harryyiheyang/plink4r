@@ -30,7 +30,7 @@
 #' @param para named list overriding [reml_tau_para()].
 #' @return list(tau, s2e, h2 = tau / (tau + s2e), lrt = likelihood-ratio statistic of tau = 0 (on the working
 #'   scale for the logistic model), p_lrt (half chi-square 1), beta, n, n_related, pairs, converged, iterations,
-#'   evals, time).
+#'   evals, h_bound = upper end of the search actually used, time).
 #' @export
 reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"), id_col = "IID", para = list()) {
   family <- match.arg(family)
@@ -43,7 +43,8 @@ reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"),
 
 #' Defaults of [reml_tau()] and of [gwas()] with `kinship`
 #'
-#' h_max 0.999 upper end of the search for h;
+#' h_max 0.999 upper end of the search for h (the search stops earlier, at `h_bound`, when `(1 - h) I + h K` is
+#' not positive definite up to h_max, e.g. with a pair whose K_ij exceeds the diagonal);
 #' tol 1e-6 Brent tolerance and change of h at convergence; eta_tol 1e-6 largest change of the linear
 #' predictor at convergence (logistic); max_iter 50 outer iterations (logistic); max_eval 100 likelihood
 #' evaluations per Brent search; mu_eps 1e-10 bound of the fitted probabilities; kin_scale 2: K_ij = kin_scale x
@@ -142,6 +143,6 @@ reml_tau_para <- function() {
   lrt <- max(0, f$m2l_0 - f$m2l)
   est <- c(est, list(lrt = lrt, p_lrt = if (lrt > 0) 0.5 * stats::pchisq(lrt, 1, lower.tail = FALSE) else 1,
                      beta = stats::setNames(f$beta, colnames(D$X)[f$keep]), n = length(D$y),
-                     n_related = f$n_related, pairs = f$pairs, evals = f$evals))
+                     n_related = f$n_related, pairs = f$pairs, evals = f$evals, h_bound = f$h_bound))
   list(est = est, null = f$null)
 }
