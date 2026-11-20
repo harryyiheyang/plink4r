@@ -5,9 +5,8 @@
 // otherwise (a sample censored within an interval counts there as a non-event). Under proportional hazards
 //   P(d_ij = 1) = p_ij = 1 - exp(-exp(alpha_j + x_i' beta))      (complementary log-log link),
 // the alpha_j being the baseline (exp(alpha_j): the baseline hazard cumulated over interval j). The weight of a
-// record, w_ij = (dp/deta)^2 / (p (1 - p)), depends on the interval and the covariates only, not on the outcome;
-// with the Poisson form of the Cox likelihood it is the expected events up to the observed time, which the outcome
-// determines, and a correlation of Pearson residuals is then not defined.
+// record, w_ij = (dp/deta)^2 / (p (1 - p)), depends on the interval and the covariates only, not on the outcome,
+// so the Pearson residuals of the records and their correlation are defined.
 //
 // Covariance. The records of one sample are uncorrelated (increments of a martingale); the Pearson residuals of
 // the records of two relatives a, b have correlation h K_ab, whatever the two intervals:

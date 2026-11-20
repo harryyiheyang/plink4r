@@ -1,6 +1,7 @@
-// The null model of a mixed model with a sparse kinship K over n samples, in the one form both families use:
+// The null model with a sparse kinship K over n samples, in the one form all families use:
 //   Omega = V^-1 = S H(h)^-1 S,   H(h) = (1 - h) I + h K,   S = diag(s)
-// (linear model: s = 1 / sigma; logistic model on the working scale: s_i = sqrt(w_i)).
+// (linear model: s = 1 / sigma; logistic model: s_i = sqrt(w_i) of the working response; Cox model: the same on
+// the records of the life table, summed over the records of a sample, see reml_tau_cox.cpp).
 //
 // Most samples have no relative in the data: their row of K is its diagonal entry kd alone, so H is the scalar
 // 1 - h + h kd there. The related samples (any off-diagonal entry; a few thousand in a biobank) are held together

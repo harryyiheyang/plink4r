@@ -39,10 +39,12 @@
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
 #' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
-#'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the test is that of a mixed model with a sparse kinship
-#'   matrix `K` (as fastGWA, Jiang et al. 2019): the null model `formula + b`, `b ~ N(0, tau K)` is fitted once
-#'   by REML ([reml_tau()]: linear, or logistic on the IRLS working scale), and with `V` the covariance of the
-#'   (working) response and `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least
+#'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the null model accounts for the
+#'   similarity of relatives through a sparse kinship matrix `K` and is fitted once ([reml_tau()]). Linear: the
+#'   mixed model `formula + b`, `b ~ N(0, tau K)`, by REML (as fastGWA, Jiang et al. 2019). Logistic and Cox: the
+#'   marginal model in which the Pearson residuals of relatives have correlation `h K_ij` (Cox: on the records of
+#'   the life table). With `V` the covariance of the (working) response under that null model and
+#'   `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least
 #'   squares `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2` (exact, no GRAMMAR-GAMMA approximation), `T` or `Z` =
 #'   `BETA / SE` and its normal `P`. Samples without a listed relative enter as in the ordinary test; with no
 #'   related pair among the analysed samples the logistic result is that of `kinship = NULL`, and the linear one

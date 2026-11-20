@@ -1,7 +1,9 @@
-#' REML estimate of the kinship variance of a (generalised) linear mixed model
+#' The kinship parameter of the null model with a sparse kinship matrix
 #'
-#' Fits the null model `formula + b`, `b ~ N(0, tau K)` with a sparse kinship matrix `K` and returns `tau`.
-#' Linear (`family = "gaussian"`): `y = X beta + b + e`, `e ~ N(0, s2e I)`; one Brent search over
+#' Fits the null model of `formula` with a sparse kinship matrix `K` and returns its kinship parameter `tau`: a
+#' variance in the linear model, the correlation `h` of the Pearson residuals of relatives in the logistic and
+#' Cox models. Linear (`family = "gaussian"`): the mixed model `y = X beta + b + e`, `b ~ N(0, tau K)`,
+#' `e ~ N(0, s2e I)`; one Brent search over
 #' `h = tau / (tau + s2e)` of the profiled REML likelihood. Logistic (`"binomial"`): marginal
 #' form, `logit(mu) = X beta` and `Var(y) = W^1/2 ((1 - h) I + h K) W^1/2`, `W = diag(mu (1 - mu))`, i.e. the
 #' Pearson residuals `e = (y - mu) / sqrt(mu (1 - mu))` have covariance `H = (1 - h) I + h K`. Nested: for a given
@@ -79,7 +81,7 @@ reml_tau_para <- function() {
        kin_scale = 2, diag = 1, rank_tol = 1e-10, n_interval = 10L)
 }
 
-# The kinship route of gwas(): the null model formula + b, b ~ N(0, tau K) is fitted once (.reml_null), then
+# The kinship route of gwas(): the null model with the kinship matrix K is fitted once (.reml_null), then
 # variants are streamed (gwas_kin_stream_cpp) against that same null-model object. With V the covariance of the
 # (working) response under the null model and P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1, a variant g gets
 # BETA = g' P y / g' P g and SE = (g' P g)^-1/2 (generalised least squares; for the logistic model on the working
