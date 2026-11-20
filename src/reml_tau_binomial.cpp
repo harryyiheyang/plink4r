@@ -4,7 +4,7 @@
 // whatever h (k_ii = 1), so it carries no information on h, and at h = 0 the fit is ordinary logistic regression.
 //
 // Nested optimisation of one function of h:
-//   inner  beta_hat(h): X' W^1/2 H^-1 e = 0, by Fisher scoring to convergence. One step: at the current eta the
+//   inner  beta_hat(h): X' W^1/2 H^-1 e = 0, by Fisher scoring until f settles. One step: at the current eta the
 //          working response yt = eta + (y - mu) / w has covariance W^-1/2 H W^-1/2; generalised least squares of
 //          yt on X gives beta, eta = X beta.
 //   outer  f(h) = log|H(h)| + sum log w + log|X' W^1/2 H^-1 W^1/2 X| + e' H^-1 e, all at beta_hat(h): the Gaussian
@@ -13,8 +13,10 @@
 // Start: h = 0 (logistic regression), then start_iter steps of the alternating scheme (h by Brent on the working
 // likelihood with w and yt held fixed, then one scoring step), which costs little and lands near the minimum;
 // f is then minimised on a window of half-width h_window around that value (on the whole interval if the
-// minimum falls on the edge of the window). h is exactly 0 when f(0) is not improved by more than f_tol (f is
-// known to the accuracy of the scoring), and when no pair is related.
+// minimum falls on the edge of the window).
+// Convergence is that of f, not of beta or h (f is flat at its minimum, so it settles first): the scoring stops when
+// a step changes f by less than f_tol (1 + |f|), the search when its three best points differ by less than
+// f_tol (1 + |f(0)|) in f. h is exactly 0 when f(0) is not improved by more than that, and when no pair is related.
 // Per scoring step the scaled data S X, S yt (S = W^1/2) and their cross-products are formed once; a fit at h
 // factorises the related samples' block of H and solves with their rows only (kin_sparse.h).
 // [[Rcpp::depends(RcppEigen)]]
@@ -26,9 +28,9 @@
 #include "kin_sparse.h"
 
 // y: n values 0 / 1; X: n x p (with the intercept); kinship and rank_tol as reml_tau_gaussian_cpp.
-// h_max: upper end of the search (or the largest h with H(h) positive definite, h_bound); tol: Brent tolerance;
-// eta_tol: largest change of eta at convergence of the scoring; max_iter: scoring steps per value of h;
-// max_eval: evaluations per Brent search; mu_eps: fitted probabilities are kept in [mu_eps, 1 - mu_eps];
+// h_max: upper end of the search (or the largest h with H(h) positive definite, h_bound); tol: Brent tolerance
+// on h; max_iter: scoring steps per value of h; max_eval: evaluations per Brent search; mu_eps: fitted
+// probabilities are kept in [mu_eps, 1 - mu_eps];
 // start_iter, h_window, f_tol: as above. proj: also the null model for the association stream.
 // Returns h (= tau), f at h and at 0, beta, the scoring steps (iterations) and evaluations of f (evals) made,
 // keep (1-based columns of X used) and null (external pointer to the plink4r::KinNull; V^-1 = W^1/2 H^-1 W^1/2).
@@ -36,7 +38,7 @@
 Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X,
                                  const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj,
                                  const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol,
-                                 double eta_tol, int max_iter, int max_eval, double mu_eps, int start_iter,
+                                 int max_iter, int max_eval, double mu_eps, int start_iter,
                                  double h_window, double f_tol, double rank_tol, bool proj) {
   const int n = y.size();
   int p = X.ncol();
@@ -113,15 +115,17 @@ Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
   bool conv = true;
   auto f = [&](double h) {
     ++evals;
+    double prev = big, cur = big;
     for (int it = 0; it < max_iter; ++it) {
       if (steps > 0) working();
       ++steps;
-      const double ch = update(h);
-      if (ch < 0) return big;
-      if (ch < eta_tol) return M.logdet + slw + M.logdet_xox + M.quad;
+      if (update(h) < 0) return big;
+      cur = M.logdet + slw + M.logdet_xox + M.quad;
+      if (std::fabs(cur - prev) <= f_tol * (1.0 + std::fabs(cur))) return cur;
+      prev = cur;
     }
     conv = false;
-    return M.logdet + slw + M.logdet_xox + M.quad;
+    return cur;
   };
   const double f0 = f(0.0);  // logistic regression
   if (f0 >= big || !conv) Rcpp::stop("the logistic null model cannot be fitted (separation?)");
@@ -136,14 +140,15 @@ Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::Numer
     if (update(h) < 0) Rcpp::stop("the working model cannot be fitted");
   }
   // f minimised around the start value; without a related pair H = I whatever h, and h = 0
+  const double df = f_tol * (1.0 + std::fabs(f0));  // changes of f below this are not told apart
   double fh = f0;
   if (M.K.nr > 0) {
     const double lo = std::max(0.0, h - h_window), hi = std::min(h_top, h + h_window);
-    plink4r::BrentResult br = plink4r::brent_min(f, lo, hi, tol, tol * 1e-2, max_eval);
+    plink4r::BrentResult br = plink4r::brent_min(f, lo, hi, tol, tol * 1e-2, max_eval, df);
     const double edge = 0.01 * h_window;
     if ((lo > 0 && br.x - lo < edge) || (hi < h_top && hi - br.x < edge))
-      br = plink4r::brent_min(f, 0.0, h_top, tol, tol * 1e-2, max_eval);
-    h = f0 - br.fx > f_tol ? br.x : 0.0;
+      br = plink4r::brent_min(f, 0.0, h_top, tol, tol * 1e-2, max_eval, df);
+    h = f0 - br.fx > df ? br.x : 0.0;
   } else {
     h = 0.0;
   }

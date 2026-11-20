@@ -46,19 +46,21 @@ reml_tau <- function(formula, data, kinship, family = c("gaussian", "binomial"),
 #'
 #' h_max 0.999 upper end of the search for h (the search stops earlier, at `h_bound`, when `(1 - h) I + h K` is
 #' not positive definite up to h_max, e.g. with a pair whose K_ij exceeds the diagonal);
-#' tol 1e-6 Brent tolerance; eta_tol 1e-6 largest change of the linear predictor at convergence of the scoring
-#' (logistic); max_iter 50 scoring steps per value of h (logistic); max_eval 100 evaluations per Brent search;
+#' tol 1e-6 Brent tolerance on h; max_iter 50 scoring steps per value of h (logistic); max_eval 100 evaluations
+#' per Brent search;
 #' mu_eps 1e-10 bound of the fitted probabilities; start_iter 2 steps of the alternating scheme that give the
 #' start value of h (logistic); h_window 0.1 half-width of the search around it (the whole interval is searched
-#' when the minimum falls on the edge of the window); f_tol 1e-6 h is exactly 0 unless it improves the criterion
-#' at h = 0 by more than this (logistic); kin_scale 2: K_ij = kin_scale x
+#' when the minimum falls on the edge of the window); f_tol 1e-8 convergence of the logistic fit is that of its criterion f: the
+#' scoring stops when a step changes f by less than f_tol (1 + |f|), the search over h when its three best
+#' points differ by less than f_tol (1 + |f(0)|), and h is exactly 0 unless it improves f(0) by more than that;
+#' kin_scale 2: K_ij = kin_scale x
 #' the pairwise kinship coefficient (0.25 for full siblings gives 0.5); diag 1 diagonal of K; rank_tol 1e-10 a
 #' covariate column is aliased (dropped with a warning) when its residual sum of squares on the earlier columns
 #' is below rank_tol x its own sum of squares.
 #' @export
 reml_tau_para <- function() {
-  list(h_max = 0.999, tol = 1e-6, eta_tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
-       start_iter = 2L, h_window = 0.1, f_tol = 1e-6,
+  list(h_max = 0.999, tol = 1e-6, max_iter = 50L, max_eval = 100L, mu_eps = 1e-10,
+       start_iter = 2L, h_window = 0.1, f_tol = 1e-8,
        kin_scale = 2, diag = 1, rank_tol = 1e-10)
 }
 
@@ -138,7 +140,7 @@ reml_tau_para <- function() {
                                P$rank_tol, proj)
     est <- list(tau = f$tau, s2e = f$s2e, h2 = f$h, converged = TRUE, iterations = 1L)
   } else {
-    f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol, P$eta_tol,
+    f <- reml_tau_binomial_cpp(D$y, D$X, kin$i, kin$j, kin$v, P$diag, P$h_max, P$tol,
                                as.integer(P$max_iter), as.integer(P$max_eval), P$mu_eps, as.integer(P$start_iter),
                                P$h_window, P$f_tol, P$rank_tol, proj)
     if (!f$converged) warning("The logistic null model with kinship did not converge.", call. = FALSE)

@@ -101,8 +101,8 @@ gwas_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx
     .Call(`_plink4r_gwas_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block)
 }
 
-reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, eta_tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
-    .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, eta_tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
+reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }
 
 reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj) {

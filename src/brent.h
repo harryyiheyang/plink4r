@@ -13,9 +13,10 @@ struct BrentResult {
   int evals = 0;
 };
 
-// Minimises f on [a, b]; stops when the bracket is within 2 (tol |x| + tol_abs) of x, or after max_eval calls.
+// Minimises f on [a, b]; stops when the bracket is within 2 (tol |x| + tol_abs) of x, when the three best points
+// are distinct and their values within f_tol of each other (f_tol > 0), or after max_eval calls.
 template <class F>
-inline BrentResult brent_min(F f, double a, double b, double tol, double tol_abs, int max_eval) {
+inline BrentResult brent_min(F f, double a, double b, double tol, double tol_abs, int max_eval, double f_tol = 0) {
   const double gold = 0.3819660112501051;  // (3 - sqrt(5)) / 2
   double x = a + gold * (b - a), w = x, v = x;
   double fx = f(x), fw = fx, fv = fx;
@@ -26,6 +27,7 @@ inline BrentResult brent_min(F f, double a, double b, double tol, double tol_abs
     const double m = 0.5 * (a + b);
     const double t1 = tol * std::fabs(x) + tol_abs, t2 = 2 * t1;
     if (std::fabs(x - m) <= t2 - 0.5 * (b - a)) break;
+    if (f_tol > 0 && v != w && w != x && v != x && fv - fx <= f_tol) break;
     bool golden = true;
     if (std::fabs(e) > t1) {  // parabola through (v, fv), (w, fw), (x, fx)
       double r = (x - w) * (fx - fv);
