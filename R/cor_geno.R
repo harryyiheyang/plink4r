@@ -2,13 +2,14 @@
 #'
 #' The genotypes are held by [geno_open()] (2-bit planes H plus a sparse int16
 #' deviation D) and the correlations come from [geno_cor()]: X'X by popcount
-#' on the planes plus the D terms, centred and scaled in C++ from the stored
-#' means and sds, so no n x p dense matrix is formed. Values are ALT (PGEN) or
-#' bim A1 (BED) dosages; a PGEN with dosages is read as dosages.
+#' on the planes plus the D terms (products of row blocks when D is
+#' dense, as for dosages), centred and scaled in C++ from the stored means and
+#' sds, so no n x p dense matrix is formed. Values are ALT (PGEN) or bim A1
+#' (BED) dosages; a PGEN with dosages is read as dosages.
 #'
 #' Missing calls: with `af` (the counted allele's anchor frequency) every
 #' missing call of the variant takes c = (2 n af - sum of observed) /
-#' (number missing), clipped to `[0, 2]` (scheme 3), so the filled column has
+#' (number missing), clipped to `[0, 2]` (the anchored fill of [genotype_fill()]), so the filled column has
 #' mean 2 af; `NA` entries of `af`, or `af = NULL`, use `impute`. The sd is
 #' always the sample sd after filling.
 #'

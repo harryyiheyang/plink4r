@@ -2,8 +2,8 @@
 //
 // score_stream_cpp: plink2 --score style streaming. Every variant carries a 4-entry lookup table per trait
 //   (value added to the score for PGEN code 0/1/2 = ALT count, 3 = missing) and a 4-entry allele-count table.
-//   R builds the tables (A1 alignment, weights, transforms, the fill of a missing call: plink2 mean, scheme 3
-//   anchor, none, or the constant part of an LD-filled cell), so the kernel holds no policy. Variants are read
+//   R builds the tables (A1 alignment, weights, transforms, the fill of a missing call: plink2 mean, anchored
+//   constant, none, or the constant part of an LD-filled cell), so the kernel holds no policy. Variants are read
 //   in chunks (parallel over variants), then scored in parallel over sample ranges, so no reduction and no
 //   genotype matrix: memory is n x q scores plus one chunk of genovecs.
 // score_ld_block_cpp: one eigen.bin LD block through impute_kernel.h (the same stage 1 / stage 2 as

@@ -1,7 +1,7 @@
 /* C / C++ interface to the genotype kernels of plink4r, for other packages' compiled code.
  *
  * In the dependent package: DESCRIPTION `LinkingTo: plink4r` and `Imports: plink4r`, NAMESPACE
- * `importFrom(plink4r, geno_open)` (or any import, so that plink4r is loaded), then in C / C++
+ * `importFrom(plink4r, geno_crossprod)` (any import, so that plink4r is loaded), then in C / C++
  *   #include <Rcpp.h>            // or <Rinternals.h>; before this header
  *   #include <plink4r_api.h>
  * and pass the geno object's external pointer X$ptr and scale flag X$scale from R. The functions are
@@ -71,6 +71,20 @@ static inline int plink4r_geno_cols(SEXP ptr, int scale, const int* cols, int nc
   static fn_t fn = NULL;
   if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_cols");
   return fn(ptr, scale, cols, nc, out, threads);
+}
+
+/* out (q x q) = X'W~X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored), with
+ * W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean of its w (n values);
+ * when more than 1% of the cells of those columns are stored off the 0/1/2 grid (dosages, mean-filled
+ * missing calls, appended columns), W~ = diag(w) instead (float products, double sums). Standardized in
+ * place in out with the weights of the result; w_bin (n values, may be NULL) receives those weights.
+ * geno_wcrossprod_bin(X, w)$XtWX[cols + 1, cols + 1] and $w. */
+static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc,
+                                        double* out, double* w_bin, int threads) {
+  typedef int (*fn_t)(SEXP, int, const double*, const int*, int, double*, double*, int);
+  static fn_t fn = NULL;
+  if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtwx_bin");
+  return fn(ptr, scale, w, cols, nc, out, w_bin, threads);
 }
 
 #ifdef __cplusplus

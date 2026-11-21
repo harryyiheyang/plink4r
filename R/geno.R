@@ -1,13 +1,12 @@
 # geno: a PLINK BED or PGEN genotype matrix kept in memory as 2-bit planes
-# (n p / 4 bytes) instead of an n x p double matrix (moved here from SuSiE4I,
-# which now uses these functions). The object behaves like a numeric matrix
+# (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X, cached per object; X'M), geno_multiply() (X B),
 # geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
 # cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
-# unit (1/16384 for genotypes) holding dosage - H for a PGEN with dosages,
+# unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
 # f - round(f) for a missing entry filled with f (the variant's lower median,
 # impute = "median", or observed mean, "mean"), and all of x (H = 0) for an
 # appended column; with scale = TRUE every product is that of the
@@ -27,12 +26,13 @@
 #' @param pgenfile PLINK 2 PGEN path or prefix (uncompressed `.pvar` and
 #'   `.psam` alongside). Give either `bedfile` or `pgenfile`. A PGEN whose
 #'   header flags dosages (e.g. `--make-pgen` from imputed data) is detected
-#'   automatically and read as ALT dosages: values, `center`, `sd` and all
-#'   products are those of the dosage matrix, stored as the rounded hard call
-#'   in 2-bit planes plus the exact dosage - hard call correction (a 1-bit
-#'   nonzero mask and int16 values in 1/16384 units). Such files must be
-#'   biallelic; a missing dosage takes the variant's observed mean dosage
-#'   (to 1/32768) whatever `impute` is.
+#'   automatically and read as ALT dosages taken to the nearest 0.01 (the
+#'   precision of imputed dosages; the file holds 1/16384 steps): values,
+#'   `center`, `sd` and all products are those of that dosage matrix, stored as
+#'   the rounded hard call in 2-bit planes plus the dosage - hard call
+#'   correction (a 1-bit nonzero mask and int16 values in 0.01 units). Such
+#'   files must be biallelic; a missing dosage takes the variant's observed
+#'   mean dosage (to 0.01) whatever `impute` is.
 #' @param snp_vec Variants to keep, as IDs or 1-based file indices, in the
 #'   column order wanted. `NULL` keeps all in file order. Selection by ID takes
 #'   the first match, so use indices when IDs are duplicated (e.g. ".").
@@ -48,18 +48,14 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result of the file route (its
-#'   per-SNP `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by
-#'   chromosome, position and allele pair, not by ID, so it works the same with `geno_file(id = FALSE)`), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
-#'   IID, g))`. A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) /
-#'   bim A1 (BED) dosages. Same as opening with `impute` and then [genotype_fill()] on the new object.
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
 #'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
 #'   `impute`. With a finite `af`, every missing call of that variant takes
 #'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
 #'   (stored as round(c) in the planes and the rest in D), so the filled
-#'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
-#'   (default) leaves the behaviour unchanged.
+#'   column has mean 2 af and `sd` is the sample sd after filling: the same as
+#'   [genotype_fill()] with `af` on the opened object. `NULL` (default): no
+#'   anchor.
 #' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
 #'   tables (then leave `bedfile` and `pgenfile` `NULL`).
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
@@ -77,7 +73,7 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL, af = NULL, file = NULL) {
+                      scale = TRUE, threads = 4L, af = NULL, file = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
   gf <- .as_geno_file(file, bedfile, pgenfile)
@@ -100,11 +96,8 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                            flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
-  if (!is.null(fill) || !is.null(af)) {  # on the new object, which nothing else references yet: in place
-    fs <- .geno_fill_spec(fill, X)
-    X <- .geno_refill(X, af = af, const = fs$c, cells = fs, default = "keep", inplace = TRUE,
-                      impute = if (!is.null(fill)) "custom" else "af", threads = threads)
-  }
+  if (!is.null(af))  # on the new object, which nothing else references yet: in place
+    X <- .geno_refill(X, af = af, default = "keep", inplace = TRUE, impute = "af", threads = threads)
   X
 }
 
@@ -164,7 +157,7 @@ geno_append <- function(X, M, threads = X$threads) {
   out <- .geno_new(ptr, cols, list(sample = X$sample, fid = if (is.null(X$fid)) rep(NA_character_, X$n) else X$fid),
                    impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
                    appended = c(X$appended, p0 + seq_len(k)))
-  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller (e.g. SuSiE4I's `fill`) stay
+  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller stay
   out
 }
 
@@ -229,7 +222,7 @@ as.matrix.geno <- function(x, ...) x[, , drop = FALSE]
 #' Same reader and arguments as [geno_open()], returned as an ordinary n x p
 #' double matrix (rows = samples, named by IID; columns = variants). Values are
 #' A1 (BED) or ALT (PGEN) allele counts, or dosages for a dosage PGEN (to
-#' 1/16384); missing hardcalls are filled by `impute`. With `scale = TRUE`
+#' 0.01); missing hardcalls are filled by `impute`. With `scale = TRUE`
 #' every column is standardized (mean 0, sd 1 with n - 1). For a large region
 #' prefer [geno_open()], which never forms this matrix.
 #'
@@ -250,9 +243,11 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 
 #' Cross products of a geno matrix
 #'
-#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount; `geno_crossprod(X, M)`
-#' is `crossprod(X, M)` for a dense `M` with one row per sample. With
-#' `X$scale = TRUE` both are those of the column-standardized matrix.
+#' `geno_crossprod(X)` is `crossprod(X)` by exact popcount, or by products of
+#' decoded row blocks when more than 7% of the cells have an int16 part
+#' (dosages; exact for the 0.01 dosages of a PGEN); `geno_crossprod(X, M)` is `crossprod(X, M)` for a dense `M`
+#' with one row per sample. With `X$scale = TRUE` both are those of the
+#' column-standardized matrix.
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param M Optional dense matrix (or vector) with one row per sample.
@@ -302,6 +297,21 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
   dimnames(XtWX) <- list(X$snp, X$snp)
   rownames(XtM) <- X$snp
   list(XtWX = XtWX, XtM = XtM)
+}
+
+# crossprod(X, X * wq) (of the standardized matrix when X$scale, centered with wq), wq = w binned: rows sorted
+# by w, each run of 64 sorted rows shares the mean of its w, so X'diag(wq)X sums exact popcount products per
+# bin times the bin weight (geno_xtwx_bin_cpp). When more than 1% of the cells have a nonzero D (dosages,
+# mean-filled missing calls, appended columns) the popcounts do not pay: wq = w and the product is
+# geno_wcrossprod's. Returns the matrix and wq, the weights it corresponds to.
+geno_wcrossprod_bin <- function(X, w, threads = X$threads) {
+  threads <- .threads(threads)
+  w <- as.numeric(w)
+  if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
+  out <- if (X$scale) geno_xtwx_bin_cpp(X$ptr, w, X$center, .geno_div(X), threads) else
+    geno_xtwx_bin_cpp(X$ptr, w, numeric(0), numeric(0), threads)
+  dimnames(out$XtWX) <- list(X$snp, X$snp)
+  list(XtWX = out$XtWX, w = out$w)
 }
 
 .geno_bed_path <- function(x) {

@@ -53,7 +53,7 @@ void mirror_lower(MapM& C, int m, int threads) {
 }
 
 // C_S = I - delta (R_SS + delta I)^{-1} over the working rows S (rows[0..nrows-1]), R = U diag(lam) U'.
-// S = the whole block: U diag(lam / (lam + delta)) U' as before. Otherwise two exact routes, the cheaper one by
+// S = the whole block: U diag(lam / (lam + delta)) U'. Otherwise two exact routes, the cheaper one by
 // min(|S|, k):
 //   k <= |S| (Woodbury): C_S = U_S G U_S', G = (delta Lam^{-1} + U_S'U_S)^{-1} (k x k, double Cholesky
 //     G = L^{-T} L^{-1}); V = U_S L^{-T}; C_S = V V' (lower triangle, then mirrored). With every row and an
