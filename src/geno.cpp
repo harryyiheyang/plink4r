@@ -26,6 +26,7 @@
 #include <numeric>
 #include <string>
 #include <utility>
+#include "anchor_fill.h"
 #include "geno_kernel.h"
 #include "geno_access.h"
 #include "pgen_reader.h"
@@ -1596,8 +1597,8 @@ void fill_column(Geno& g, std::size_t j, bool hasc, double fc, const RowT* ci, c
 // per-cell value when given (CSR: cells of column j at cell_ptr[j]..cell_ptr[j+1], 0-based row cell_i
 // ascending, value cell_g; the first of repeated rows wins), else the column value f_j when defined, else keep
 // their current value. f_j, for a column with missing cells (and selected: cols empty or cols[j]): the observed
-// mean when use_mean (0 when every cell is missing); replaced by the anchored value
-// min(2, max(0, (2 n af_j - obs_sum_j) / missing_j)) where af_j is finite; replaced by const_j where finite.
+// mean when use_mean (0 when every cell is missing); replaced by the anchored value (anchor_fill.h:
+// (2 n af_j - obs_sum_j) / missing_j within [0, 2]) where af_j is finite; replaced by const_j where finite.
 // af and fill_const are empty or one value per column. A value f is stored as H = round(f) (halves up, within
 // 0..2) and D = f - H in the column's unit. Cells not missing are never touched. inplace = TRUE changes ptr itself (only
 // for an object nobody else references yet); otherwise a modified copy is returned and ptr is unchanged.
@@ -1624,7 +1625,7 @@ SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const
     if (m == 0 || (cols.size() && cols[j] != TRUE)) continue;
     double f = std::nan("");
     if (use_mean) f = m < n ? obs_sum_col(*src, j) / (n - m) : 0.0;
-    if (af.size() && std::isfinite(af[j])) f = std::min(2.0, std::max(0.0, (2.0 * n * af[j] - obs_sum_col(*src, j)) / m));
+    if (af.size() && std::isfinite(af[j])) f = plink4r::anchor_fill(n, af[j], obs_sum_col(*src, j), m);
     if (fill_const.size() && std::isfinite(fill_const[j])) f = fill_const[j];
     fill_c[j] = f;
   }

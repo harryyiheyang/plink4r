@@ -115,7 +115,7 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
         fill = 2;
         if (nm > 0) {
           const double pa = fl ? 1 - pg : pg;
-          f_alt = std::min(2.0, std::max(0.0, (2.0 * ns * pa - so) / nm));
+          f_alt = plink4r::anchor_fill(ns, pa, so, nm);
         }
       }
       if (!impute_none && ld_cand[j] && nm > 0) fill = 3;

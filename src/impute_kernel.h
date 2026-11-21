@@ -46,6 +46,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include "anchor_fill.h"
 #include "eigen_bin.h"
 #include "pgen_reader.h"
 #include "la_dispatch.h"
@@ -515,8 +516,7 @@ inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<doubl
     const bool anchored = A.cnt1[j] > 0 && anchor_min_miss >= 0 && A.cnt1[j] >= anchor_min_miss * ns;
     if (!anchored) continue;
     const double mean1 = sum1[j] / A.cnt1[j];
-    const double c = std::min(2.0, std::max(0.0, (2.0 * ns * af[j] - sum_obs[j]) / A.cnt1[j]));
-    A.shift[j] = c - mean1;
+    A.shift[j] = anchor_fill(ns, af[j], sum_obs[j], A.cnt1[j]) - mean1;
   }
   return A;
 }
