@@ -12,8 +12,8 @@
 // changes by less than f_tol (1 + |f|).
 // The association stream then tests every variant in the Poisson model with the offset log Lambda0_hat and the
 // intercept (gwas_kin_stream.cpp, with a null-model object that has no related sample).
-// A sample that leaves before the first event has Lambda0 = 0 and carries no information; it takes the smallest
-// positive value of Lambda0.
+// A sample that leaves before the first event has Lambda0 = 0, hence mu = 0: it is in no risk set and carries no
+// information (its mu is held at the lower bound mu_eps, as every mu).
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -80,7 +80,7 @@ Rcpp::List cox_null_cpp(const Rcpp::NumericVector& time, const Rcpp::NumericVect
     for (int pos = n - 1; pos >= 0; --pos) {
       while (g >= 0 && gend[g] >= pos) cum += jump[g--];
       const int i = ord[pos];
-      const double m = std::max(mu_eps, we[i] * std::max(cum, jump[ng - 1]));
+      const double m = std::max(mu_eps, we[i] * cum);
       sw[i] = std::sqrt(m);
       slw += std::log(m);
       yt[i] = eta[i] + (status[i] - m) / m;

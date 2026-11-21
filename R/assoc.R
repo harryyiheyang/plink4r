@@ -24,10 +24,11 @@
 #'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
-#'   the phenotype is coded 0/1 (or 1/2, PLINK case/control). Every variable must be a column of `data`; `.` is
-#'   not accepted.
+#'   the phenotype is coded 0/1 (or 1/2, PLINK case/control). Every variable must be a column of `data`; `.` and
+#'   `offset()` are not accepted.
 #' @param data data.frame with one row per sample: `id_col` and the columns named in `formula`. Samples with a
-#'   missing value in any of them, or not in the genotype file, are left out.
+#'   missing value in any of them, or not in the genotype file, are left out. A covariate that is not finite after
+#'   its transformation (e.g. `log(0)`) in one of the analysed samples is an error.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
 #' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards). Cox: the
@@ -205,13 +206,17 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
 # value in the variables of the formula (and, with iid, present in the genotype file, in file order; srow = their
 # file rows), a finite phenotype after any transformation, and that phenotype (0/1 for a logistic model; the
-# follow-up time, with status the 0/1 event indicator, for a Cox model).
+# follow-up time, with status the 0/1 event indicator, for a Cox model). Every route takes its samples here, so
+# what no route handles is refused here: offset() in the formula, and a covariate that is not finite after its
+# transformation in an analysed sample.
 .pheno_samples <- function(d, formula, family, id_col, iid = NULL) {
   if (!inherits(formula, "formula") || length(formula) != 3L)
     stop("formula must be two-sided: phenotype ~ covariates.", call. = FALSE)
   vars <- all.vars(formula)
   if ("." %in% vars) stop("Write the covariates out in the formula ('.' is not accepted).", call. = FALSE)
-  if (attr(stats::terms(formula), "intercept") != 1L) stop("The formula must keep its intercept.", call. = FALSE)
+  tm <- stats::terms(formula)
+  if (attr(tm, "intercept") != 1L) stop("The formula must keep its intercept.", call. = FALSE)
+  if (!is.null(attr(tm, "offset"))) stop("offset() is not accepted in the formula.", call. = FALSE)
   miss <- setdiff(c(id_col, vars), names(d))
   if (length(miss)) stop("data lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   ids <- as.character(d[[id_col]])
@@ -254,6 +259,13 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   for (cl in all.vars(formula[[3L]]))
     if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
       stop("Column ", cl, " has a single level among the analysed samples.", call. = FALSE)
+  mf <- tryCatch(stats::model.frame(stats::delete.response(tm), d, na.action = stats::na.pass),
+                 error = function(e) stop("A term of the formula cannot be evaluated on the analysed samples: ",
+                                          conditionMessage(e), call. = FALSE))
+  bad <- names(mf)[!vapply(mf, function(v) !is.numeric(v) || all(is.finite(v)), NA)]
+  if (length(bad))
+    stop("Not finite in an analysed sample (after its transformation): ", paste(bad, collapse = ", "), ".",
+         call. = FALSE)
   list(d = d, srow = srow, y = y, status = status)
 }
 
