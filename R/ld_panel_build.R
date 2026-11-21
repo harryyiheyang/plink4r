@@ -71,7 +71,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
   plan <- .ldb_plan(m, bl, as.integer(min_snp))
   m <- plan$variants
   plan <- plan$blocks
-  n_s <- vapply(gv$files, function(f) if (is.null(sample)) f$n else length(sample), numeric(1))
+  n_s <- vapply(gv$files, function(f) if (is.null(sample)) nrow(f$file$samples) else length(sample), numeric(1))
   plan[, est_gb := round((n_s[file] * NumSNP / 4 + 5 * 8 * as.numeric(NumSNP)^2) / 1e9, 2)]
   plan[, prefix := vapply(gv$files, `[[`, "", "prefix")[file]]
   data.table::fwrite(plan, file.path(wd, "plan.tsv"), sep = "\t")
@@ -89,9 +89,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
     fi <- plan$file[plan$Block == b]
     t0 <- proc.time()[["elapsed"]]
     af <- if (has_af) ifelse(v$sgn > 0, v$AF, 1 - v$AF) else NULL
-    f <- gv$files[[fi]]
-    X <- do.call(geno_open, c(stats::setNames(list(f$prefix), if (f$type == "pgen") "pgenfile" else "bedfile"),
-                              list(snp_vec = v$row, sample_vec = sample, scale = FALSE, threads = threads)))
+    X <- geno_open(file = gv$files[[fi]]$file, snp_vec = v$row, sample_vec = sample, scale = FALSE, threads = threads)
     # missing calls: the anchored value where af is finite, else the observed mean (in place: X is local)
     X <- .geno_refill(X, af = af, inplace = TRUE, impute = if (has_af) "af" else "mean", threads = threads)
     t_read <- proc.time()[["elapsed"]]
@@ -198,27 +196,20 @@ ld_blocks_default <- function(build = 38) {
   list(table = d, key = key[CHR %in% .ldb_auto & !is.na(BP)])
 }
 
-# Variants of every genotype file: file, 1-based row, chromosome, position, counted / other allele.
+# Variants of every genotype file: file, 1-based row, chromosome, position, counted / other allele of its biallelic
+# rows on chromosomes 1 to 22. files[[f]] = list(prefix as given, file = its geno_file(), read without IDs), from
+# which every block of the file is opened.
 .ldb_geno_variants <- function(geno) {
   files <- list()
   vars <- list()
   for (f in seq_along(geno)) {
     pre <- sub("\\.(pgen|bed)$", "", geno[f])
-    if (file.exists(paste0(pre, ".pgen"))) {
-      pv <- .read_pvar5(pre)
-      files[[f]] <- list(prefix = pre, type = "pgen", n = length(.psam_ids(pre)))
-      v <- data.table::data.table(file = f, row = pv$row, CHR = .ldb_chr(pv$CHROM),
-                                  BP = pv$POS, cnt = pv$ALT, oth = pv$REF)
-      v <- v[pv$allele_ct == 2L]
-    } else if (file.exists(paste0(pre, ".bed"))) {
-      bim <- data.table::fread(paste0(pre, ".bim"), header = FALSE, colClasses = "character")
-      fam <- data.table::fread(paste0(pre, ".fam"), header = FALSE, select = 1L)
-      files[[f]] <- list(prefix = pre, type = "bed", n = nrow(fam))
-      v <- data.table::data.table(file = f, row = seq_len(nrow(bim)), CHR = .ldb_chr(bim[[1L]]),
-                                  BP = as.integer(bim[[4L]]), cnt = toupper(bim[[5L]]), oth = toupper(bim[[6L]]))
-    } else {
-      stop("No .pgen or .bed for ", geno[f], call. = FALSE)
-    }
+    gf <- if (file.exists(paste0(pre, ".pgen"))) geno_file(pgenfile = pre, id = FALSE) else
+      if (file.exists(paste0(pre, ".bed"))) geno_file(bedfile = pre, id = FALSE) else
+        stop("No .pgen or .bed for ", geno[f], call. = FALSE)
+    files[[f]] <- list(prefix = pre, file = gf)
+    v <- gf$variants
+    v <- data.table::data.table(file = f, row = v$row, CHR = v$chr, BP = v$pos, cnt = v$a1, oth = v$a2)[v$allele_ct == 2L]
     vars[[f]] <- v[CHR %in% .ldb_auto]
   }
   vars <- data.table::rbindlist(vars)

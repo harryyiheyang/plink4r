@@ -175,23 +175,15 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   out[]
 }
 
-# The genotype file of an association run: its variants (var), sample IDs (iid), path, the file rows of the
-# biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
+# The genotype file of an association run, from geno_file(): its variants (var), sample IDs (iid), path, the file
+# rows of the biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
 .geno_variants <- function(pfile, bfile, snp_vec) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  if (!is.null(pfile)) {
-    pvar <- .read_pvar5(pfile)
-    var <- data.table::data.table(CHR = pvar$CHROM, POS = pvar$POS, ID = pvar$ID, A1 = pvar$ALT, A2 = pvar$REF,
-                                  allele_ct = pvar$allele_ct)
-    iid <- .psam_ids(pfile)
-    path <- normalizePath(paste0(pfile, ".pgen"))
-  } else {
-    bim <- data.table::fread(paste0(bfile, ".bim"), header = FALSE, colClasses = "character")
-    var <- data.table::data.table(CHR = sub("^chr", "", bim[[1L]], ignore.case = TRUE), POS = as.integer(bim[[4L]]),
-                                  ID = bim[[2L]], A1 = toupper(bim[[5L]]), A2 = toupper(bim[[6L]]), allele_ct = 2L)
-    iid <- data.table::fread(paste0(bfile, ".fam"), header = FALSE, colClasses = "character")[[2L]]
-    path <- normalizePath(paste0(bfile, ".bed"))
-  }
+  gf <- geno_file(bedfile = bfile, pgenfile = pfile)
+  v <- gf$variants
+  var <- data.table::data.table(CHR = v$chr, POS = v$pos, ID = v$id, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
+  iid <- gf$samples$iid
+  path <- gf$path
   vrow <- if (is.null(snp_vec)) seq_len(nrow(var)) else {
     i <- match(as.character(snp_vec), var$ID)
     if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)

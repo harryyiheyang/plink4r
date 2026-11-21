@@ -11,7 +11,7 @@
 #'   then selects by those names or by row.
 #' @return A list of class `geno_file`: `type` ("bed" / "pgen"), `path` (the .bed / .pgen), `prefix`,
 #'   `variants` = data.table(row, chr, pos, id, a1, a2, allele_ct) with `a1` the counted allele (bim
-#'   column 5 / ALT) and `a2` the other (bim column 6 / REF), `chr` without a leading "chr"; and
+#'   column 5 / ALT) and `a2` the other (bim column 6 / REF), both in upper case, `chr` without a leading "chr"; and
 #'   `samples` = data.table(row, fid, iid). Select windows by row, e.g.
 #'   `gf$variants[chr == "16" & pos >= lo & pos <= hi, row]`, and pass them as `snp_vec`.
 #' @export
@@ -24,7 +24,8 @@ geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
     v <- data.table::fread(paste0(base, ".bim"), header = FALSE, select = sel,
                            colClasses = list(character = intersect(c(1L, 2L, 5L, 6L), sel), integer = 4L))
     data.table::setnames(v, if (id) c("chr", "id", "pos", "a1", "a2") else c("chr", "pos", "a1", "a2"))
-    v[, `:=`(row = .I, chr = sub("^chr", "", chr, ignore.case = TRUE), allele_ct = 2L)]
+    v[, `:=`(row = .I, chr = sub("^chr", "", chr, ignore.case = TRUE), a1 = .by_unique(a1, toupper),
+             a2 = .by_unique(a2, toupper), allele_ct = 2L)]
     fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, select = 1:2, colClasses = "character")
     s <- data.table::data.table(row = seq_len(nrow(fam)), fid = fam[[1L]], iid = fam[[2L]])
     type <- "bed"; path <- bed
