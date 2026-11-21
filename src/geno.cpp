@@ -24,6 +24,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -1147,13 +1148,25 @@ void std_into(const double* k, std::size_t r, std::size_t c, const double* u, co
 
 namespace {
 
-// The raw X'X of g, formed on first use and kept in g (cleared whenever g's values change).
+std::mutex xtx_mutex;  // one caller at a time forms or looks for a kept X'X
+
+// The raw X'X of g, formed on first use and kept in g (cleared whenever g's values change). Under xtx_mutex: the C
+// entry plink4r_geno_xtx may be called on one object from two threads of another package, and both get the one
+// kept matrix, complete.
 const std::vector<double>& raw_xtx(Geno& g, int threads) {
+  std::lock_guard<std::mutex> lock(xtx_mutex);
   if (g.xtx.empty()) {
-    g.xtx.assign(g.p * g.p, 0.0);
-    xtx_into(g, nullptr, 0, g.xtx.data(), threads);
+    std::vector<double> k(g.p * g.p, 0.0);
+    xtx_into(g, nullptr, 0, k.data(), threads);
+    g.xtx.swap(k);
   }
   return g.xtx;
+}
+
+// Whether g holds its X'X.
+bool has_xtx(const Geno& g) {
+  std::lock_guard<std::mutex> lock(xtx_mutex);
+  return !g.xtx.empty();
 }
 
 // Column divisors of the standardized matrix: sd, or 1 for a constant column.
@@ -1998,7 +2011,7 @@ int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int 
                     threads);
       return 0;
     }
-    if (g->xtx.empty()) {
+    if (!has_xtx(*g)) {
       xtx_into(*g, cols, q, out, threads);
     } else {
       for (std::size_t b = 0; b < q; ++b) {
