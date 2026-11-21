@@ -6,8 +6,8 @@
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
-# f - round(f) for a missing entry filled with f (the variant's lower median,
-# impute = "median", or observed mean, "mean"); with scale = TRUE every product is that of the
+# f - round(f) for a missing entry filled with f (at open the variant's lower median, for a PGEN with dosages
+# its observed mean dosage; any other fill is genotype_fill()); with scale = TRUE every product is that of the
 # column-standardized matrix (mean 0, sd 1 with n - 1; constant columns are
 # only centered).
 
@@ -20,6 +20,10 @@
 #' allele as REF upstream (`plink2 --ref-allele force target.txt 1 2
 #' --make-pgen`); the counted allele is then everything else.
 #'
+#' Missing cells: a missing hard call takes the variant's lower median, a missing dosage of a PGEN with dosages
+#' the variant's observed mean dosage (to 0.01). Every other fill (observed mean, anchored to a frequency, LD,
+#' constants, per cell) is [genotype_fill()] on the opened object.
+#'
 #' @param bedfile PLINK 1 BED path or prefix (`.bim` and `.fam` alongside).
 #' @param pgenfile PLINK 2 PGEN path or prefix (uncompressed `.pvar` and
 #'   `.psam` alongside). Give either `bedfile` or `pgenfile`. A PGEN whose
@@ -29,8 +33,7 @@
 #'   `center`, `sd` and all products are those of that dosage matrix, stored as
 #'   the rounded hard call in 2-bit planes plus the dosage - hard call
 #'   correction (a 1-bit nonzero mask and int16 values in 0.01 units). Such
-#'   files must be biallelic; a missing dosage takes the variant's observed
-#'   mean dosage (to 0.01) whatever `impute` is.
+#'   files must be biallelic.
 #' @param snp_vec Variants to keep, as IDs or 1-based file indices, in the
 #'   column order wanted. `NULL` keeps all in file order. Selection by ID takes
 #'   the first match, so use indices when IDs are duplicated (e.g. ".").
@@ -39,21 +42,9 @@
 #'   of `y`, `Z` and `status` passed to `SuSiE4I()` must be in this order (or in
 #'   `.fam`/`.psam` order when `NULL`). IIDs repeated across families need the
 #'   `FID_IID` form.
-#' @param impute `"median"` (default, the variant's lower median) or `"mean"`
-#'   (the variant's observed mean, stored to 1/32768: its rounded value in the
-#'   2-bit planes, the rest as an int16 deviation at the missing entries).
-#'   Hardcall input only.
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param af Optional anchor frequency of the counted allele (bim column 5 for
-#'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
-#'   `impute`. With a finite `af`, every missing call of that variant takes
-#'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
-#'   (stored as round(c) in the planes and the rest in D), so the filled
-#'   column has mean 2 af and `sd` is the sample sd after filling: the same as
-#'   [genotype_fill()] with `af` on the opened object. `NULL` (default): no
-#'   anchor.
 #' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
 #'   tables (then leave `bedfile` and `pgenfile` `NULL`).
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
@@ -69,10 +60,8 @@
 #'   external pointer, so it is valid only in the current R session (it cannot
 #'   be saved with `saveRDS` or sent to parallel workers).
 #' @export
-geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
-                      sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, af = NULL, file = NULL) {
-  impute <- match.arg(impute)
+geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_vec = NULL, scale = TRUE,
+                      threads = 4L, file = NULL) {
   threads <- .threads(threads)
   gf <- .as_geno_file(file, bedfile, pgenfile)
   v <- gf$variants
@@ -83,19 +72,18 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
     .geno_index(snp_vec, if (is.null(ids)) v$row else ids, NULL, "snp_vec")
   sidx <- .geno_index(sample_vec, s$iid, paste(s$fid, s$iid, sep = "_"), "sample_vec")
   ptr <- if (gf$type == "bed") {
-    geno_open_bed_cpp(gf$path, nrow(s), nrow(v), vidx - 1L, sidx - 1L, impute == "mean", threads)
+    geno_open_bed_cpp(gf$path, nrow(s), nrow(v), vidx - 1L, sidx - 1L, threads)
   } else {
-    geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, impute == "mean", threads)
+    geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, threads)
   }
   # names built once here, for the opened rows only, and kept in the object (snp and id)
   nm <- if (is.null(ids)) .geno_vid(v[vidx]) else ids[vidx]
   X <- .geno_new(ptr, list(snp = nm, id = nm,
                            chr = v$chr[vidx], pos = v$pos[vidx], a1 = v$a1[vidx], a2 = v$a2[vidx], row = vidx,
                            flipped = rep(FALSE, length(vidx))),
-                 list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
+                 list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = "median", scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
-  if (!is.null(af))  # on the new object, which nothing else references yet: in place
-    X <- .geno_refill(X, af = af, default = "keep", inplace = TRUE, impute = "af", threads = threads)
+  if (X$dosage) X$impute <- "mean"
   X
 }
 
@@ -177,7 +165,7 @@ as.matrix.geno <- function(x, ...) x[, , drop = FALSE]
 #' Same reader and arguments as [geno_open()], returned as an ordinary n x p
 #' double matrix (rows = samples, named by IID; columns = variants). Values are
 #' A1 (BED) or ALT (PGEN) allele counts, or dosages for a dosage PGEN (to
-#' 0.01); missing hardcalls are filled by `impute`. With `scale = TRUE`
+#' 0.01); missing cells are filled as by [geno_open()]. With `scale = TRUE`
 #' every column is standardized (mean 0, sd 1 with n - 1). For a large region
 #' prefer [geno_open()], which never forms this matrix.
 #'
@@ -185,10 +173,10 @@ as.matrix.geno <- function(x, ...) x[, , drop = FALSE]
 #' @return A numeric matrix with attributes `a1` and `a2` (counted and other
 #'   allele per column).
 #' @export
-geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_vec = NULL,
-                      impute = c("median", "mean"), scale = FALSE, threads = 4L) {
+geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_vec = NULL, scale = FALSE,
+                      threads = 4L) {
   X <- geno_open(bedfile = bedfile, pgenfile = pgenfile, snp_vec = snp_vec, sample_vec = sample_vec,
-                 impute = impute, scale = scale, threads = threads)
+                 scale = scale, threads = threads)
   G <- X[, , drop = FALSE]
   rownames(G) <- X$sample
   attr(G, "a1") <- X$a1

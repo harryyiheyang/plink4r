@@ -86,18 +86,16 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
       ld_write <- function(ptr) .genotype_fill_ld(ptr, al, ld$dir, use, af, cond, P)
     }
   }
-  .geno_refill(x, af = af, const = const, cells = .geno_cells_csr(cl, x),
-               default = "mean", inplace = FALSE, impute = lab, threads = P$threads, cols = if (!all(sel)) sel,
-               ld_write = ld_write)
+  .geno_refill(x, af = af, const = const, cells = .geno_cells_csr(cl, x), inplace = FALSE, impute = lab,
+               threads = P$threads, cols = if (!all(sel)) sel, ld_write = ld_write)
 }
 
-# Refill the missing cells of X through geno_fill_cpp, which computes the per-column value f: default ("mean":
-# observed mean, 0 when every cell is missing; "keep": the current fill), then af (anchored), then const; cells
-# (CSR from .geno_cells_csr) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
-# writes the LD fills into the new store after the per-column values and before the cells (so cells > LD > f).
-.geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, default = c("mean", "keep"), inplace = FALSE,
-                         impute = X$impute, threads = X$threads, cols = NULL, ld_write = NULL) {
-  default <- match.arg(default)
+# Refill the missing cells of X through geno_fill_cpp, which computes the per-column value f: the observed mean (0
+# when every cell is missing), then af (anchored), then const; cells (CSR from .geno_cells_csr) win over all.
+# inplace only for an object nothing else references. ld_write(ptr), when given, writes the LD fills into the new
+# store after the per-column values and before the cells (so cells > LD > f).
+.geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, inplace = FALSE, impute = X$impute,
+                         threads = X$threads, cols = NULL, ld_write = NULL) {
   p <- X$p
   if (!is.null(af)) {
     af <- as.numeric(af)
@@ -108,16 +106,15 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
     const <- as.numeric(const)
     if (length(const) != p) stop("const needs one value per selected variant.", call. = FALSE)
   }
-  um <- default == "mean"
   af <- if (is.null(af)) numeric(0) else af
   const <- if (is.null(const)) numeric(0) else const
   cols <- if (is.null(cols)) logical(0) else as.logical(cols)
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
   th <- .threads(threads)
   if (is.null(ld_write)) {
-    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, cells$ptr, cells$i, cells$g, inplace, th)
+    ptr <- geno_fill_cpp(X$ptr, TRUE, af, const, cols, cells$ptr, cells$i, cells$g, inplace, th)
   } else {
-    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, integer(0), integer(0), numeric(0), inplace, th)
+    ptr <- geno_fill_cpp(X$ptr, TRUE, af, const, cols, integer(0), integer(0), numeric(0), inplace, th)
     ld_write(ptr)
     if (length(cells$ptr))
       ptr <- geno_fill_cpp(ptr, FALSE, numeric(0), numeric(0), logical(0), cells$ptr, cells$i, cells$g, TRUE, th)

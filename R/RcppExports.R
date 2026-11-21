@@ -9,12 +9,12 @@ cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, pro
     .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
 }
 
-geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
+geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, threads) {
+    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, threads)
 }
 
-geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads)
+geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, threads) {
+    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, threads)
 }
 
 geno_info_cpp <- function(ptr) {

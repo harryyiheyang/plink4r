@@ -93,8 +93,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
     X <- do.call(geno_open, c(stats::setNames(list(f$prefix), if (f$type == "pgen") "pgenfile" else "bedfile"),
                               list(snp_vec = v$row, sample_vec = sample, scale = FALSE, threads = threads)))
     # missing calls: the anchored value where af is finite, else the observed mean (in place: X is local)
-    X <- .geno_refill(X, af = af, default = "mean", inplace = TRUE, impute = if (has_af) "af" else "mean",
-                      threads = threads)
+    X <- .geno_refill(X, af = af, inplace = TRUE, impute = if (has_af) "af" else "mean", threads = threads)
     t_read <- proc.time()[["elapsed"]]
     keep <- X$sd > 0
     if (!any(keep)) stop("Block ", b, ": no variant varies in the sample.", call. = FALSE)

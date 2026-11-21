@@ -7,9 +7,9 @@
 // allocated only for variants with a nonzero D. It holds
 //   - dosage PGEN: dosage - H, the file's 1/16384 dosage taken to the nearest 0.01 (PI 2026-11-18: the
 //     precision of imputed dosages) and H that value rounded;
-//   - every input: the fill of a missing entry, f - H with H = round(f) and
-//     f the variant's lower median (impute = "median", D = 0) or observed
-//     mean (impute = "mean", and dosage PGEN; quantized to the variant's unit).
+//   - every input: the fill of a missing entry, f - H with H = round(f). At open f is the variant's lower
+//     median (hard calls, D = 0) or its observed mean dosage (dosage PGEN, to 0.01); geno_fill_cpp writes any
+//     other f, quantized to the variant's unit.
 // Values are A1 (BED) / ALT (PGEN) dosages as in BEDMatrix. Centering and
 // scaling are applied inside the products (prod_*) from mu and sd of the stored X.
 // The rows of the cells that were missing in the file are kept per variant
@@ -67,7 +67,6 @@ struct DCol {
 
 struct Geno {
   std::size_t n = 0, p = 0;
-  bool mean = false;            // impute = "mean"
   bool dosage = false;          // PGEN with dosages
   Planes G;                     // H: lo = [h == 1], hi = [h == 2]
   std::vector<DCol> D;
@@ -208,8 +207,8 @@ void plane_stats(Geno& g, std::size_t j) {
 }
 
 // Hardcall column: planes of the observed calls, then the missing calls filled
-// with the variant's lower median or observed mean (left 0 when every call is
-// missing); their rows go to M[j]. Other fills: geno_fill_cpp afterwards.
+// with the variant's lower median (left 0 when every call is missing); their
+// rows go to M[j]. Other fills: geno_fill_cpp afterwards.
 void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
                    std::size_t j, u64* miss) {
   const std::size_t W = g.G.words, n = g.n;
@@ -230,8 +229,7 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
         c2 += popcount64(lo[W + w]);
       }
       const std::int64_t c0 = obs - c1 - c2;
-      f = g.mean ? static_cast<double>(c1 + 2 * c2) / static_cast<double>(obs)
-        : (2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0));
+      f = 2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0);
     }
     g.M[j].reserve(static_cast<std::size_t>(cm));
     fill_missing(g, j, miss, f, obs > 0, db);
@@ -240,12 +238,11 @@ void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
   plane_stats(g, j);
 }
 
-void init_geno(Geno& g, std::size_t n, std::size_t p, bool mean) {
+void init_geno(Geno& g, std::size_t n, std::size_t p) {
   if (n < 2) Rcpp::stop("The genotype matrix needs at least two samples.");
   if (!p) Rcpp::stop("No variants selected.");
   g.n = n;
   g.p = p;
-  g.mean = mean;
   reset_planes(g.G, n, p);
   g.D.assign(p, DCol());
   g.dsum.assign(p, 0.0);
@@ -579,15 +576,14 @@ void add_d_cross(const Geno& a, const Geno& b, double* out, int threads) {
 
 // [[Rcpp::export]]
 SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
-                       const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
-                       bool mean, int threads) {
+                       const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads) {
   threads = resolve_threads(threads);
   plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
   const std::size_t stride = bf.stride();
 
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
-  init_geno(*g, rows.size(), variants.size(), mean);
+  init_geno(*g, rows.size(), variants.size());
   static const NibbleTable table({2, -1, 1, 0});  // A1 dosage: 00:2, 01:NA, 10:1, 11:0
   const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
   std::vector<unsigned char> buffer(kGroup * stride);
@@ -616,8 +612,7 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
 
 // [[Rcpp::export]]
 SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct,
-                        const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
-                        bool mean, int threads) {
+                        const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads) {
   threads = resolve_threads(threads);
   PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
@@ -626,12 +621,12 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
     for (int v : variants)
       if (allele_ct[v] > 2)
         Rcpp::stop("Multiallelic variants are not supported in PGEN files with dosages: " + path);
-    init_geno(*g, rows.size(), variants.size(), true);
+    init_geno(*g, rows.size(), variants.size());
     load_dosage(*g, file, variants, rows, threads, path);
     finish_stats(*g);
     return g;
   }
-  init_geno(*g, rows.size(), variants.size(), mean);
+  init_geno(*g, rows.size(), variants.size());
   const NibbleTable& table = pgen_table();
   const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
   std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
@@ -1349,7 +1344,7 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
     }
   }
   Rcpp::XPtr<Geno> g(new Geno, true);
-  init_geno(*g, n, p, a->mean);
+  init_geno(*g, n, p);
   g->dosage = a->dosage;
   const std::size_t W = g->G.words;
   #pragma omp parallel num_threads(threads)
@@ -1438,7 +1433,7 @@ Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, cons
     if (first) Rcpp::stop("A column comes from no object.");
   }
   Rcpp::XPtr<Geno> g(new Geno, true);
-  init_geno(*g, n, p, a[0]->mean);
+  init_geno(*g, n, p);
   g->dosage = dosage;
   const std::size_t W = g->G.words;
   std::vector<std::size_t> base(K + 1, 0);  // start of object k in the per-thread row buffers
