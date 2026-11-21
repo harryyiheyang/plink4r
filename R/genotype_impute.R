@@ -49,8 +49,11 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
 
 # write_ptr: for a geno object, the external pointer of a fresh clone of it (same columns, nobody else references
 # it) into which the final fills of the imputed SNPs are written directly; the result then has no `fill` table.
+# aligned: the panel already aligned to this PGEN / object (.ld_align of the whole panel), when the caller has
+# it; the panel is then neither read nor aligned again.
 .genotype_impute <- function(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh,
-                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL, dosage_step = 0.01) {
+                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL, dosage_step = 0.01,
+                             aligned = NULL) {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
   .check_dosage_step(dosage_step)
@@ -71,10 +74,11 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   }
   if (is.null(snps)) {
     if (is.null(block)) stop("give `block` or `snps`")
-    al <- .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)
+    al <- if (!is.null(aligned)) aligned[aligned$block %in% block] else
+      .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)
     jobs <- list(list(block = block, lo = NULL, hi = NULL, keep = NULL))
   } else {
-    al <- .ld_align(.ld_panel(ref, ld_dir), pvar)  # whole panel: `snps` may be panel or PGEN IDs
+    al <- if (!is.null(aligned)) aligned else .ld_align(.ld_panel(ref, ld_dir), pvar)  # whole panel: `snps` may be panel or PGEN IDs
     rs <- al[al$ID %in% snps | pvar$ID[al$vi + 1L] %in% snps]
     if (nrow(rs) < length(unique(snps))) warning(length(unique(snps)) - nrow(rs), " of `snps` not in both `ref` and the PGEN")
     if (!nrow(rs)) stop("none of `snps` is in both `ref` and ", what)

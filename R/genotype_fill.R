@@ -106,7 +106,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       # the kernel writes the LD fills straight into the new object (no per-cell table in R)
       ld_write <- function(ptr) .genotype_impute(x, pan, ld$dir, NULL, x$snp[use], P$flank, NULL, P$delta,
                                                  P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb, a, cond,
-                                                 write_ptr = ptr, dosage_step = P$dosage_step)
+                                                 write_ptr = ptr, dosage_step = P$dosage_step, aligned = al)
     }
   }
   .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
@@ -265,10 +265,9 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     m[, in_ld := (row - 1L) %in% al$vi]
     if (any(m$in_ld)) {
       ua <- m[in_ld == TRUE & is.finite(p_alt)]
-      gi <- genotype_impute(pfile, pan, ld$dir, snps = m$ID[m$in_ld], flank = P$flank, sample = iid[si],
-                            delta = P$delta, anchor_min_miss = P$anchor_min_miss, thresh = P$thresh,
-                            threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID),
-                            cond = P$cond, dosage_step = P$dosage_step)
+      gi <- .genotype_impute(pfile, pan, ld$dir, NULL, m$ID[m$in_ld], P$flank, iid[si], P$delta,
+                             P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb,
+                             stats::setNames(ua$p_alt, ua$ID), P$cond, dosage_step = P$dosage_step, aligned = al)
       cells <- gi$fill[, .(ID = snp, IID, g)]
       method <- paste0("scheme4+", method)
     }
