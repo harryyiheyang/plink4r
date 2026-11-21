@@ -1,7 +1,8 @@
 # Build a blockwise eigen LD panel (one SNP-table parquet + block<N>.eigen.bin) from
-# PLINK genotypes. Offline tool: correlations by cor_pgen() / cor_bed() (2-bit
-# store, threads), eigendecomposition by base R eigen() (R's BLAS / LAPACK, as
-# the user decided for panel building), blocks one after another.
+# PLINK genotypes. Offline tool: the columns of a block are opened as a geno object (geno_open(), 2-bit
+# store), its missing calls are filled and the correlations come from geno_cor() (threads);
+# eigendecomposition by base R eigen() (R's BLAS / LAPACK, as the user decided for panel building),
+# blocks one after another.
 
 #' Build an eigen LD panel from PLINK BED / PGEN genotypes
 #'
@@ -21,12 +22,13 @@
 #'    repeatedly, before anything is computed. Blocks are numbered 1..B.
 #' 3. The plan (one row per block) goes to `out_dir/build/plan.tsv`;
 #'    `dry_run = TRUE` stops here.
-#' 4. Block by block: LD by [cor_pgen()] / [cor_bed()] (with AF_PanUKB the
-#'    missing calls take the anchored constant, so the filled column has mean
-#'    2 AF; otherwise the observed mean; sd is the sample sd after filling),
-#'    signs flipped to the alt orientation, variants with sd 0 in the sample
-#'    dropped, then [write_eigen_bin()]. A finished block is skipped on a rerun
-#'    unless `overwrite`.
+#' 4. Block by block: the block's variants are opened with [geno_open()], their
+#'    missing calls filled as by [genotype_fill()] (with AF_PanUKB the anchored
+#'    value, so the filled column has mean 2 AF; otherwise the observed mean; sd
+#'    is the sample sd after filling), LD by [geno_cor()], signs flipped to the
+#'    alt orientation, variants with sd 0 in the sample dropped, then
+#'    [write_eigen_bin()]. A finished block is skipped on a rerun unless
+#'    `overwrite`.
 #' 5. The SNP table: the matched rows of `ref` with `block` and `ld_index`
 #'    (0-based eigen row in the block), sorted by block and ld_index; ID is
 #'    kept from `ref` or made as `chr:pos:ref:alt`; AF_PanUKB is kept from
@@ -69,7 +71,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
   plan <- .ldb_plan(m, bl, as.integer(min_snp))
   m <- plan$variants
   plan <- plan$blocks
-  n_s <- vapply(gv$files, function(f) if (is.null(sample)) f$n else length(sample), numeric(1))
+  n_s <- vapply(gv$files, function(f) if (is.null(sample)) nrow(f$file$samples) else length(sample), numeric(1))
   plan[, est_gb := round((n_s[file] * NumSNP / 4 + 5 * 8 * as.numeric(NumSNP)^2) / 1e9, 2)]
   plan[, prefix := vapply(gv$files, `[[`, "", "prefix")[file]]
   data.table::fwrite(plan, file.path(wd, "plan.tsv"), sep = "\t")
@@ -87,13 +89,15 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
     fi <- plan$file[plan$Block == b]
     t0 <- proc.time()[["elapsed"]]
     af <- if (has_af) ifelse(v$sgn > 0, v$AF, 1 - v$AF) else NULL
-    cor_fun <- if (gv$files[[fi]]$type == "pgen") cor_pgen else cor_bed
-    res <- cor_fun(gv$files[[fi]]$prefix, snps = v$row, sample = sample, af = af,
-                   threads = threads, impute = "mean")
-    keep <- res$sd > 0
+    X <- geno_open(file = gv$files[[fi]]$file, snp_vec = v$row, sample_vec = sample, scale = FALSE, threads = threads)
+    # missing calls: the anchored value where af is finite, else the observed mean (in place: X is local)
+    X <- .geno_refill(X, af = af, inplace = TRUE, impute = if (has_af) "af" else "mean", threads = threads)
+    t_read <- proc.time()[["elapsed"]]
+    keep <- X$sd > 0
     if (!any(keep)) stop("Block ", b, ": no variant varies in the sample.", call. = FALSE)
-    R <- res$R[keep, keep, drop = FALSE]
-    res$R <- NULL
+    R <- geno_cor(X, threads = threads)
+    t_cor <- proc.time()[["elapsed"]]
+    R <- R[keep, keep, drop = FALSE]
     s <- v$sgn[keep]
     if (any(s < 0)) {
       R[s < 0, ] <- -R[s < 0, ]
@@ -106,16 +110,16 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
     rm(R)
     file.rename(paste0(eig, ".tmp"), eig)
     t2 <- proc.time()[["elapsed"]]
-    p_alt <- ifelse(s > 0, res$mean[keep] / 2, 1 - res$mean[keep] / 2)
+    p_alt <- ifelse(s > 0, X$center[keep] / 2, 1 - X$center[keep] / 2)
     data.table::fwrite(data.table::data.table(rid = v$rid[keep], af_sample = p_alt), paste0(rf, ".tmp"), sep = "\t")
     file.rename(paste0(rf, ".tmp"), rf)
     lg <- data.table::data.table(Block = b, NumSNP = nrow(v), kept = sum(keep), k = e$k,
-                                 n = res$n, read_s = res$time[["read"]], cor_s = res$time[["cor"]],
+                                 n = X$n, read_s = t_read - t0, cor_s = t_cor - t_read,
                                  eigen_s = t2 - t1, total_s = t2 - t0)
     data.table::fwrite(lg, logf, sep = "\t", append = file.exists(logf))
     message(sprintf("block %d/%d: m = %d (%d dropped), k = %d, %.1f s", b, nrow(plan), sum(keep),
                     sum(!keep), e$k, t2 - t0))
-    rm(res)
+    rm(X)
     gc(FALSE)
   }
 
@@ -132,6 +136,30 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
   for (f in list.files(out_dir, pattern = "\\.parquet$", full.names = TRUE)) if (basename(f) != name) file.remove(f)
   arrow::write_parquet(panel, file.path(out_dir, name))
   invisible(list(plan = plan, log = if (file.exists(logf)) data.table::fread(logf) else NULL, panel = panel))
+}
+
+#' Eigen-decompose an LD matrix, truncate at `thresh` of the positive eigenvalue sum, write plink4r eigen.bin
+#'
+#' Layout: int32 m; int32 k; float64 sumPos; float32 cutoff; float64 lam[k]; float32 scale[k]; int16 U[m*k]
+#' (column-major, u = q * scale, scale_j = max|U_j| / 32767).
+#' @return list(m, k, sumpos) invisibly
+#' @export
+write_eigen_bin <- function(R, path, thresh = 0.999) {
+  e <- eigen(R, symmetric = TRUE)
+  lam <- e$values; lp <- pmax(lam, 0); sumpos <- sum(lp)
+  k <- min(which(cumsum(lp) / sumpos >= thresh)[1], length(lam))
+  U <- e$vectors[, seq_len(k), drop = FALSE]
+  sc <- apply(abs(U), 2, max) / 32767
+  q <- round(sweep(U, 2, sc, "/"))
+  q[q > 32767] <- 32767; q[q < -32767] <- -32767
+  con <- file(path, "wb"); on.exit(close(con))
+  writeBin(as.integer(c(nrow(R), k)), con, size = 4L, endian = "little")
+  writeBin(sumpos, con, size = 8L, endian = "little")
+  writeBin(thresh, con, size = 4L, endian = "little")
+  writeBin(lam[seq_len(k)], con, size = 8L, endian = "little")
+  writeBin(sc, con, size = 4L, endian = "little")
+  writeBin(as.integer(q), con, size = 2L, endian = "little")
+  invisible(list(m = nrow(R), k = k, sumpos = sumpos))
 }
 
 #' Bundled LD block files
@@ -168,27 +196,20 @@ ld_blocks_default <- function(build = 38) {
   list(table = d, key = key[CHR %in% .ldb_auto & !is.na(BP)])
 }
 
-# Variants of every genotype file: file, 1-based row, chromosome, position, counted / other allele.
+# Variants of every genotype file: file, 1-based row, chromosome, position, counted / other allele of its biallelic
+# rows on chromosomes 1 to 22. files[[f]] = list(prefix as given, file = its geno_file(), read without IDs), from
+# which every block of the file is opened.
 .ldb_geno_variants <- function(geno) {
   files <- list()
   vars <- list()
   for (f in seq_along(geno)) {
     pre <- sub("\\.(pgen|bed)$", "", geno[f])
-    if (file.exists(paste0(pre, ".pgen"))) {
-      pv <- .read_pvar5(pre)
-      files[[f]] <- list(prefix = pre, type = "pgen", n = length(.psam_ids(pre)))
-      v <- data.table::data.table(file = f, row = pv$row, CHR = .ldb_chr(pv$CHROM),
-                                  BP = pv$POS, cnt = pv$ALT, oth = pv$REF)
-      v <- v[pv$allele_ct == 2L]
-    } else if (file.exists(paste0(pre, ".bed"))) {
-      bim <- data.table::fread(paste0(pre, ".bim"), header = FALSE, colClasses = "character")
-      fam <- data.table::fread(paste0(pre, ".fam"), header = FALSE, select = 1L)
-      files[[f]] <- list(prefix = pre, type = "bed", n = nrow(fam))
-      v <- data.table::data.table(file = f, row = seq_len(nrow(bim)), CHR = .ldb_chr(bim[[1L]]),
-                                  BP = as.integer(bim[[4L]]), cnt = toupper(bim[[5L]]), oth = toupper(bim[[6L]]))
-    } else {
-      stop("No .pgen or .bed for ", geno[f], call. = FALSE)
-    }
+    gf <- if (file.exists(paste0(pre, ".pgen"))) geno_file(pgenfile = pre, id = FALSE) else
+      if (file.exists(paste0(pre, ".bed"))) geno_file(bedfile = pre, id = FALSE) else
+        stop("No .pgen or .bed for ", geno[f], call. = FALSE)
+    files[[f]] <- list(prefix = pre, file = gf)
+    v <- gf$variants
+    v <- data.table::data.table(file = f, row = v$row, CHR = v$chr, BP = v$pos, cnt = v$a1, oth = v$a2)[v$allele_ct == 2L]
     vars[[f]] <- v[CHR %in% .ldb_auto]
   }
   vars <- data.table::rbindlist(vars)

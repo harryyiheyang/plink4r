@@ -7,7 +7,7 @@
 //   in chunks (parallel over variants), then scored in parallel over sample ranges, so no reduction and no
 //   genotype matrix: memory is n x q scores plus one chunk of genovecs.
 // score_ld_block_cpp: one eigen.bin LD block through impute_kernel.h (the same stage 1 / stage 2 as
-//   genotype_impute), adding B[j, t] * g for every filled cell instead of returning the cells.
+//   the LD fill of genotype_fill), adding B[j, t] * g for every filled cell instead of writing the cells.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -115,7 +115,7 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
         fill = 2;
         if (nm > 0) {
           const double pa = fl ? 1 - pg : pg;
-          f_alt = std::min(2.0, std::max(0.0, (2.0 * ns * pa - so) / nm));
+          f_alt = plink4r::anchor_fill(ns, pa, so, nm);
         }
       }
       if (!impute_none && ld_cand[j] && nm > 0) fill = 3;
@@ -225,9 +225,11 @@ Rcpp::List score_stream_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVec
                             Rcpp::_["p1"] = Rcpp::wrap(p1v), Rcpp::_["a"] = Rcpp::wrap(av));
 }
 
-// One LD block over its working rows (panel rows in the PGEN; rows / var_idx / af / sign as in
-// genotype_impute_cpp): returns the n x q matrix sum_j B[j, t] * g_ij over the filled cells (g = final ALT
-// dosage of a missing call). Rows of B that are all zero are imputed (they condition the others) but add nothing.
+// One LD block over its working rows (the panel rows of the block that are in the PGEN, increasing): rows =
+// 0-based eigen row, var_idx = 0-based PGEN variant, af = PGEN-ALT frequency, sign = +1 (PGEN ALT = panel alt) or
+// -1; sample_idx = 0-based PSAM rows (the anchor counts use these samples only). Returns the n x q matrix
+// sum_j B[j, t] * g_ij over the filled cells (g = final ALT dosage of a missing call). Rows of B that are all zero
+// are imputed (they condition the others) but add nothing.
 // [[Rcpp::export]]
 Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct,
                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,

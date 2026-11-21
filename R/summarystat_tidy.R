@@ -71,8 +71,3 @@ summarystat_tidy <- function(gwas, ref, build = 37, freq_thresh = 0.2, N_sd_rang
   }
   x[]
 }
-
-#' @rdname summarystat_tidy
-#' @details `sumstat_tidy()` is another name of `summarystat_tidy()`.
-#' @export
-sumstat_tidy <- summarystat_tidy

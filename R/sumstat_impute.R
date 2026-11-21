@@ -65,8 +65,3 @@ sumstat_impute <- function(tidy, ref = NULL, ld_dir, thresh = 0.995, delta = 0.1
   }
   out[]
 }
-
-#' @rdname sumstat_impute
-#' @details `summarystat_impute()` is another name of `sumstat_impute()`.
-#' @export
-summarystat_impute <- sumstat_impute

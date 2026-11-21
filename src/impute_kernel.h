@@ -1,6 +1,6 @@
-// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types so that several
-// R entry points share it: genotype_impute_cpp (returns every filled cell) and the LD path of geno_score
-// (adds w * filled cell into scores without keeping the cells).
+// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types so that two
+// R entry points share it: the LD fill of genotype_fill (genotype_fill_ld.cpp: writes the filled cells into a geno
+// object) and the LD path of geno_score (adds w * filled cell into scores without keeping the cells).
 //
 // Working rows S: the panel rows of the block (or window) that are also in the PGEN (the intersection; rows
 // absent from the PGEN are not carried). Each has a PGEN variant, the ALT frequency p in PGEN orientation and a
@@ -34,7 +34,6 @@
 
 #include <RcppEigen.h>
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -47,6 +46,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include "anchor_fill.h"
 #include "eigen_bin.h"
 #include "pgen_reader.h"
 #include "la_dispatch.h"
@@ -58,9 +58,6 @@ namespace ik {
 using Eigen::MatrixXf;
 using Eigen::VectorXf;
 
-inline double secs(std::chrono::steady_clock::time_point a) {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
-}
 inline int tid() { return thread_id(); }
 
 inline int team() { return thread_team(); }
@@ -72,19 +69,16 @@ struct ImputeLD {
   std::vector<int> vi;                  // 0-based PGEN variant per working row
   std::vector<float> mu, sd, isd, Aj;   // 2p, s sqrt(2p(1-p)) (signed), 1/sd, A_j
   Eigen::MatrixXf C, Aw;
-  double t_eig = 0, t_C = 0;
 };
 
 // ld: the eigen block; rows: 0-based eigen rows of the working set S (panel rows present in the PGEN,
 // increasing); vi, af, sign: per working row (PGEN variant, PGEN-ALT frequency in (0,1), +1 / -1).
 inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& rows, const std::vector<int>& vi,
                                 const std::vector<double>& af, const std::vector<int>& sign, double delta,
-                                int T, double t_eig = 0) {
+                                int T) {
   using Eigen::MatrixXf;
   using Eigen::VectorXf;
-  auto t0 = std::chrono::steady_clock::now();
   ImputeLD L;
-  L.t_eig = t_eig;
   const int m = static_cast<int>(rows.size()), k = ld.k;
   if (m == 0) throw std::runtime_error("no working rows (no panel SNP of the block is in the PGEN)");
   if (!(delta > 0)) throw std::runtime_error("delta must be > 0");
@@ -104,7 +98,6 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
     L.sd[j] = static_cast<float>(sign[j] * std::sqrt(2 * p * (1 - p)));
     L.isd[j] = 1.0f / L.sd[j];
   }
-  L.t_eig += ik::secs(t0); t0 = std::chrono::steady_clock::now();
   const int mp = (m + 15) / 16 * 16;  // padded rows for the 16-wide plane dot
   L.mp = mp;
   MatrixXf& C = L.C;
@@ -131,7 +124,6 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
     for (int l = 0; l < m; ++l) s += Aw(l, j) * mu[l];
     L.Aj[j] = -s;
   }
-  L.t_C = ik::secs(t0);
   return L;
 }
 
@@ -146,7 +138,6 @@ struct BlockGenotypes {
   std::vector<long long> dptr;   // m + 1
   std::vector<int> di;
   std::vector<int8_t> dd;
-  double t_geno = 0;
 };
 
 // d of an observed ALT dosage v (1/16384 units, 0..32768) with H = round(v / 16384) (halves up).
@@ -171,7 +162,6 @@ inline void set_dosage_lists(BlockGenotypes& B, std::vector<std::vector<int>>& l
 
 inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>& vi, const std::vector<int>& sidx,
                                            double step, int T) {
-  auto t0 = std::chrono::steady_clock::now();
   BlockGenotypes B;
   const int m = static_cast<int>(vi.size()), ns = static_cast<int>(sidx.size()), sb = (ns + 3) / 4;
   B.m = m; B.ns = ns; B.sb = sb; B.step = step;
@@ -205,7 +195,6 @@ inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>&
     for (int t = 0; t < T; ++t)
       if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
     set_dosage_lists(B, li, ld);
-    B.t_geno = ik::secs(t0);
     return B;
   }
   B.dptr.assign(m + 1, 0);
@@ -224,7 +213,6 @@ inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>&
   }
   for (int t = 0; t < T; ++t)
     if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
-  B.t_geno = ik::secs(t0);
   return B;
 }
 
@@ -237,12 +225,10 @@ struct PersonPlanes {
   std::vector<long long> doff;            // ns + 1: person i's observed (row, d) pairs dl / dv[doff[i] .. doff[i + 1])
   std::vector<int> dl;
   std::vector<int8_t> dv;
-  double t_planes = 0;
 };
 
 // Consumes B.GS (released on return).
 inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
-  auto t0 = std::chrono::steady_clock::now();
   PersonPlanes P;
   const int m = L.m, ns = B.ns, sb = B.sb;
   const int nbyte = L.mp / 8;
@@ -293,7 +279,6 @@ inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
       }
   }
   std::vector<int>().swap(B.di); std::vector<int8_t>().swap(B.dd);
-  P.t_planes = ik::secs(t0);
   return P;
 }
 
@@ -302,15 +287,12 @@ struct Stage1Result {
   std::vector<std::vector<int>> oi, oj;
   std::vector<std::vector<float>> og;
   long long persons_solved = 0;
-  int n_blocks = 0;
-  double t_lists = 0, t_rhs = 0, t_chol = 0, t_solve = 0;
 };
 
 inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, double delta, int nb_people,
                                   double mem_gb, int T) {
   using Eigen::MatrixXf;
   using Eigen::VectorXf;
-  const auto t_start = std::chrono::steady_clock::now();
   Stage1Result R;
   const int m = L.m, ns = P.ns, nbyte = P.nbyte;
   const MatrixXf& C = L.C;
@@ -338,7 +320,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     bstart.push_back(ns);
   }
   const int nblk = static_cast<int>(bstart.size()) - 1;
-  R.n_blocks = nblk;
   R.oi.assign(T, std::vector<int>()); R.oj.assign(T, std::vector<int>()); R.og.assign(T, std::vector<float>());
   // one entry per missing cell in SNP order, carrying everything the rhs loop needs about its person so the
   // loop reads it sequentially (no dependent loads of the person's list headers)
@@ -356,7 +337,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
   float* S = nullptr;
   for (int bk = 0; bk < nblk; ++bk) {
     const int b0 = bstart[bk], nb = bstart[bk + 1] - b0;
-    auto tb = std::chrono::steady_clock::now();
     const uint8_t* het = &P.het[static_cast<std::size_t>(b0) * nbyte];
     const uint8_t* hom = &P.hom[static_cast<std::size_t>(b0) * nbyte];
     const std::vector<int>* Mi = &MiA[b0];
@@ -414,7 +394,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
     if (static_cast<std::size_t>(soff[nb]) > S_cap) { S_cap = static_cast<std::size_t>(soff[nb]); S_buf.reset(new float[S_cap]); }
     rhs = rhs_buf.get();  // fully overwritten below
     S = S_buf.get();      // every column of every S_i is written below
-    R.t_lists += ik::secs(tb); tb = std::chrono::steady_clock::now();
 
     // rhs and C_MM, column by column
 #ifdef _OPENMP
@@ -468,7 +447,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         rhs[ce.mo + a] = r;
       }
     }
-    R.t_rhs += ik::secs(tb); tb = std::chrono::steady_clock::now();
 
     // per-person solve
 #ifdef _OPENMP
@@ -515,35 +493,30 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         }
       }
     }
-    R.t_chol += ik::secs(tb);
     for (int i = 0; i < nb; ++i) if (!Mi[i].empty()) ++R.persons_solved;
   }
-  R.t_solve = ik::secs(t_start);
   return R;
 }
 
-// ---- stage 2: anchor per SNP. NaN marks rows without filled cells (nothing missing).
+// ---- stage 2: anchor per SNP. cnt1 = filled cells of each row, shift = what stage 2 adds to them (0: stage 1 is kept).
 struct Stage2Result {
-  std::vector<double> sum1, cnt1, craw, cc, shift, mean1;
-  double t_anchor = 0;
+  std::vector<double> cnt1, shift;
 };
 
 inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<double>& sum_obs,
                                   const std::vector<double>& af, int ns, double anchor_min_miss) {
   const int m = static_cast<int>(sum_obs.size());
-  const double nan = std::numeric_limits<double>::quiet_NaN();
   Stage2Result A;
-  A.sum1.assign(m, 0.0); A.cnt1.assign(m, 0.0);
+  std::vector<double> sum1(m, 0.0);
+  A.cnt1.assign(m, 0.0); A.shift.assign(m, 0.0);
   const int T = static_cast<int>(R.og.size());
   for (int t = 0; t < T; ++t)
-    for (std::size_t r = 0; r < R.og[t].size(); ++r) { A.sum1[R.oj[t][r]] += R.og[t][r]; A.cnt1[R.oj[t][r]] += 1; }
-  A.craw.assign(m, nan); A.cc.assign(m, nan); A.shift.assign(m, 0.0); A.mean1.assign(m, nan);
+    for (std::size_t r = 0; r < R.og[t].size(); ++r) { sum1[R.oj[t][r]] += R.og[t][r]; A.cnt1[R.oj[t][r]] += 1; }
   for (int j = 0; j < m; ++j) {
-    if (A.cnt1[j] == 0) continue;
-    A.mean1[j] = A.sum1[j] / A.cnt1[j];
-    A.craw[j] = (2.0 * ns * af[j] - sum_obs[j]) / A.cnt1[j];
-    A.cc[j] = std::min(2.0, std::max(0.0, A.craw[j]));
-    if (anchor_min_miss >= 0 && A.cnt1[j] >= anchor_min_miss * ns) A.shift[j] = A.cc[j] - A.mean1[j];
+    const bool anchored = A.cnt1[j] > 0 && anchor_min_miss >= 0 && A.cnt1[j] >= anchor_min_miss * ns;
+    if (!anchored) continue;
+    const double mean1 = sum1[j] / A.cnt1[j];
+    A.shift[j] = anchor_fill(ns, af[j], sum_obs[j], A.cnt1[j]) - mean1;
   }
   return A;
 }

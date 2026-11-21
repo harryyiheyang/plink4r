@@ -1,4 +1,4 @@
-# Reading the .pvar and .psam of a PLINK2 fileset, shared by genotype_impute, genotype_fill and geno_score.
+# Reading the .pvar and .psam of a PLINK2 fileset, shared by geno_file, geno_score and the association scans.
 
 # CHROM POS ID REF ALT of a .pvar (or .pvar.zst), with row (1-based) and allele_ct; id = FALSE skips the ID column.
 .read_pvar5 <- function(pfile, id = TRUE) {
