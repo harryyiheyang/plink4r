@@ -207,8 +207,8 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
     if (dos) {
       const std::uint16_t* d = pf.read_dosage(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
       if (!d) { bad[plink4r::thread_id()] = j; continue; }
-      for (int i = 0; i < ns; ++i) { const std::uint16_t v = d[si[i]]; if (v != plink4r::PgenFile::kMissing) { ++c; s += v; } }
-      s /= 16384.0;
+      for (int i = 0; i < ns; ++i) { const std::uint16_t v = d[si[i]]; if (v != plink4r::PgenFile::kMissing) { ++c; s += plink4r::dosage_grid(v); } }
+      s /= 100.0;
     } else {
       const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), plink4r::thread_id());
       if (!gv) { bad[plink4r::thread_id()] = j; continue; }

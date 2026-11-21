@@ -53,6 +53,10 @@ geno_xtwx_cpp <- function(ptr, w, center, div, threads) {
     .Call(`_plink4r_geno_xtwx_cpp`, ptr, w, center, div, threads)
 }
 
+geno_xtwx_bin_cpp <- function(ptr, w, center, div, threads) {
+    .Call(`_plink4r_geno_xtwx_bin_cpp`, ptr, w, center, div, threads)
+}
+
 geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }

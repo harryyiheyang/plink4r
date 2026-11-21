@@ -19,6 +19,12 @@
 
 namespace plink4r {
 
+// A file dosage (1/16384 steps, 0..32768) taken to the nearest 0.01: steps of 0.01, 0..200. PI 2026-11-18: the
+// package holds dosages at 0.01, the precision imputation writes; 0.05 is 819/16384 in the file and gives 5.
+inline unsigned int dosage_grid(std::uint16_t v) {
+  return (static_cast<unsigned int>(v) * 100u + 8192u) >> 14;
+}
+
 // OpenMP thread number inside a parallel region (0 without OpenMP): the package's one copy.
 inline int thread_id() {
 #ifdef _OPENMP
