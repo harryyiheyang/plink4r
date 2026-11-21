@@ -5,6 +5,10 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
+cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
+}
+
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
 }
@@ -95,6 +99,26 @@ pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 
 genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
     .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+}
+
+gwas_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block) {
+    .Call(`_plink4r_gwas_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block)
+}
+
+gxe_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block) {
+    .Call(`_plink4r_gxe_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block)
+}
+
+reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
+}
+
+reml_tau_cox_cpp <- function(time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_cox_cpp`, time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj)
+}
+
+reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj)
 }
 
 sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
