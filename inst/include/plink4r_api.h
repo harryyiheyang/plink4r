@@ -56,8 +56,11 @@ static inline int plink4r_geno_mx(SEXP ptr, int scale, const double* B, int k, d
   return fn(ptr, scale, B, k, out, threads);
 }
 
-/* out (q x q) = X'X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored),
- * standardized in place in out; geno_crossprod(X)[cols + 1, cols + 1]. */
+/* out (q x q) = X'X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored);
+ * geno_crossprod(X)[cols + 1, cols + 1]. The X'X of all columns is computed once per geno object and kept
+ * with it (p x p doubles), as geno_crossprod(X) does: the first call with cols NULL forms it, every later
+ * call reads it. A call with cols reads the kept X'X when there is one and computes the product of those
+ * columns alone otherwise. */
 static inline int plink4r_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
   typedef int (*fn_t)(SEXP, int, const int*, int, double*, int);
   static fn_t fn = NULL;
