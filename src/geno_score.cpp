@@ -15,6 +15,7 @@
 #include <cstring>
 #include <vector>
 #include "impute_kernel.h"
+#include "geno_access.h"
 
 namespace {
 // Byte decoding: a PGEN byte holds 4 samples (2 bits each, low bits first).
@@ -250,11 +251,14 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
   const plink4r::ImputeLD L = plink4r::build_impute_ld(eb, rw, vi, afv, sg, delta, T);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
-  plink4r::BlockGenotypes G = plink4r::read_block_genotypes(pf, vi, sidx, T);
+  Rcpp::RObject X = plink4r::geno_from_pgen(pgen, n_raw, act, vi, sidx, T);
+  std::vector<int> cols(m);
+  for (int j = 0; j < m; ++j) cols[j] = j;
+  plink4r::LDRows G;
+  plink4r::geno_ld_prepare(X, cols, keep, G.sum_obs, G.q, G.ns);
+  G.rows = [&X, &cols, T](int r0, int r1, std::uint16_t* out, int ld) { plink4r::geno_ld_rows(X, cols, r0, r1, out, ld, T); };
   const int ns = G.ns;
-  const plink4r::PersonPlanes P = plink4r::build_planes(L, G, T);
-  const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
+  const plink4r::Stage1Result R = plink4r::impute_stage1(L, G, delta, nb_people, mem_gb, T);
   const plink4r::Stage2Result A = plink4r::impute_stage2(R, G.sum_obs, afv, ns, anchor_min_miss);
   Rcpp::NumericMatrix S(ns, q);
   double cells = 0;

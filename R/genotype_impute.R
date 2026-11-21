@@ -1,4 +1,4 @@
-#' Impute hard-call missing genotypes from eigen.bin LD (whole block or a SNP window)
+#' Impute missing genotypes (hard calls or dosages) from eigen.bin LD (whole block or a SNP window)
 #'
 #' Works on the panel SNPs that are in the PGEN (the intersection S; panel SNPs absent from the PGEN are not
 #' carried). The panel need not share the PGEN's REF/ALT orientation, IDs or build: SNPs are aligned by ID and
@@ -10,9 +10,10 @@
 #' block (blocks are independent in the panel, so a region spanning blocks is imputed block by block).
 #' Stage 2: for SNPs with missing rate >= anchor_min_miss, shift the filled cells so that observed + filled
 #' allele count = 2 n p, then clip to [0, 2]; below the cutoff stage 1 is kept. anchor_min_miss < 0 disables it.
-#' A `geno` object (hard calls) may be given in place of the PGEN: its columns, counted allele (ALT = `a1`)
+#' A `geno` object (hard calls or dosages) may be given in place of the PGEN: its columns, counted allele (ALT = `a1`)
 #' and missing cells take the place of the .pvar and the file's missing calls, every row is imputed (subset
-#' first with [geno_subset()]), and BED-based objects work the same way. Dosage objects are not accepted.
+#' first with [geno_subset()]), and BED-based objects work the same way. Observed dosages enter z_O as they are (no hard-call threshold);
+#' a cell is missing when its dosage is missing.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam), or a `geno` object.
 #' @param ref panel SNP table; NULL (default) reads the .parquet in `ld_dir`. A parquet path or data.frame with
 #'   ID, block, ld_index (0-based eigen row), AF_PanUKB (frequency of alt) and, for orientation and position
@@ -53,7 +54,6 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   if (!is.null(write_ptr) && !obj) stop("internal: write_ptr needs a geno object", call. = FALSE)
   if (obj) {
     if (!is.null(sample)) stop("with a geno object, sample must be NULL (use geno_subset() first)", call. = FALSE)
-    if (pfile$dosage) stop("LD imputation on an object needs hard calls; for a PGEN with dosages give the PGEN prefix.", call. = FALSE)
     X <- pfile
     pvar <- .geno_vartab(X)  # appended columns have allele_ct 0: never aligned to the panel
     iid <- X$sample
