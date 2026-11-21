@@ -28,8 +28,7 @@
 #'   a missing cell filled with the observed mean of its column; [genotype_fill()] refills the missing cells.
 #'
 #' So objects with the same samples are bound by columns, objects with the same variants by rows, and a
-#' sample or variant held twice is taken from the first object. Objects with appended columns
-#' ([geno_append()]) are not merged: append after merging. All objects hold hard calls, or all dosages.
+#' sample or variant held twice is taken from the first object. All objects hold hard calls, or all dosages.
 #'
 #' @param ... `geno` objects, or one list of them (e.g. the result of [geno_harmonise()]).
 #' @param sample `NULL`, or the samples to keep and their order: a data.frame whose first two columns are FID
@@ -43,7 +42,6 @@ geno_merge <- function(..., sample = NULL, threads = 4L) {
   X <- list(...)
   if (length(X) == 1L && !inherits(X[[1L]], "geno") && is.list(X[[1L]])) X <- X[[1L]]
   if (!length(X) || !all(vapply(X, inherits, NA, "geno"))) stop("give geno objects, or a list of them.", call. = FALSE)
-  if (any(vapply(X, function(x) length(x$appended) > 0L, NA))) stop("objects with appended columns are not merged: append after merging.", call. = FALSE)
   K <- length(X)
   skey <- lapply(X, function(x) paste(if (is.null(x$fid)) x$sample else x$fid, x$sample, sep = "\r"))
   vkey <- lapply(X, function(x) paste(x$chr, x$pos, x$a1, x$a2, sep = "\r"))

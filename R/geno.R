@@ -2,14 +2,13 @@
 # (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X; X'M), geno_multiply() (X B),
-# geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
+# geno_wcrossprod() and geno_cor() /
 # cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
 # f - round(f) for a missing entry filled with f (the variant's lower median,
-# impute = "median", or observed mean, "mean"), and all of x (H = 0) for an
-# appended column; with scale = TRUE every product is that of the
+# impute = "median", or observed mean, "mean"); with scale = TRUE every product is that of the
 # column-standardized matrix (mean 0, sd 1 with n - 1; constant columns are
 # only centered).
 
@@ -103,7 +102,7 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 
 # The one constructor of a geno object: per-column fields `cols` (snp, id, chr, pos, a1, a2, row, flipped),
 # per-row fields `rows` (sample, fid); center, sd, n_miss and af come from the store.
-.geno_new <- function(ptr, cols, rows, impute, scale, threads, file = NULL, appended = integer(0)) {
+.geno_new <- function(ptr, cols, rows, impute, scale, threads, file = NULL) {
   info <- geno_info_cpp(ptr)
   n <- as.integer(info$n); p <- as.integer(info$p)
   for (k in names(cols)) if (length(cols[[k]]) != p) stop("internal: column field ", k, " has the wrong length", call. = FALSE)
@@ -111,7 +110,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, a1 = cols$a1, a2 = cols$a2, sample = rows$sample,
                  impute = impute, scale = scale, center = info$mean, sd = info$sd, threads = threads,
                  dosage = isTRUE(info$dosage), dosage_nnz = info$dosage_nnz,
-                 appended = as.integer(appended),
                  id = cols$id, chr = cols$chr, pos = cols$pos, row = cols$row, flipped = cols$flipped,
                  n_miss = info$n_miss, af = info$af, fid = rows$fid, file = file),
             class = "geno")
@@ -120,43 +118,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 .geno_cols <- function(X, j = seq_len(X$p)) {
   list(snp = X$snp[j], id = X$id[j], chr = X$chr[j], pos = X$pos[j], a1 = X$a1[j], a2 = X$a2[j],
        row = X$row[j], flipped = X$flipped[j])
-}
-
-#' Append columns to a geno matrix
-#'
-#' Appends the columns of a dense n x k matrix `M` (one row per sample, in the
-#' row order of `X`) after the columns of `X`, in the same store: the 2-bit
-#' part of an appended column is 0 and all of its values sit in the int16 part,
-#' with the column's own unit max|x| / 32767 (relative error at most
-#' 1/65534 of max|x|), so a dense or a sparse, 0/1/2 or continuous column is
-#' held the same way. Means and sds are kept per column. `X` is not changed.
-#'
-#' @param X A `geno` object.
-#' @param M Numeric matrix (or vector) with one row per sample.
-#' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @return A `geno` object with `p + ncol(M)` columns; `appended` gives the
-#'   positions of all appended columns and `a1`, `a2`, `id`, `chr`, `pos`, `row`, `flipped`, `af` are `NA`
-#'   there (`n_miss` 0).
-#' @export
-geno_append <- function(X, M, threads = X$threads) {
-  if (!inherits(X, "geno")) stop("X must be a geno object.", call. = FALSE)
-  M <- as.matrix(M) + 0
-  if (nrow(M) != X$n) stop("M must have one row per sample.", call. = FALSE)
-  if (any(!is.finite(M))) stop("Appended columns must be finite.", call. = FALSE)
-  if (is.null(colnames(M))) colnames(M) <- paste0("A", X$p + seq_len(ncol(M)))
-  if (anyDuplicated(c(X$snp, colnames(M)))) stop("Appended column names must differ from the column names of X.", call. = FALSE)
-  threads <- .threads(threads)
-  ptr <- geno_append_cpp(X$ptr, M, threads)
-  p0 <- X$p; k <- ncol(M); p <- p0 + k
-  pad <- function(x, na) if (is.null(x)) rep(na, p) else c(x, rep(na, k))
-  cols <- list(snp = c(X$snp, colnames(M)), id = pad(X$id, NA_character_), chr = pad(X$chr, NA_character_),
-               pos = pad(X$pos, NA_integer_), a1 = pad(X$a1, NA_character_), a2 = pad(X$a2, NA_character_),
-               row = pad(X$row, NA_integer_), flipped = pad(X$flipped, NA))
-  out <- .geno_new(ptr, cols, list(sample = X$sample, fid = if (is.null(X$fid)) rep(NA_character_, X$n) else X$fid),
-                   impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
-                   appended = c(X$appended, p0 + seq_len(k)))
-  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller stay
-  out
 }
 
 .geno_index <- function(x, ids, alt_ids, arg) {
@@ -301,7 +262,7 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
 # crossprod(X, X * wq) (of the standardized matrix when X$scale, centered with wq), wq = w binned: rows sorted
 # by w, each run of 64 sorted rows shares the mean of its w, so X'diag(wq)X sums exact popcount products per
 # bin times the bin weight (geno_xtwx_bin_cpp). When more than 1% of the cells have a nonzero D (dosages,
-# mean-filled missing calls, appended columns) the popcounts do not pay: wq = w and the product is
+# mean-filled missing calls) the popcounts do not pay: wq = w and the product is
 # geno_wcrossprod's. Returns the matrix and wq, the weights it corresponds to.
 geno_wcrossprod_bin <- function(X, w, threads = X$threads) {
   threads <- .threads(threads)

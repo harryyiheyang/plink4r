@@ -65,7 +65,7 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
     .check_delta(P$delta)
     pan <- .ld_panel(ld$ref, ld$dir)
     al <- .ld_align(pan, .geno_vartab(x))
-    use <- sort(intersect(al$vi + 1L, which(sel & x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
+    use <- sort(intersect(al$vi + 1L, which(sel & x$n_miss > 0)))
     if (length(use)) {
       a <- if (!is.null(af)) { ua <- which(is.finite(af)); stats::setNames(af[ua], x$snp[ua]) }
       cond <- if (!all(sel)) x$snp[sel] else P$cond
@@ -112,7 +112,7 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
       ptr <- geno_fill_cpp(ptr, FALSE, numeric(0), numeric(0), logical(0), cells$ptr, cells$i, cells$g, TRUE, th)
   }
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
-            threads = X$threads, file = X$file, appended = X$appended)
+            threads = X$threads, file = X$file)
 }
 
 # Per-cell fills cl = data.frame(j = column, IID, g) as CSR over the rows of X: cells matched by IID, unmatched

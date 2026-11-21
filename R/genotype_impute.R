@@ -62,7 +62,7 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   if (obj) {
     if (!is.null(sample)) stop("with a geno object, sample must be NULL (use geno_subset() first)", call. = FALSE)
     X <- pfile
-    pvar <- .geno_vartab(X)  # appended columns have allele_ct 0: never aligned to the panel
+    pvar <- .geno_vartab(X)
     iid <- X$sample
     si <- seq_len(X$n) - 1L
     what <- "the geno object"

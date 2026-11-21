@@ -14,7 +14,7 @@ namespace plink4r {
 // or 3 for a missing cell (whatever it holds now); an observed dosage gives its H = round(g). The rest of an
 // observed dosage, on the grid step: d = round((g - H) / step) (int8), the nonzero ones per column c as rows
 // di[dptr[c] .. dptr[c + 1]) (ascending) with values dd. sum_obs = counted-allele sum over the observed cells
-// (H + step d). Hard calls and dosages alike; stops for an appended column.
+// (H + step d). Hard calls and dosages alike.
 void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vector<unsigned char>& gs,
                   std::vector<double>& sum_obs, std::vector<long long>& dptr, std::vector<int>& di,
                   std::vector<std::int8_t>& dd, int& n, int threads);

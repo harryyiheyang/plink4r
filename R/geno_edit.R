@@ -33,7 +33,7 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
     cl$flipped <- xor(cl$flipped, flip)
   }
   .geno_new(ptr, cl, list(sample = X$sample[rows], fid = X$fid[rows]), impute = X$impute, scale = X$scale,
-            threads = X$threads, file = X$file, appended = sort(which(cols %in% X$appended)))
+            threads = X$threads, file = X$file)
 }
 
 #' Put geno objects on one counted allele per variant
@@ -73,7 +73,6 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   if (anyDuplicated(nm)) stop("The names of X must be unique.", call. = FALSE)
   metas <- lapply(seq_along(X), function(k) {
     G <- X[[k]]
-    if (length(G$appended)) stop(nm[k], " has appended columns; harmonise before geno_append().", call. = FALSE)
     if (is.null(G$chr) || anyNA(G$chr) || anyNA(G$pos)) stop(nm[k], " has no chr / pos per column.", call. = FALSE)
     data.table::data.table(chr = sub("^chr", "", as.character(G$chr), ignore.case = TRUE), pos = as.integer(G$pos),
                            A1 = toupper(G$a1), A2 = toupper(G$a2))
@@ -169,7 +168,7 @@ geno_missing <- function(X) {
   if (is.null(X$chr) || is.null(X$pos)) stop("the geno object has no chr / pos per column.", call. = FALSE)
   alt <- toupper(X$a1)
   act <- 2L + lengths(regmatches(alt, gregexpr(",", alt, fixed = TRUE)))
-  act[is.na(alt) | seq_len(X$p) %in% X$appended] <- 0L  # appended columns: matched to nothing
+  act[is.na(alt)] <- 0L  # a column without alleles is matched to nothing
   data.table::data.table(CHROM = sub("^chr", "", as.character(X$chr), ignore.case = TRUE), POS = as.integer(X$pos),
                          ID = X$snp, REF = toupper(X$a2), ALT = alt, row = seq_len(X$p), allele_ct = act)
 }

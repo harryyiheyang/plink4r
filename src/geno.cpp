@@ -9,8 +9,7 @@
 //     precision of imputed dosages) and H that value rounded;
 //   - every input: the fill of a missing entry, f - H with H = round(f) and
 //     f the variant's lower median (impute = "median", D = 0) or observed
-//     mean (impute = "mean", and dosage PGEN; quantized to the variant's unit);
-//   - appended columns (geno_append_cpp): all of x, H = 0, own unit.
+//     mean (impute = "mean", and dosage PGEN; quantized to the variant's unit).
 // Values are A1 (BED) / ALT (PGEN) dosages as in BEDMatrix. Centering and
 // scaling are applied on the R side from mu and sd of the stored X.
 // The rows of the cells that were missing in the file are kept per variant
@@ -50,16 +49,15 @@ constexpr double kDUnit = 1.0 / 16384.0;    // value of one int16 step of D, har
 constexpr double kDosUnit = 0.01;           // value of one int16 step of D, dosage PGEN
 constexpr int kDosSteps = 100;              // steps of kDosUnit per allele
 
-// int16 steps per allele of a genotype column's unit (16384 or 100); 0 for an appended column.
+// int16 steps per allele of a column's unit (16384 or 100).
 inline int unit_steps(double unit) {
-  return unit == kDUnit ? 16384 : unit == kDosUnit ? kDosSteps : 0;
+  return unit == kDosUnit ? kDosSteps : 16384;
 }
 
 // D of one variant: nonzero mask over the samples (H words), int16 values
 // q = D / unit in ascending row order, and the nonzero count before each block
 // of kDBlock mask words. All empty when the variant's D is zero. unit is
-// 1/16384 (hard-call inputs) or 0.01 (dosage PGEN) for genotype columns; an
-// appended column (H = 0, all of x in D) has its own unit max|x| / 32767.
+// 1/16384 (hard-call inputs) or 0.01 (dosage PGEN).
 struct DCol {
   std::vector<u64> mask;
   std::vector<std::int16_t> q;
@@ -420,8 +418,8 @@ DAxpy select_d_axpy() {
 // pc), the columns cols of g in that order (out is pc x pc); without, all columns of g. With per-row weights
 // wrow, D_bi is multiplied by wrow_i, giving X'WX += H'WD + D'WH + D'WD. Per block of kDRows rows, Y = (H + D / 2)
 // / sc of every column (sc = unit / 2) is decoded once into a row-major float buffer (row i contiguous over the
-// columns); Y = 2 H / unit + q is an integer below 2^17 for a genotype column and q for an appended one (H = 0),
-// so float holds it exactly. Then work items of kDSpan rows x kDCols columns of S, shared out by OpenMP
+// columns); Y = 2 H / unit + q is an integer below 2^17, so float holds it exactly. Then work items of kDSpan
+// rows x kDCols columns of S, shared out by OpenMP
 // (disjoint outputs), add D_bi Y[i, ] to S[, b] for the nonzeros of their columns in the block, in double with
 // the span of S and the rows of Y it reads in cache; sc is applied at the end. Every S[a, b] sums its terms in
 // ascending row order.
@@ -667,20 +665,18 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
 
 namespace {
 
-// Sum of the stored values of column j over all cells, in int16 steps of a genotype column's unit (k per allele).
+// Sum of the stored values of column j over all cells, in int16 steps of the column's unit (k per allele).
 inline std::int64_t step_sum_col(const Geno& g, std::size_t j, int k) {
   std::int64_t tot = k * static_cast<std::int64_t>(g.G.s[j]);
   for (std::int16_t q : g.D[j].q) tot += q;
   return tot;
 }
 
-// Sum of the stored values of column j over its observed (not missing) cells. Genotype columns are summed
-// exactly in int16 steps, so the result equals the sum of the file's observed calls (hard calls) or 0.01
-// dosages; an appended column (no missing cells) gives its column sum.
+// Sum of the stored values of column j over its observed (not missing) cells, summed exactly in int16 steps, so
+// the result equals the sum of the file's observed calls (hard calls) or 0.01 dosages.
 double obs_sum_col(const Geno& g, std::size_t j) {
   const DCol& c = g.D[j];
   const int k = unit_steps(c.unit);
-  if (!k) return static_cast<double>(g.G.s[j]) + g.dsum[j];
   std::int64_t tot = step_sum_col(g, j, k);
   for (std::uint32_t i : g.M[j]) tot -= k * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
   return static_cast<double>(tot) / k;
@@ -1156,7 +1152,7 @@ std::vector<double> col_div(const Geno& g) {
 }  // namespace
 
 // Per-column summaries of the store: mean, sd, missing calls, the sum of the observed cells (obs_sum) and the
-// observed allele frequency af = obs_sum / (2 observed cells) (NA with no observed cell and for appended columns).
+// observed allele frequency af = obs_sum / (2 observed cells) (NA with no observed cell).
 // [[Rcpp::export]]
 Rcpp::List geno_info_cpp(SEXP ptr) {
   Rcpp::XPtr<Geno> g(ptr);
@@ -1165,7 +1161,7 @@ Rcpp::List geno_info_cpp(SEXP ptr) {
   for (std::size_t j = 0; j < p; ++j) {
     os[j] = obs_sum_col(*g, j);
     const double obs = static_cast<double>(g->n) - g->nmiss[j];
-    af[j] = (!unit_steps(g->D[j].unit) || obs <= 0) ? NA_REAL : os[j] / (2.0 * obs);
+    af[j] = obs <= 0 ? NA_REAL : os[j] / (2.0 * obs);
   }
   return Rcpp::List::create(Rcpp::Named("n") = static_cast<double>(g->n),
                             Rcpp::Named("p") = static_cast<double>(p),
@@ -1237,55 +1233,6 @@ Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, bool sca
   for (std::size_t c = 0; c < k; ++c)
     for (std::size_t i = 0; i < n; ++i) out[i + c * n] -= shift[c];
   return out;
-}
-
-// A new geno = the columns of ptr followed by the k columns of M (n x k, any
-// finite values: dense or sparse, 0/1/2 or not). An appended column has H = 0
-// and all of x in D, as int16 q = round(x / unit) with its own unit
-// max|x| / 32767 (relative error <= 1/65534 of max|x|); only its nonzeros are
-// stored. Its mean and sd are kept like those of every column. ptr is unchanged.
-// [[Rcpp::export]]
-SEXP geno_append_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
-  Rcpp::XPtr<Geno> a(ptr);
-  threads = resolve_threads(threads);
-  const std::size_t n = a->n, p0 = a->p, k = M.ncol();
-  if (static_cast<std::size_t>(M.nrow()) != n) Rcpp::stop("M must have one row per sample.");
-  if (!k) Rcpp::stop("M has no columns.");
-  const double* m = M.begin();
-  for (std::size_t e = 0; e < n * k; ++e)
-    if (!std::isfinite(m[e])) Rcpp::stop("Appended values must be finite.");
-  Rcpp::XPtr<Geno> g(new Geno, true);
-  init_geno(*g, n, p0 + k, a->mean);
-  g->dosage = a->dosage;
-  std::copy(a->G.bits.begin(), a->G.bits.end(), g->G.bits.begin());
-  std::copy(a->G.s.begin(), a->G.s.end(), g->G.s.begin());
-  std::copy(a->G.v.begin(), a->G.v.end(), g->G.v.begin());
-  for (std::size_t j = 0; j < p0; ++j) {
-    g->D[j] = a->D[j];
-    g->dsum[j] = a->dsum[j];
-    g->dsq[j] = a->dsq[j];
-    g->dhd[j] = a->dhd[j];
-    g->nmiss[j] = a->nmiss[j];
-    g->M[j] = a->M[j];
-  }
-  #pragma omp parallel for num_threads(threads) schedule(static)
-  for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(k); ++cc) {
-    const std::size_t c = static_cast<std::size_t>(cc), j = p0 + c;
-    const double* x = m + c * n;
-    double amax = 0.0;
-    for (std::size_t i = 0; i < n; ++i) amax = std::max(amax, std::fabs(x[i]));
-    g->D[j].unit = amax > 0.0 ? amax / 32767.0 : kDUnit;
-    const double inv = 1.0 / g->D[j].unit;
-    DBuilder db(*g, j);
-    for (std::size_t i = 0; i < n; ++i) {
-      const int q = static_cast<int>(std::lround(x[i] * inv));
-      if (q) db.add(i, 0u, q);
-    }
-    db.finish();
-    plane_stats(*g, j);
-  }
-  finish_stats(*g);
-  return g;
 }
 
 // Raw A'B of two geno objects over the same samples: exact popcount on the planes (Ha'Hb), plus the D terms
@@ -1410,7 +1357,6 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
     if (flip.size()) {
       if (flip[c] == NA_LOGICAL) Rcpp::stop("flip must not be NA.");
       fl[c] = flip[c] ? 1 : 0;
-      if (fl[c] && !unit_steps(a->D[cl[c]].unit)) Rcpp::stop("Appended columns cannot be flipped.");
     }
   }
   Rcpp::XPtr<Geno> g(new Geno, true);
@@ -1549,9 +1495,8 @@ Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, cons
           for (std::uint32_t i : a[k]->M[col(k, c)]) mbuf[base[k] + i] = 1;
         }
         const double unit = g->D[c].unit;
-        const int us = unit_steps(unit);  // observed sum exactly in int16 steps (an appended column: in double)
+        const int us = unit_steps(unit);  // the observed sum, exactly, in int16 steps
         std::int64_t ss = 0;
-        double so = 0.0;
         std::size_t no = 0, nu = 0;
         for (std::size_t r = 0; r < n; ++r) {
           st[r] = 2;
@@ -1562,8 +1507,7 @@ Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, cons
             qo[r] = qbuf[base[k] + i];
             st[r] = mbuf[base[k] + i];
             if (!st[r]) {
-              if (us) ss += us * static_cast<std::int64_t>(ho[r]) + qo[r];
-              else so += ho[r] + qo[r] * unit;
+              ss += us * static_cast<std::int64_t>(ho[r]) + qo[r];
               ++no;
             }
             break;
@@ -1572,7 +1516,7 @@ Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, cons
         }
         unsigned int hf = 0;
         int qf = 0;
-        if (us) so = static_cast<double>(ss) / us;
+        const double so = static_cast<double>(ss) / us;
         if (nu) quantize_fill(no ? so / static_cast<double>(no) : 0.0, unit, hf, qf);
         uncp[c] = static_cast<double>(nu);
         for (std::size_t r = 0; r < n; ++r) {
@@ -1767,10 +1711,7 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vect
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t n = g->n, sb = (n + 3) / 4, m = cols.size();
-  for (int j : cols) {
-    if (j < 0 || static_cast<std::size_t>(j) >= g->p) Rcpp::stop("cols out of range.");
-    if (!unit_steps(g->D[j].unit)) Rcpp::stop("LD imputation does not take appended columns.");
-  }
+  for (int j : cols) if (j < 0 || static_cast<std::size_t>(j) >= g->p) Rcpp::stop("cols out of range.");
   // dosage part of the observed cells: D = q x unit (1/16384 or 0.01) on the step grid, d = round(D / step) != 0
   std::vector<std::vector<int>> li(m);
   std::vector<std::vector<std::int8_t>> ld(m);
