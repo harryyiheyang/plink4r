@@ -58,13 +58,12 @@ static inline int plink4r_geno_mx(SEXP ptr, int scale, const double* B, int k, d
   return fn(ptr, scale, B, k, out, threads);
 }
 
-/* out (q x q) = X'X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored);
- * geno_crossprod(X)[cols + 1, cols + 1]. Computed on every call. */
-static inline int plink4r_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
-  typedef int (*fn_t)(SEXP, int, const int*, int, double*, int);
+/* out (p x p) = X'X; geno_crossprod(X). Computed on every call. */
+static inline int plink4r_geno_xtx(SEXP ptr, int scale, double* out, int threads) {
+  typedef int (*fn_t)(SEXP, int, double*, int);
   static fn_t fn = NULL;
   if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtx");
-  return fn(ptr, scale, cols, nc, out, threads);
+  return fn(ptr, scale, out, threads);
 }
 
 /* out (n x nc) = the columns cols as double; X[, cols + 1]. */
@@ -75,18 +74,17 @@ static inline int plink4r_geno_cols(SEXP ptr, int scale, const int* cols, int nc
   return fn(ptr, scale, cols, nc, out, threads);
 }
 
-/* out (q x q) = X'W~X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored), with
- * W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean of its w (n values);
- * when more than 1% of the cells of those columns are stored off the 0/1/2 grid (dosages, mean-filled
- * missing calls), W~ = diag(w) instead (float products, double sums). Standardized in
- * place in out with the weights of the result; w_bin (n values, may be NULL) receives those weights.
- * geno_wcrossprod_bin(X, w)$XtWX[cols + 1, cols + 1] and $w. */
-static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc,
-                                        double* out, double* w_bin, int threads) {
-  typedef int (*fn_t)(SEXP, int, const double*, const int*, int, double*, double*, int);
+/* out (p x p) = X'W~X with W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean
+ * of its w (n values); when more than 1% of the cells are stored off the 0/1/2 grid (dosages, mean-filled
+ * missing calls), W~ = diag(w) instead (float products, double sums). Standardized in place in out with the
+ * weights of the result; w_bin (n values, may be NULL) receives those weights.
+ * geno_wcrossprod_bin(X, w)$XtWX and $w. */
+static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, double* out, double* w_bin,
+                                        int threads) {
+  typedef int (*fn_t)(SEXP, int, const double*, double*, double*, int);
   static fn_t fn = NULL;
   if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtwx_bin");
-  return fn(ptr, scale, w, cols, nc, out, w_bin, threads);
+  return fn(ptr, scale, w, out, w_bin, threads);
 }
 
 #ifdef __cplusplus

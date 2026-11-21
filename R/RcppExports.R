@@ -33,10 +33,6 @@ geno_mx_cpp <- function(ptr, B, scale, threads) {
     .Call(`_plink4r_geno_mx_cpp`, ptr, B, scale, threads)
 }
 
-geno_cross_cpp <- function(ptr_a, ptr_b, threads) {
-    .Call(`_plink4r_geno_cross_cpp`, ptr_a, ptr_b, threads)
-}
-
 geno_cor_cpp <- function(ptr_a, ptr_b, threads) {
     .Call(`_plink4r_geno_cor_cpp`, ptr_a, ptr_b, threads)
 }

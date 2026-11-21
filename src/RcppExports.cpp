@@ -140,19 +140,6 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-// geno_cross_cpp
-Rcpp::NumericMatrix geno_cross_cpp(SEXP ptr_a, SEXP ptr_b, int threads);
-RcppExport SEXP _plink4r_geno_cross_cpp(SEXP ptr_aSEXP, SEXP ptr_bSEXP, SEXP threadsSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type ptr_a(ptr_aSEXP);
-    Rcpp::traits::input_parameter< SEXP >::type ptr_b(ptr_bSEXP);
-    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_cross_cpp(ptr_a, ptr_b, threads));
-    return rcpp_result_gen;
-END_RCPP
-}
 // geno_cor_cpp
 Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads);
 RcppExport SEXP _plink4r_geno_cor_cpp(SEXP ptr_aSEXP, SEXP ptr_bSEXP, SEXP threadsSEXP) {
@@ -559,7 +546,6 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_xtx_cpp", (DL_FUNC) &_plink4r_geno_xtx_cpp, 3},
     {"_plink4r_geno_xtm_cpp", (DL_FUNC) &_plink4r_geno_xtm_cpp, 4},
     {"_plink4r_geno_mx_cpp", (DL_FUNC) &_plink4r_geno_mx_cpp, 4},
-    {"_plink4r_geno_cross_cpp", (DL_FUNC) &_plink4r_geno_cross_cpp, 3},
     {"_plink4r_geno_cor_cpp", (DL_FUNC) &_plink4r_geno_cor_cpp, 3},
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 5},
     {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},

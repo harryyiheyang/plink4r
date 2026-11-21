@@ -414,8 +414,7 @@ DAxpy select_d_axpy() {
   return d_axpy_generic;
 }
 
-// X'X += H'D + D'H + D'D, as S + S' with S[a, b] = sum_i D_bi (H_ai + D_ai / 2). With cols (0-based, length
-// pc), the columns cols of g in that order (out is pc x pc); without, all columns of g. With per-row weights
+// X'X += H'D + D'H + D'D (out is p x p), as S + S' with S[a, b] = sum_i D_bi (H_ai + D_ai / 2). With per-row weights
 // wrow, D_bi is multiplied by wrow_i, giving X'WX += H'WD + D'WH + D'WD. Per block of kDRows rows, Y = (H + D / 2)
 // / sc of every column (sc = unit / 2) is decoded once into a row-major float buffer (row i contiguous over the
 // columns); Y = 2 H / unit + q is an integer below 2^17, so float holds it exactly. Then work items of kDSpan
@@ -423,17 +422,15 @@ DAxpy select_d_axpy() {
 // (disjoint outputs), add D_bi Y[i, ] to S[, b] for the nonzeros of their columns in the block, in double with
 // the span of S and the rows of Y it reads in cache; sc is applied at the end. Every S[a, b] sums its terms in
 // ascending row order.
-void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullptr, std::size_t pc = 0,
-               const double* wrow = nullptr) {
-  const std::size_t n = g.n, p = cols ? pc : g.p;
-  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+void add_d_xtx(const Geno& g, double* out, int threads, const double* wrow = nullptr) {
+  const std::size_t n = g.n, p = g.p;
   if (!g.dnnz()) return;
   const DAxpy axpy = select_d_axpy();
   const std::size_t RB = std::min(kDRows, n);
   std::vector<double> S(p * p, 0.0), sc(p), val;  // val, row: the nonzeros of the block, column by column
   std::vector<float> Y(RB * p);
   std::vector<std::uint32_t> row;
-  for (std::size_t a = 0; a < p; ++a) sc[a] = 0.5 * g.D[col(a)].unit;
+  for (std::size_t a = 0; a < p; ++a) sc[a] = 0.5 * g.D[a].unit;
   std::vector<std::size_t> e0(p), off(p + 1, 0);  // per column: first nonzero of the block, start in row / val
   const std::size_t ns = (p + kDSpan - 1) / kDSpan, ng = (p + kDCols - 1) / kDCols, nc = (p + kDLine - 1) / kDLine;
   #pragma omp parallel num_threads(threads)
@@ -444,7 +441,7 @@ void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullpt
       #pragma omp for schedule(static)
       for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(p); ++aa) {
         const std::size_t a = static_cast<std::size_t>(aa);
-        const DCol& c = g.D[col(a)];
+        const DCol& c = g.D[a];
         e0[a] = c.mask.empty() ? 0 : d_rank(c, w0);
         off[a + 1] = c.mask.empty() ? 0 : d_rank(c, w1) - e0[a];
       }
@@ -460,16 +457,16 @@ void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullpt
       for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(nc); ++cc) {
         const std::size_t a0 = static_cast<std::size_t>(cc) * kDLine, na = std::min(kDLine, p - a0);
         for (std::size_t t = 0; t < na; ++t) {
-          const std::size_t a = a0 + t, j = col(a);
+          const std::size_t a = a0 + t;
           double* y = yb.data() + t * RB;
           std::fill(y, y + R, 0.0);
-          const u64* lo = g.G.lo(j);
-          const u64* hi = g.G.hi(j);
+          const u64* lo = g.G.lo(a);
+          const u64* hi = g.G.hi(a);
           for (std::size_t w = w0; w < w1; ++w) {
             for (u64 bits = lo[w]; bits; bits &= bits - 1) y[64 * (w - w0) + __builtin_ctzll(bits)] = 1.0;
             for (u64 bits = hi[w]; bits; bits &= bits - 1) y[64 * (w - w0) + __builtin_ctzll(bits)] = 2.0;
           }
-          const DCol& c = g.D[j];
+          const DCol& c = g.D[a];
           const double inv = 1.0 / sc[a];
           for (std::size_t r = 0; r < R; ++r) y[r] *= inv;
           std::size_t e = e0[a], k = off[a];
@@ -741,17 +738,16 @@ void decode_rows(const Geno& g, std::size_t j, std::size_t r0, std::size_t R, T*
   }
 }
 
-// The dense product loop of xtwx_float_into and xtx_dense_into, into o (P x P; P = pc for columns cols, else
-// g.p). Per block of RB rows, every column is decoded once into a shared buffer of T (column a at X[a * LD],
+// The dense product loop of xtwx_float_into, xtx_dense_into and xtx_grid_into, into o (P x P, P = g.p). Per
+// block of RB rows, every column is decoded once into a shared buffer of T (column a at X[a * LD],
 // LD = RB + pad: no power-of-two stride, which thrashes the cache); then the output tiles of TS x TS of the
 // lower triangle are shared out by OpenMP (disjoint outputs), each adding its block product to o through
 // tile(X, LD, r0, R, a0, na, b0, nb) of the thread's own worker from make(). The lower triangle is mirrored.
 // grid: the columns are decoded as centred 0.01 steps (decode_rows).
 template <class T, class Make>
-void dense_tiles(const Geno& g, const int* cols, std::size_t pc, std::size_t RB, std::size_t pad, std::size_t TS,
-                 double* o, int threads, Make make, bool grid = false) {
-  const std::size_t n = g.n, P = cols ? pc : g.p, LD = RB + pad;
-  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+void dense_tiles(const Geno& g, std::size_t RB, std::size_t pad, std::size_t TS, double* o, int threads, Make make,
+                 bool grid = false) {
+  const std::size_t n = g.n, P = g.p, LD = RB + pad;
   const std::size_t nt = (P + TS - 1) / TS;
   std::vector<std::pair<std::size_t, std::size_t>> tiles;
   for (std::size_t b = 0; b < nt; ++b) for (std::size_t a = b; a < nt; ++a) tiles.emplace_back(a, b);
@@ -764,7 +760,7 @@ void dense_tiles(const Geno& g, const int* cols, std::size_t pc, std::size_t RB,
       const std::size_t R = std::min(RB, n - r0);
       #pragma omp for schedule(static)
       for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa)
-        decode_rows(g, col(static_cast<std::size_t>(aa)), r0, R, &X[static_cast<std::size_t>(aa) * LD], grid);
+        decode_rows(g, static_cast<std::size_t>(aa), r0, R, &X[static_cast<std::size_t>(aa) * LD], grid);
       #pragma omp for schedule(dynamic, 1)
       for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles.size()); ++tt) {
         const std::size_t a0 = tiles[tt].first * TS, b0 = tiles[tt].second * TS;
@@ -780,14 +776,13 @@ constexpr std::size_t kFTile = 256;    // columns per side of an output tile of 
 constexpr std::size_t kFRows = 4096;   // rows per block of the float kernel
 constexpr std::size_t kFPad = 16;      // floats after each column of the shared buffer (no power-of-two stride)
 
-// X'WX into o (p x p, or pc x pc for columns cols), W = diag(w), any real w, in float products with double
-// sums (dense_tiles). Blocks of kFRows rows, 16 KB per column of the shared buffer (66 MB at p = 4000, 329 MB
+// X'WX into o (p x p), W = diag(w), any real w, in float products with double sums (dense_tiles). Blocks of kFRows rows, 16 KB per column of the shared buffer (66 MB at p = 4000, 329 MB
 // at p = 20000); a tile copies its row group transposed and times w, multiplies it with its column group in
 // the shared buffer by the run-time-dispatched serial sgemm and accumulates in double.
-void xtwx_float_into(const Geno& g, const double* w, const int* cols, std::size_t pc, double* o, int threads) {
-  const std::size_t P = cols ? pc : g.p, RB = std::min(kFRows, g.n);
+void xtwx_float_into(const Geno& g, const double* w, double* o, int threads) {
+  const std::size_t P = g.p, RB = std::min(kFRows, g.n);
   const plink4r::LaFns& LA = plink4r::la();
-  dense_tiles<float>(g, cols, pc, RB, kFPad, kFTile, o, threads, [&] {
+  dense_tiles<float>(g, RB, kFPad, kFTile, o, threads, [&] {
     return [&, At = std::vector<float>(kFTile * RB), Pt = std::vector<float>(kFTile * kFTile)](
                const float* X, std::size_t LD, std::size_t r0, std::size_t R, std::size_t a0, std::size_t na,
                std::size_t b0, std::size_t nb) mutable {
@@ -808,14 +803,14 @@ constexpr std::size_t kXTile = 256;    // columns per side of an output tile of 
 constexpr std::size_t kXRows = 2048;   // rows per block of the double X'X kernel
 constexpr std::size_t kXPad = 8;       // doubles after each column of the shared buffer (no power-of-two stride)
 
-// X'X into o (p x p, or pc x pc for columns cols) in double (dense_tiles): blocks of kXRows rows, 16 KB per
+// X'X into o (p x p) in double (dense_tiles): blocks of kXRows rows, 16 KB per
 // column of the shared buffer (66 MB at p = 4000, 329 MB at p = 20000); a tile adds X_a'X_b of its row and
 // column groups to o by the run-time-dispatched serial dgemm. Columns in 1/16384 steps hold multiples of 2^-14
 // in [0, 2], so for n below 2^23 every product and partial sum is exact and the result equals the popcount one.
-void xtx_dense_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
-  const std::size_t P = cols ? pc : g.p, RB = std::min(kXRows, g.n);
+void xtx_dense_into(const Geno& g, double* o, int threads) {
+  const std::size_t P = g.p, RB = std::min(kXRows, g.n);
   const plink4r::LaFns& LA = plink4r::la();
-  dense_tiles<double>(g, cols, pc, RB, kXPad, kXTile, o, threads, [&] {
+  dense_tiles<double>(g, RB, kXPad, kXTile, o, threads, [&] {
     return [&](const double* X, std::size_t LD, std::size_t, std::size_t R, std::size_t a0, std::size_t na,
                std::size_t b0, std::size_t nb) {
       LA.dgemm_tn(&X[a0 * LD], static_cast<int>(R), static_cast<int>(na), static_cast<int>(LD), &X[b0 * LD],
@@ -827,25 +822,22 @@ void xtx_dense_into(const Geno& g, const int* cols, std::size_t pc, double* o, i
 constexpr double kDDenseFrac = 0.01;     // D nonzero fraction above which xtwx_bin_into uses the float kernel
 constexpr std::size_t kGRows = 1024;   // rows per block of the grid X'X kernel: partial sums <= 1024 * 100^2 < 2^24
 
-// Whether every column of cols (or all) is on the 0.01 grid: no D, or D in steps of 0.01 (dosage PGEN).
-bool on_grid(const Geno& g, const int* cols, std::size_t pc) {
-  const std::size_t P = cols ? pc : g.p;
-  for (std::size_t a = 0; a < P; ++a) {
-    const DCol& c = g.D[cols ? cols[a] : a];
+// Whether every column is on the 0.01 grid: no D, or D in steps of 0.01 (dosage PGEN).
+bool on_grid(const Geno& g) {
+  for (const DCol& c : g.D)
     if (!c.mask.empty() && c.unit != kDosUnit) return false;
-  }
   return true;
 }
 
-// X'X into o (p x p, or pc x pc for columns cols) for columns on the 0.01 grid (on_grid), exact, in float
+// X'X into o (p x p) for columns on the 0.01 grid (on_grid), exact, in float
 // products (dense_tiles, tiles and buffer as xtwx_float_into, blocks of kGRows rows). A column is decoded as
 // the integer c = 100 x - 100 in -100..100; within a block every product and partial sum is an integer below
 // 2^24, so the serial sgemm is exact in any order; the blocks are summed in double (integers below 2^53) and
 // X'X = (C'C + 100 (s_a + s_b) - 1e4 n) / 1e4, s the column sums of 100 x.
-void xtx_grid_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
-  const std::size_t P = cols ? pc : g.p, RB = std::min(kGRows, g.n);
+void xtx_grid_into(const Geno& g, double* o, int threads) {
+  const std::size_t P = g.p, RB = std::min(kGRows, g.n);
   const plink4r::LaFns& LA = plink4r::la();
-  dense_tiles<float>(g, cols, pc, RB, kFPad, kFTile, o, threads, [&] {
+  dense_tiles<float>(g, RB, kFPad, kFTile, o, threads, [&] {
     return [&, At = std::vector<float>(kFTile * RB), Pt = std::vector<float>(kFTile * kFTile)](
                const float* X, std::size_t LD, std::size_t, std::size_t R, std::size_t a0, std::size_t na,
                std::size_t b0, std::size_t nb) mutable {
@@ -859,8 +851,7 @@ void xtx_grid_into(const Geno& g, const int* cols, std::size_t pc, double* o, in
     };
   }, true);
   std::vector<double> s(P);
-  for (std::size_t a = 0; a < P; ++a)
-    s[a] = static_cast<double>(step_sum_col(g, cols ? static_cast<std::size_t>(cols[a]) : a, kDosSteps));
+  for (std::size_t a = 0; a < P; ++a) s[a] = static_cast<double>(step_sum_col(g, a, kDosSteps));
   const double k = kDosSteps, nk2 = k * k * static_cast<double>(g.n);
   #pragma omp parallel for num_threads(threads) schedule(static)
   for (std::ptrdiff_t b = 0; b < static_cast<std::ptrdiff_t>(P); ++b)
@@ -872,58 +863,38 @@ void xtx_grid_into(const Geno& g, const int* cols, std::size_t pc, double* o, in
 
 constexpr double kDDenseFracXtx = 0.07;  // D nonzero fraction above which xtx_into uses a dense kernel
 
-// Whether more than frac of the cells of the columns cols (or all) have a nonzero D.
-bool d_dense(const Geno& g, const int* cols, std::size_t pc, double frac) {
-  const std::size_t P = cols ? pc : g.p;
-  double nnz = 0.0;
-  for (std::size_t a = 0; a < P; ++a) nnz += static_cast<double>(g.D[cols ? cols[a] : a].q.size());
-  return nnz > frac * static_cast<double>(g.n) * static_cast<double>(P);
+// Whether more than frac of the cells have a nonzero D.
+bool d_dense(const Geno& g, double frac) {
+  return static_cast<double>(g.dnnz()) > frac * static_cast<double>(g.n) * static_cast<double>(g.p);
 }
 
-// X'X of the stored matrix into o (p x p), or of columns cols (0-based, length pc) into o (pc x pc): exact
-// popcounts of H'H plus add_d_xtx, or, when more than kDDenseFracXtx of the cells of the columns have a nonzero
-// D (dosages), a dense kernel: xtx_grid_into for columns on the 0.01 grid, else the double xtx_dense_into.
-void xtx_into(const Geno& g, const int* cols, std::size_t pc, double* o, int threads) {
-  if (d_dense(g, cols, pc, kDDenseFracXtx)) {
-    if (on_grid(g, cols, pc)) xtx_grid_into(g, cols, pc, o, threads);
-    else xtx_dense_into(g, cols, pc, o, threads);
+// X'X of the stored matrix into o (p x p): exact popcounts of H'H plus add_d_xtx, or, when more than
+// kDDenseFracXtx of the cells have a nonzero D (dosages), a dense kernel: xtx_grid_into for columns on the 0.01
+// grid, else the double xtx_dense_into.
+void xtx_into(const Geno& g, double* o, int threads) {
+  if (d_dense(g, kDDenseFracXtx)) {
+    if (on_grid(g)) xtx_grid_into(g, o, threads);
+    else xtx_dense_into(g, o, threads);
     return;
   }
-  const TileKernel kernel = select_kernel();
-  if (!cols) {
-    const std::size_t p = g.p;
-    dot_block(g.G, 0, p, g.G, 0, p, true, o, p, threads, kernel);
-    add_d_xtx(g, o, threads);
-    return;
-  }
-  Planes sub;
-  sub.words = g.G.words;
-  sub.bits.resize(2 * pc * sub.words);
-  for (std::size_t a = 0; a < pc; ++a) {
-    const std::size_t j = static_cast<std::size_t>(cols[a]);
-    std::copy(g.G.lo(j), g.G.lo(j) + sub.words, sub.bits.begin() + 2 * a * sub.words);
-    std::copy(g.G.hi(j), g.G.hi(j) + sub.words, sub.bits.begin() + (2 * a + 1) * sub.words);
-  }
-  dot_block(sub, 0, pc, sub, 0, pc, true, o, pc, threads, kernel);
-  add_d_xtx(g, o, threads, cols, pc);
+  dot_block(g.G, 0, g.p, g.G, 0, g.p, true, o, g.p, threads, select_kernel());
+  add_d_xtx(g, o, threads);
 }
 
 constexpr std::size_t kBinRows = 64;     // rows per weight bin: one 64-bit word of the gathered planes
 constexpr std::size_t kBinGroup = 384;   // bins per streamed group (24576 rows; a multiple of 4)
-// X'W~X into o (p x p, or pc x pc for columns cols), W~ = diag(w binned): rows sorted by w (ties by row
+// X'W~X into o (p x p), W~ = diag(w binned): rows sorted by w (ties by row
 // index), each run of kBinRows sorted rows takes the mean w of its rows. With the weight constant within a
 // bin, H'W~H = sum_b wbar_b H_b'H_b by exact popcounts: per group of kBinGroup bins the rows of the group
 // are gathered for every column (one bin per word), then the 64 x 64 tiles of the upper triangle are shared
 // out by OpenMP (disjoint outputs). The D terms come from add_d_xtx with the binned per-row weights. When
-// more than kDDenseFrac of the cells of the columns have a nonzero D (dosages), the popcounts do not pay:
+// more than kDDenseFrac of the cells have a nonzero D (dosages), the popcounts do not pay:
 // X'WX with w itself comes from xtwx_float_into, and W~ = W. w_bin (n, row order, may be null) receives the
 // weights of the result.
-void xtwx_bin_into(const Geno& g, const double* w, const int* cols, std::size_t pc, double* o, double* w_bin,
-                   int threads) {
-  const std::size_t n = g.n, P = cols ? pc : g.p;
-  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
-  if (d_dense(g, cols, pc, kDDenseFrac)) {
-    xtwx_float_into(g, w, cols, pc, o, threads);
+void xtwx_bin_into(const Geno& g, const double* w, double* o, double* w_bin, int threads) {
+  const std::size_t n = g.n, P = g.p;
+  if (d_dense(g, kDDenseFrac)) {
+    xtwx_float_into(g, w, o, threads);
     if (w_bin) std::copy(w, w + n, w_bin);
     return;
   }
@@ -952,9 +923,9 @@ void xtwx_bin_into(const Geno& g, const double* w, const int* cols, std::size_t 
     const std::size_t g0 = b0 * kBinRows, g1 = std::min(n, (b0 + W) * kBinRows);
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa) {
-      const std::size_t a = static_cast<std::size_t>(aa), j = col(a);
-      const u64* lo = g.G.lo(j);
-      const u64* hi = g.G.hi(j);
+      const std::size_t a = static_cast<std::size_t>(aa);
+      const u64* lo = g.G.lo(a);
+      const u64* hi = g.G.hi(a);
       u64* ol = buf + 2 * a * W;
       u64* oh = ol + W;
       for (std::size_t k = 0; k < W; ++k) {
@@ -986,30 +957,28 @@ void xtwx_bin_into(const Geno& g, const double* w, const int* cols, std::size_t 
   }
   for (std::size_t b = 0; b < P; ++b)  // mirror the upper triangle
     for (std::size_t a = b + 1; a < P; ++a) o[a + b * P] = o[b + a * P];
-  add_d_xtx(g, o, threads, cols, pc, wq.data());
+  add_d_xtx(g, o, threads, wq.data());
 }
 
-// Standardizes a weighted cross product in place: o (pc x pc, columns cols or all when null) becomes
+// Standardizes a weighted cross product in place: o (p x p) becomes
 // (X'WX - c s' - s c' + (sum w) c c') / (d d'), s = X'w in double from the planes and D; center c and div d
-// are per output column (div may be null: no division).
-void xtwx_std(const Geno& g, const double* w, const int* cols, std::size_t pc, const double* center,
-              const double* div, double* o, int threads) {
-  const std::size_t n = g.n, P = cols ? pc : g.p;
-  auto col = [cols](std::size_t a) { return cols ? static_cast<std::size_t>(cols[a]) : a; };
+// are per column (div may be null: no division).
+void xtwx_std(const Geno& g, const double* w, const double* center, const double* div, double* o, int threads) {
+  const std::size_t n = g.n, P = g.p;
   std::vector<double> sw(P, 0.0);
   double wsum = 0.0;
   for (std::size_t i = 0; i < n; ++i) wsum += w[i];
   #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
   for (std::ptrdiff_t aa = 0; aa < static_cast<std::ptrdiff_t>(P); ++aa) {
-    const std::size_t a = static_cast<std::size_t>(aa), j = col(a);
+    const std::size_t a = static_cast<std::size_t>(aa);
     double acc = 0.0;
-    const u64* lo = g.G.lo(j);
-    const u64* hi = g.G.hi(j);
+    const u64* lo = g.G.lo(a);
+    const u64* hi = g.G.hi(a);
     for (std::size_t x = 0; x < g.G.words; ++x) {
       for (u64 bits = lo[x]; bits; bits &= bits - 1) acc += w[64 * x + __builtin_ctzll(bits)];
       for (u64 bits = hi[x]; bits; bits &= bits - 1) acc += 2.0 * w[64 * x + __builtin_ctzll(bits)];
     }
-    const DCol& dc = g.D[j];
+    const DCol& dc = g.D[a];
     std::size_t e = 0;
     for (std::size_t x = 0; x < dc.mask.size(); ++x)
       for (u64 bits = dc.mask[x]; bits; bits &= bits - 1) acc += dc.q[e++] * dc.unit * w[64 * x + __builtin_ctzll(bits)];
@@ -1184,7 +1153,7 @@ Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, bool scale, int threads) {
   threads = resolve_threads(threads);
   const std::size_t p = g->p;
   Rcpp::NumericMatrix out(p, p);
-  xtx_into(*g, nullptr, 0, out.begin(), threads);
+  xtx_into(*g, out.begin(), threads);
   if (!scale) return out;
   const std::vector<double> d = col_div(*g);
   std_into(out.begin(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out.begin(),
@@ -1235,20 +1204,6 @@ Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, bool sca
   return out;
 }
 
-// Raw A'B of two geno objects over the same samples: exact popcount on the planes (Ha'Hb), plus the D terms
-// when either object has an int16 part (add_d_cross); no dense copy of either matrix.
-// [[Rcpp::export]]
-Rcpp::NumericMatrix geno_cross_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
-  Rcpp::XPtr<Geno> a(ptr_a), b(ptr_b);
-  threads = resolve_threads(threads);
-  if (a->n != b->n) Rcpp::stop("A and B must have the same samples.");
-  const TileKernel kernel = select_kernel();
-  Rcpp::NumericMatrix out(a->p, b->p);
-  dot_block(a->G, 0, a->p, b->G, 0, b->p, false, out.begin(), a->p, threads, kernel);
-  add_d_cross(*a, *b, out.begin(), threads);
-  return out;
-}
-
 // cor(A, B) of the columns of two geno objects over the same samples (B = A when ptr_b is NULL: from A's X'X),
 // from the raw cross products: (K - n mu_a mu_b') / ((n - 1) sd_a sd_b'), NA for a constant column, clipped to
 // [-1, 1].
@@ -1262,7 +1217,7 @@ Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
   const std::size_t pa = a->p, pb = b->p;
   Rcpp::NumericMatrix out(pa, pb);
   if (self) {
-    xtx_into(*a, nullptr, 0, out.begin(), threads);
+    xtx_into(*a, out.begin(), threads);
   } else {
     dot_block(a->G, 0, pa, b->G, 0, pb, false, out.begin(), pa, threads, select_kernel());
     add_d_cross(*a, *b, out.begin(), threads);
@@ -1313,9 +1268,9 @@ Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const 
   for (std::size_t i = 0; i < n; ++i) if (!std::isfinite(w[i])) Rcpp::stop("w must be finite.");
   if (center.size() > 0 && static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
   Rcpp::NumericMatrix out(p, p);
-  xtwx_float_into(*g, w.begin(), nullptr, p, out.begin(), threads);
+  xtwx_float_into(*g, w.begin(), out.begin(), threads);
   if (center.size() > 0)
-    xtwx_std(*g, w.begin(), nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
+    xtwx_std(*g, w.begin(), center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
   return out;
 }
 
@@ -1333,9 +1288,9 @@ Rcpp::List geno_xtwx_bin_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp:
   if (center.size() > 0 && static_cast<std::size_t>(center.size()) != p) Rcpp::stop("center must have one value per column.");
   Rcpp::NumericMatrix out(p, p);
   Rcpp::NumericVector wq(n);
-  xtwx_bin_into(*g, w.begin(), nullptr, p, out.begin(), wq.begin(), threads);
+  xtwx_bin_into(*g, w.begin(), out.begin(), wq.begin(), threads);
   if (center.size() > 0)
-    xtwx_std(*g, wq.begin(), nullptr, p, center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
+    xtwx_std(*g, wq.begin(), center.begin(), div.size() > 0 ? div.begin() : nullptr, out.begin(), threads);
   return Rcpp::List::create(Rcpp::Named("XtWX") = out, Rcpp::Named("w") = wq);
 }
 
@@ -1888,56 +1843,40 @@ int api_geno_mx(SEXP ptr, int scale, const double* B, int k, double* out, int th
   });
 }
 
-// out (q x q) = X'X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, standardized
-// when scale; geno_crossprod(X)[cols + 1, cols + 1]. Computed into out on every call: the object keeps nothing
-// of it, and a caller that needs it more than once keeps its own copy.
-int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
+// out (p x p) = X'X, standardized when scale; geno_crossprod(X). Computed into out on every call: the object
+// keeps nothing of it, and a caller that needs it more than once keeps its own copy.
+int api_geno_xtx(SEXP ptr, int scale, double* out, int threads) {
   const Geno* g = api_geno(ptr);
   if (!g) return 1;
-  if (!out || (cols && !api_cols_ok(*g, cols, nc))) return 2;
+  if (!out) return 2;
   return api_guard([&] {
     threads = resolve_threads(threads);
-    const std::size_t q = cols ? static_cast<std::size_t>(nc) : g->p;
-    if (!q) return 0;
-    xtx_into(*g, cols, q, out, threads);
+    const std::size_t p = g->p;
+    xtx_into(*g, out, threads);
     if (scale) {
       const std::vector<double> d = api_div(*g);
-      std::vector<double> u(q), dq(q);
-      for (std::size_t a = 0; a < q; ++a) {
-        const std::size_t j = cols ? static_cast<std::size_t>(cols[a]) : a;
-        u[a] = g->mu[j];
-        dq[a] = d[j];
-      }
-      std_into(out, q, q, u.data(), u.data(), static_cast<double>(g->n), dq.data(), dq.data(), out, threads);
+      std_into(out, p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out, threads);
     }
     return 0;
   });
 }
 
-// out (q x q) = X'W~X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, with w (n)
-// binned in groups of 64 rows, or w itself when D is dense (xtwx_bin_into), standardized in place with those
-// weights when scale; w_bin (n, may be NULL) receives them. geno_wcrossprod_bin(X, w)[cols + 1, cols + 1].
-int api_geno_xtwx_bin(SEXP ptr, int scale, const double* w, const int* cols, int nc, double* out, double* w_bin,
-                      int threads) {
+// out (p x p) = X'W~X with w (n) binned in groups of 64 rows, or w itself when D is dense (xtwx_bin_into),
+// standardized in place with those weights when scale; w_bin (n, may be NULL) receives them.
+// geno_wcrossprod_bin(X, w).
+int api_geno_xtwx_bin(SEXP ptr, int scale, const double* w, double* out, double* w_bin, int threads) {
   const Geno* g = api_geno(ptr);
   if (!g) return 1;
-  if (!out || !w || (cols && !api_cols_ok(*g, cols, nc))) return 2;
+  if (!out || !w) return 2;
   for (std::size_t i = 0; i < g->n; ++i) if (!std::isfinite(w[i])) return 2;
   return api_guard([&] {
     threads = resolve_threads(threads);
-    const std::size_t q = cols ? static_cast<std::size_t>(nc) : g->p;
     std::vector<double> wq(g->n);
-    xtwx_bin_into(*g, w, cols, q, out, wq.data(), threads);
+    xtwx_bin_into(*g, w, out, wq.data(), threads);
     if (w_bin) std::copy(wq.begin(), wq.end(), w_bin);
     if (scale) {
       const std::vector<double> d = api_div(*g);
-      std::vector<double> u(q), dq(q);
-      for (std::size_t a = 0; a < q; ++a) {
-        const std::size_t j = cols ? static_cast<std::size_t>(cols[a]) : a;
-        u[a] = g->mu[j];
-        dq[a] = d[j];
-      }
-      xtwx_std(*g, wq.data(), cols, q, u.data(), dq.data(), out, threads);
+      xtwx_std(*g, wq.data(), g->mu.data(), d.data(), out, threads);
     }
     return 0;
   });
