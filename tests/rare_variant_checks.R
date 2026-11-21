@@ -45,10 +45,10 @@ writeBin(as.raw(as.vector(cm[1, , ] + 4L * cm[2, , ] + 16L * cm[3, , ] + 64L * c
 writeLines(sprintf("1\tv%d\t0\t%d\tA\tG", seq_along(macs), seq_along(macs)), paste0(pre, ".bim"))
 writeLines(sprintf("i%d\ti%d\t0\t0\t0\t-9", 1:n, 1:n), paste0(pre, ".fam"))
 set.seed(2); d <- data.frame(IID = paste0("i", 1:n), c1 = rnorm(n), e = rnorm(n), y = rnorm(n))
-a <- gwas(bfile = pre, data = d, pheno = "y", covar = "c1", robust = TRUE, threads = 1)
+a <- gwas(y ~ c1, data = d, bfile = pre, robust = TRUE, threads = 1)
 stopifnot(identical(is.na(a$P), macs <= 20), identical(is.na(a$P_ROBUST), macs <= 20), !anyNA(a$BETA))
-b <- gxe(bfile = pre, data = d, pheno = "y", exposure = "e", threads = 1, min_maf_int = 30 / (2 * n))
+b <- gxe(y ~ e, data = d, exposure = "e", bfile = pre, threads = 1, min_maf_int = 30 / (2 * n))
 stopifnot(identical(is.na(b$P_INT_ROBUST), macs < 30), identical(is.na(b$P_MARGINAL_ROBUST), macs <= 20))
-b <- gxe(bfile = pre, data = d, pheno = "y", exposure = "e", threads = 1)   # default MAF 0.001 = MAC 4 here
+b <- gxe(y ~ e, data = d, exposure = "e", bfile = pre, threads = 1)   # default MAF 0.001 = MAC 4 here
 stopifnot(!anyNA(b$P_INT_ROBUST))
 cat("rare-variant checks passed\n")

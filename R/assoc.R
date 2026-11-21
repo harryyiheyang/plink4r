@@ -1,8 +1,8 @@
-#' Genome-wide association of one trait (linear or logistic)
+#' Genome-wide association of one trait (linear, logistic or Cox)
 #'
 #' Tests every selected variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
-#' `y ~ covar + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
-#' never formed: the null model `y ~ covar` is fitted once with [stats::glm()] (which calls glm.fit), and its numeric design (`x = TRUE`: factors and characters expanded by base R with the current contrasts) is the covariate matrix used below; then variants are streamed
+#' `formula + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
+#' never formed: the null model `formula` is fitted once with [stats::glm()] (which calls glm.fit), and its numeric design (`x = TRUE`: factors and characters expanded by base R with the current contrasts) is the covariate matrix used below; then variants are streamed
 #' from the file in blocks whose size follows from `mem_gb` and reduced in C++ to a few numbers each (the
 #' StreamBlock scheme of GEM 2: two products with fixed n x m matrices per block), so memory is about
 #' `8 n (m1 + m2 + k + S)` bytes shared (the basis `V` and the fixed matrices `L1`, `L2`: `m1 = k S (1 + robust) + S`,
@@ -32,16 +32,48 @@
 #' Newton from the one-step ridge, to convergence), so large effects of rare variants are not overestimated by the
 #' one-step score. The posterior is shrunk towards 0 by design and must not be meta-analysed.
 #'
+#' Rare variants: the small-count calibrations above (`mac_adjust`, `spa_cut`, `shrink`, `min_mac`) are those of
+#' the linear and logistic models without `kinship`. With `kinship`, and for the Cox model, every test is a
+#' large-sample test (normal or chi-square reference), meant for variants with a minor allele frequency above
+#' 0.01; for the logistic and Cox models the reference also needs minor alleles among the cases (events), about
+#' `2 x cases x MAF >= 30`, which MAF > 0.01 gives from 1,500 cases on, and variants are not filtered there: give
+#' the variants to test in `snp_vec`.
+#'
+#' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
+#'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
+#'   the phenotype is coded 0/1 (or 1/2, PLINK case/control). Every variable must be a column of `data`; `.` and
+#'   `offset()` are not accepted.
+#' @param data data.frame with one row per sample: `id_col` and the columns named in `formula`. Samples with a
+#'   missing value in any of them, or not in the genotype file, are left out. A covariate that is not finite after
+#'   its transformation (e.g. `log(0)`) in one of the analysed samples is an error.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
-#' @param data data.frame with one row per sample: `id_col`, the phenotype and covariate columns.
-#' @param pheno Name of the phenotype column. Logistic: coded 0/1 (or 1/2, PLINK case/control).
-#' @param covar Names of covariate columns (numeric, or factors / characters, expanded by base glm()). An
-#'   intercept is always added.
-#' @param family `"gaussian"` (linear) or `"binomial"` (logistic).
+#' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards). Cox: the
+#'   phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
+#'   status)`), `status` 1 for an event and 0 for censoring. The null model is fitted once and every variant is
+#'   then tested one step from it (`BETA` a log hazard ratio; `Z` and its normal `P`). Without `kinship` (or with
+#'   no related pair among the analysed samples) the null model is the Cox partial-likelihood fit with the Breslow
+#'   baseline cumulative hazard `Lambda0`, and a variant is tested in the Poisson model of the event indicator
+#'   with `log Lambda0(time)` as an offset. With `kinship` the null model is that of the life table of the data
+#'   (binary records of the samples in `para$n_interval` intervals, complementary log-log link, interval
+#'   intercepts as the baseline, the kinship correlation between the records of relatives; see [reml_tau()]), and
+#'   a variant is tested in that model of the records.
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
 #' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
-#' @param robust Linear only: add sandwich standard errors.
+#' @param robust Linear only: add sandwich standard errors (not with `kinship`).
+#' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
+#'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the null model accounts for the
+#'   similarity of relatives through a sparse kinship matrix `K` and is fitted once ([reml_tau()]). Linear: the
+#'   mixed model `formula + b`, `b ~ N(0, tau K)`, by REML (as fastGWA, Jiang et al. 2019). Logistic and Cox: the
+#'   marginal model in which the Pearson residuals of relatives have correlation `h K_ij` (Cox: on the records of
+#'   the life table). With `V` the covariance of the (working) response under that null model and
+#'   `P = V^-1 - V^-1 X (X' V^-1 X)^-1 X' V^-1` every variant gets the generalised least
+#'   squares `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2` (exact, no GRAMMAR-GAMMA approximation), `T` or `Z` =
+#'   `BETA / SE` and its normal `P`. Samples without a listed relative enter as in the ordinary test; with no
+#'   related pair among the analysed samples the logistic result is that of `kinship = NULL`, and the linear one
+#'   differs only by using the null-model variance and the normal distribution. The attribute `info` then also
+#'   holds `tau`, `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`.
+#' @param para With `kinship`: named list overriding [reml_tau_para()].
 #' @param mac_adjust Refer one-degree-of-freedom robust tests to `F(1, M - 1)` with `M` the expected carrier
 #'   count (see Details); `FALSE` keeps the normal (chi-square) P.
 #' @param shrink Logistic only: add `BETA_POST` and `SE_POST`.
@@ -77,14 +109,22 @@
 #'   samples, covariate rank, block size, threads, memory budget, SIMD set, variants recomputed by explicit
 #'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
-gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family = c("gaussian", "binomial"),
+gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
-                 mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000,
-                 blocks = 38, min_mac = 20, robust_min_mac = 5) {
+                 kinship = NULL, para = list(), mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL,
+                 carrier_max = 2000, blocks = 38, min_mac = 20, robust_min_mac = 5) {
   family <- match.arg(family)
+  if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
+    kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
+  if (!is.null(kinship)) {
+    if (robust) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
+    return(.gwas_kinship(formula, data, pfile, bfile, kinship, family, id_col, snp_vec, threads, mem_gb, block,
+                         para))
+  }
+  if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
-  r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
+  r <- .assoc_run(formula, data, pfile, bfile, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
                   robust, center = FALSE, threads, mem_gb, block, spa_cut,
                   carrier_max = if (shrink) carrier_max else 0, carrier_lambda = if (shrink) 1 / pr$wide_sd^2 else 1)
   res <- r$res; out <- r$out
@@ -110,13 +150,16 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
   out[]
 }
 
-#' Gene-environment interaction of one trait (GEM, linear or logistic)
+#' Gene-environment interaction of one trait (linear, logistic or Cox)
 #'
-#' For every selected variant fits `y ~ covar + E + int_covar + g + g:E + g:int_covar` (linear or logistic) as GEM
-#' does, from one null-model fit (`y ~ covar + E + int_covar`, [stats::glm()], design taken from the fit) and the same streaming as
-#' [gwas()]. Several exposures are tested together: `exposure` may name any number of columns, factors and
-#' character columns become indicator columns (one interaction term each), and `int_covar` names covariates whose
-#' interaction with `g` is adjusted for but not tested. `center = TRUE` centres the exposures and interaction
+#' For every selected variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
+#' (`formula`, which contains the exposures and interaction covariates) and the same streaming as [gwas()]. The
+#' null model is the one of [gwas()] called with the same `formula`, `family`, `kinship` and `para`: without
+#' `kinship` the linear or logistic fit of [stats::glm()] (design taken from the fit); with `kinship`, and for the
+#' Cox model, the null model described there, with the same kinship parameter for the association and the
+#' interaction tests. Several exposures are tested together: `exposure` may
+#' name any number of terms of `formula`, factors and character columns become indicator columns (one interaction
+#' term each), and `int_covar` names terms whose interaction with `g` is adjusted for but not tested. `center = TRUE` centres the exposures and interaction
 #' covariates (numeric ones and indicators alike), so `BETA_G` is the effect of `g` at their mean; the
 #' interaction estimates do not change.
 #'
@@ -148,11 +191,23 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #' when there is one exposure term) use the small-count `F(1, M - 1)` reference of [gwas()]; tests with two or more
 #' degrees of freedom keep the chi-square.
 #'
+#' With `kinship`, and for the Cox model: with `V` the covariance of the (working) response under the null model,
+#' `P` as in [gwas()] and `Z = [g, g e_1, ..., g e_{S-1}]` (the exposure terms, then the interaction covariates), a
+#' variant gets `c = Z' P y` and `A = Z' P Z`. The marginal effect is `c_1 / A_11` with `SE = A_11^-1/2`, the test
+#' of [gwas()]; `A^-1 c` with covariance `A^-1` gives `BETA_G`, the interactions and the Wald tests `P_INT` and
+#' `P_JOINT` (generalised least squares for the linear model, one step from the null model for the logistic and
+#' Cox models; normal and chi-square references, model-based variances, no robust SE). The exposures of a Cox
+#' model are fixed in time.
+#'
+#' With `kinship`, and for the Cox model, as [gwas()]: use variants with a minor allele frequency above 0.01; the
+#' rare-variant options (`mac_adjust`, `spa_cut`, `shrink`, `min_mac`, `min_maf_int`, ...) are not used there.
+#'
 #' @inheritParams gwas
-#' @param exposure Names of the exposure columns of `data` (one or more).
-#' @param int_covar Names of interaction covariates (adjusted for, not tested), or `NULL`.
+#' @param exposure Names of the exposures (one or more): terms of `formula` as written there, e.g. `"smoke"` for
+#'   `y ~ age + smoke`, `"log(bmi)"` for `y ~ age + log(bmi)`.
+#' @param int_covar Names of interaction covariates (adjusted for, not tested), terms of `formula`, or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
-#' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
+#' @param robust Linear model without `kinship` only: add sandwich standard errors (default `TRUE` there).
 #' @param min_mac The marginal P columns (`P_MARGINAL`, `P_MARGINAL_ROBUST`) are `NA` for variants whose minor
 #'   allele count `2 N p` is not above this (default 20, as [gwas()]); interaction tests follow `min_maf_int`;
 #'   estimates are always reported. 0 = never.
@@ -176,19 +231,29 @@ gwas <- function(pfile = NULL, bfile = NULL, data, pheno, covar = NULL, family =
 #'   the exposures); `info$int_singular` counts them.
 #' @param shrink,prior,carrier_max,blocks Logistic only, as [gwas()]; `prior` also takes `int_ratio`, `int_weight`,
 #'   `int_wide_weight` and `gamma` (see Details).
-#' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
+#' @return data.table, one row per variant, as described above; attribute `info` as [gwas()], with the columns
+#'   of the design used as `exposure_terms` and `int_covar_terms`.
 #' @export
-gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = NULL, covar = NULL,
-                family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, mac_adjust = TRUE, spa_cut = 0.05,
-                shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38, min_mac = 20, min_maf_int = 0.001,
-                min_mac_int = NULL, min_mac_int_spa = NULL, robust_min_mac = 5, eig_tol = 1e-6) {
+gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile = NULL,
+                family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, kinship = NULL, para = list(),
+                mac_adjust = TRUE, spa_cut = 0.05, shrink = TRUE, prior = NULL, carrier_max = 2000, blocks = 38,
+                min_mac = 20, min_maf_int = 0.001, min_mac_int = NULL, min_mac_int_spa = NULL, robust_min_mac = 5,
+                eig_tol = 1e-6) {
   family <- match.arg(family)
+  if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
+  if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
+    kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
+  if (!is.null(kinship)) {
+    if (isTRUE(robust)) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
+    return(.gxe_kinship(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center, snp_vec,
+                        threads, mem_gb, block, para))
+  }
+  if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   shrink <- family == "binomial" && shrink
   pr <- if (shrink) .rv_prior(prior) else NULL
   if (is.null(robust)) robust <- family == "gaussian"
-  if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
-  r <- .assoc_run(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust, center,
+  r <- .assoc_run(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust, center,
                   threads, mem_gb, block, spa_cut, carrier_max = if (shrink) carrier_max else 0,
                   carrier_lambda = if (shrink) 1 / pr$wide_sd^2 else 1)
   res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp
@@ -296,20 +361,10 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   p
 }
 
-# Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
-.assoc_run <- function(pfile, bfile, data, pheno, covar, exposure, int_covar, family, id_col, snp_vec, robust,
-                       center, threads, mem_gb, block, spa_cut = 0, carrier_max = 0,
-                       carrier_lambda = 1) {
+# The genotype file of an association run: its variants (var), sample IDs (iid), path, the file rows of the
+# biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
+.geno_variants <- function(pfile, bfile, snp_vec) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
-  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  d <- as.data.frame(data)
-  need <- c(id_col, pheno, covar, exposure, int_covar)
-  miss <- setdiff(need, names(d))
-  if (length(miss)) stop("data lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
-  if (length(pheno) != 1L) stop("Give one phenotype column.", call. = FALSE)
-
-  # ---- genotype file
   if (!is.null(pfile)) {
     pvar <- .read_pvar5(pfile)
     var <- data.table::data.table(CHR = pvar$CHROM, POS = pvar$POS, ID = pvar$ID, A1 = pvar$ALT, A2 = pvar$REF,
@@ -331,43 +386,102 @@ gxe <- function(pfile = NULL, bfile = NULL, data, pheno, exposure, int_covar = N
   skipped <- var$ID[vrow[var$allele_ct[vrow] > 2L]]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
+  list(var = var, iid = iid, path = path, vrow = vrow, skipped = skipped)
+}
 
-  # ---- samples: in the genotype file, complete phenotype / covariates / exposures; file order
+# The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
+# value in the variables of the formula (and, with iid, present in the genotype file, in file order; srow = their
+# file rows), a finite phenotype after any transformation, and that phenotype (0/1 for a logistic model; the
+# follow-up time, with status the 0/1 event indicator, for a Cox model). Every route takes its samples here, so
+# what no route handles is refused here: offset() in the formula, and a covariate that is not finite after its
+# transformation in an analysed sample.
+.pheno_samples <- function(d, formula, family, id_col, iid = NULL) {
+  if (!inherits(formula, "formula") || length(formula) != 3L)
+    stop("formula must be two-sided: phenotype ~ covariates.", call. = FALSE)
+  vars <- all.vars(formula)
+  if ("." %in% vars) stop("Write the covariates out in the formula ('.' is not accepted).", call. = FALSE)
+  tm <- stats::terms(formula)
+  if (attr(tm, "intercept") != 1L) stop("The formula must keep its intercept.", call. = FALSE)
+  if (!is.null(attr(tm, "offset"))) stop("offset() is not accepted in the formula.", call. = FALSE)
+  miss <- setdiff(c(id_col, vars), names(d))
+  if (length(miss)) stop("data lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   ids <- as.character(d[[id_col]])
   if (anyDuplicated(ids[!is.na(ids)])) stop("IDs repeated in data.", call. = FALSE)
-  srow <- match(ids, iid)
-  ok <- !is.na(srow) & stats::complete.cases(d[, setdiff(need, id_col), drop = FALSE])
-  if (!any(ok)) stop("No sample of data is in the genotype file with complete data.", call. = FALSE)
-  d <- d[ok, , drop = FALSE]; srow <- srow[ok]
-  o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]
-  n <- nrow(d)
-
-  y <- d[[pheno]]
-  if (!is.numeric(y) && !is.logical(y)) stop("The phenotype must be numeric.", call. = FALSE)
+  ok <- !is.na(ids) & stats::complete.cases(d[, vars, drop = FALSE])
+  srow <- NULL
+  if (!is.null(iid)) {
+    srow <- match(ids, iid)
+    ok <- ok & !is.na(srow)
+  }
+  y <- eval(formula[[2L]], d, environment(formula))
+  status <- NULL
+  if (family == "cox") {  # time and event indicator: cbind(time, status), or survival::Surv(time, status)
+    if (!is.matrix(y) || ncol(y) != 2L || nrow(y) != nrow(d) || !(is.numeric(y) || is.logical(y)))
+      stop("A Cox model takes cbind(time, status) (or Surv(time, status)) as its phenotype.", call. = FALSE)
+    status <- as.numeric(y[, 2L]); y <- as.numeric(y[, 1L])
+    ok <- ok & is.finite(status)
+  }
+  if ((!is.numeric(y) && !is.logical(y)) || length(y) != nrow(d)) stop("The phenotype must be numeric.", call. = FALSE)
   y <- as.numeric(y)
+  ok <- ok & is.finite(y)
+  if (!any(ok)) stop("No sample of data has complete data", if (!is.null(iid)) " and is in the genotype file", ".",
+                     call. = FALSE)
+  d <- d[ok, , drop = FALSE]; y <- y[ok]; status <- status[ok]
+  if (!is.null(iid)) {
+    srow <- srow[ok]
+    o <- order(srow); d <- d[o, , drop = FALSE]; srow <- srow[o]; y <- y[o]; status <- status[o]
+  }
   if (family == "binomial") {
     u <- sort(unique(y))
     if (all(u %in% c(1, 2))) y <- y - 1 else if (!all(u %in% c(0, 1)))
       stop("A logistic phenotype must be coded 0/1 or 1/2.", call. = FALSE)
     if (length(unique(y)) < 2L) stop("The phenotype has one class only.", call. = FALSE)
   }
-
-  # ---- null model with base glm(): factors and characters are expanded by R's own model.matrix (contrasts
-  # as options("contrasts")), and the numeric design is taken from the fit (x = TRUE). Columns: intercept,
-  # exposures, interaction covariates (the S interaction columns of Z), then the other covariates.
-  for (cl in c(exposure, int_covar, covar))
+  if (family == "cox") {
+    if (!all(status %in% c(0, 1))) stop("The event indicator of a Cox model must be coded 0/1.", call. = FALSE)
+    if (!any(status == 1)) stop("No event among the analysed samples.", call. = FALSE)
+    if (any(y < 0)) stop("Follow-up times must not be negative.", call. = FALSE)
+  }
+  for (cl in all.vars(formula[[3L]]))
     if ((is.factor(d[[cl]]) || is.character(d[[cl]])) && length(unique(d[[cl]])) < 2L)
       stop("Column ", cl, " has a single level among the analysed samples.", call. = FALSE)
-  d[[pheno]] <- y
-  rhs <- c(exposure, int_covar, covar)
-  fml <- stats::reformulate(if (length(rhs)) sprintf("`%s`", rhs) else "1", response = as.name(pheno))
+  mf <- tryCatch(stats::model.frame(stats::delete.response(tm), d, na.action = stats::na.pass),
+                 error = function(e) stop("A term of the formula cannot be evaluated on the analysed samples: ",
+                                          conditionMessage(e), call. = FALSE))
+  bad <- names(mf)[!vapply(mf, function(v) !is.numeric(v) || all(is.finite(v)), NA)]
+  if (length(bad))
+    stop("Not finite in an analysed sample (after its transformation): ", paste(bad, collapse = ", "), ".",
+         call. = FALSE)
+  list(d = d, srow = srow, y = y, status = status)
+}
+
+# Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
+.assoc_run <- function(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust,
+                       center, threads, mem_gb, block, spa_cut = 0, carrier_max = 0, carrier_lambda = 1) {
+  if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
+  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
+  gv <- .geno_variants(pfile, bfile, snp_vec)
+  var <- gv$var; iid <- gv$iid; path <- gv$path; vrow <- gv$vrow; skipped <- gv$skipped
+  sm <- .pheno_samples(as.data.frame(data), formula, family, id_col, iid)
+  d <- sm$d; srow <- sm$srow; y <- sm$y
+  n <- nrow(d)
+
+  # ---- null model with base glm() on the user's formula: factors and characters are expanded by R's own
+  # model.matrix (contrasts as options("contrasts")), and the numeric design is taken from the fit (x = TRUE).
+  # Columns, reordered: intercept, exposures, interaction covariates (the S interaction columns of Z), the rest.
+  d[[".plink4r_y"]] <- y  # the phenotype as analysed (transformed, 0/1)
+  fml <- stats::update(formula, .plink4r_y ~ .)
   fam <- if (family == "gaussian") stats::gaussian() else stats::binomial()
   fit <- stats::glm(fml, family = fam, data = d, x = TRUE)
   if (!fit$converged) warning("The null model did not converge.", call. = FALSE)
   X <- fit$x
   asg <- attr(X, "assign")
   lab <- gsub("`", "", attr(stats::terms(fit), "term.labels"))
-  cols_of <- function(v) which(asg %in% match(v, lab))
+  nt <- setdiff(gsub("`", "", c(exposure, int_covar)), lab)
+  if (length(nt))
+    stop("Not a term of the formula: ", paste(nt, collapse = ", "), ". Its terms: ", paste(lab, collapse = ", "), ".",
+         call. = FALSE)
+  cols_of <- function(v) which(asg %in% match(gsub("`", "", v), lab))
   ie <- cols_of(exposure); ii <- cols_of(int_covar)
   X <- X[, c(1L, ie, ii, setdiff(seq_len(ncol(X)), c(1L, ie, ii))), drop = FALSE]
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
