@@ -24,7 +24,6 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -78,7 +77,6 @@ struct Geno {
   std::vector<double> mu, sd;   // column mean and sd (n - 1) of X = H + D
   std::vector<double> nmiss;    // missing calls per variant before filling
   std::vector<std::vector<std::uint32_t>> M;  // rows of those missing calls per variant, ascending
-  std::vector<double> xtx;      // raw X'X (p x p), formed once on first use; empty = not formed (cleared on any change)
   std::size_t dnnz() const {
     std::size_t s = 0;
     for (const DCol& c : D) s += c.q.size();
@@ -1148,27 +1146,6 @@ void std_into(const double* k, std::size_t r, std::size_t c, const double* u, co
 
 namespace {
 
-std::mutex xtx_mutex;  // one caller at a time forms or looks for a kept X'X
-
-// The raw X'X of g, formed on first use and kept in g (cleared whenever g's values change). Under xtx_mutex: the C
-// entry plink4r_geno_xtx may be called on one object from two threads of another package, and both get the one
-// kept matrix, complete.
-const std::vector<double>& raw_xtx(Geno& g, int threads) {
-  std::lock_guard<std::mutex> lock(xtx_mutex);
-  if (g.xtx.empty()) {
-    std::vector<double> k(g.p * g.p, 0.0);
-    xtx_into(g, nullptr, 0, k.data(), threads);
-    g.xtx.swap(k);
-  }
-  return g.xtx;
-}
-
-// Whether g holds its X'X.
-bool has_xtx(const Geno& g) {
-  std::lock_guard<std::mutex> lock(xtx_mutex);
-  return !g.xtx.empty();
-}
-
 // Column divisors of the standardized matrix: sd, or 1 for a constant column.
 std::vector<double> col_div(const Geno& g) {
   std::vector<double> d(g.p);
@@ -1203,17 +1180,18 @@ Rcpp::List geno_info_cpp(SEXP ptr) {
                             Rcpp::Named("bytes_D") = bytes_d(*g));
 }
 
-// X'X of the stored matrix (formed once per object and kept), or of its column-standardized form (scale).
+// X'X of the stored matrix, or of its column-standardized form (scale), computed into the result; the object keeps
+// nothing of it.
 // [[Rcpp::export]]
 Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, bool scale, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t p = g->p;
-  const std::vector<double>& K = raw_xtx(*g, threads);
   Rcpp::NumericMatrix out(p, p);
-  if (!scale) { std::copy(K.begin(), K.end(), out.begin()); return out; }
+  xtx_into(*g, nullptr, 0, out.begin(), threads);
+  if (!scale) return out;
   const std::vector<double> d = col_div(*g);
-  std_into(K.data(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out.begin(),
+  std_into(out.begin(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out.begin(),
            threads);
   return out;
 }
@@ -1307,24 +1285,6 @@ SEXP geno_append_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
     plane_stats(*g, j);
   }
   finish_stats(*g);
-  // X'X of the source already formed: extend it by the appended columns (X'A from their stored values)
-  if (!a->xtx.empty()) {
-    const std::size_t p = p0 + k;
-    std::vector<int> rows(n), cols(k);
-    for (std::size_t i = 0; i < n; ++i) rows[i] = static_cast<int>(i);
-    for (std::size_t c = 0; c < k; ++c) cols[c] = static_cast<int>(p0 + c);
-    std::vector<double> A(n * k), XA(p * k);
-    dense_into(*g, rows.data(), n, cols.data(), k, A.data(), threads);
-    xtm_into(*g, A.data(), k, XA.data(), threads);
-    g->xtx.assign(p * p, 0.0);
-    for (std::size_t c = 0; c < p0; ++c)
-      std::copy(a->xtx.begin() + c * p0, a->xtx.begin() + (c + 1) * p0, g->xtx.begin() + c * p);
-    for (std::size_t c = 0; c < k; ++c)
-      for (std::size_t r = 0; r < p; ++r) {
-        g->xtx[r + (p0 + c) * p] = XA[r + c * p];
-        g->xtx[(p0 + c) + r * p] = XA[r + c * p];
-      }
-  }
   return g;
 }
 
@@ -1342,9 +1302,9 @@ Rcpp::NumericMatrix geno_cross_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
   return out;
 }
 
-// cor(A, B) of the columns of two geno objects over the same samples (B = A when ptr_b is NULL: from A's kept
-// X'X), from the raw cross products: (K - n mu_a mu_b') / ((n - 1) sd_a sd_b'), NA for a constant column,
-// clipped to [-1, 1].
+// cor(A, B) of the columns of two geno objects over the same samples (B = A when ptr_b is NULL: from A's X'X),
+// from the raw cross products: (K - n mu_a mu_b') / ((n - 1) sd_a sd_b'), NA for a constant column, clipped to
+// [-1, 1].
 // [[Rcpp::export]]
 Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
   Rcpp::XPtr<Geno> a(ptr_a);
@@ -1355,8 +1315,7 @@ Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
   const std::size_t pa = a->p, pb = b->p;
   Rcpp::NumericMatrix out(pa, pb);
   if (self) {
-    const std::vector<double>& K = raw_xtx(*a, threads);
-    std::copy(K.begin(), K.end(), out.begin());
+    xtx_into(*a, nullptr, 0, out.begin(), threads);
   } else {
     dot_block(a->G, 0, pa, b->G, 0, pb, false, out.begin(), pa, threads, select_kernel());
     add_d_cross(*a, *b, out.begin(), threads);
@@ -1747,7 +1706,6 @@ SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const
     if (!fill_value_ok(cell_g[k])) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
   Rcpp::XPtr<Geno> out = inplace ? src : Rcpp::XPtr<Geno>(new Geno(*src), true);
   Geno& g = *out;
-  g.xtx.clear();  // its values change
   const double* fc = fill_c.data();
   const int* cp = hcell ? cell_ptr.begin() : nullptr;
   const int* ci = hcell ? cell_i.begin() : nullptr;
@@ -1796,7 +1754,6 @@ void geno_write_cells(SEXP ptr, const std::vector<int>& cols, const std::vector<
     Rcpp::stop("geno_write_cells: cols / off / rows / vals do not match.");
   for (int j : cols) if (j < 0 || static_cast<std::size_t>(j) >= g.p) Rcpp::stop("geno_write_cells: column out of range.");
   for (double v : vals) if (!fill_value_ok(v)) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
-  g.xtx.clear();  // its values change
   #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
     const std::size_t c = static_cast<std::size_t>(cc);
@@ -1991,38 +1948,22 @@ int api_geno_mx(SEXP ptr, int scale, const double* B, int k, double* out, int th
 }
 
 // out (q x q) = X'X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, standardized
-// when scale; geno_crossprod(X)[cols + 1, cols + 1]. It is read from the X'X kept with the object (raw_xtx):
-// a call for all columns forms that X'X when the object does not hold it yet and keeps it, as geno_crossprod(X)
-// does, so the product is computed once per object whoever asks. A call for a subset of the columns reads the
-// kept X'X when there is one and computes the product of the subset alone otherwise (nothing is kept then).
+// when scale; geno_crossprod(X)[cols + 1, cols + 1]. Computed into out on every call: the object keeps nothing
+// of it, and a caller that needs it more than once keeps its own copy.
 int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
-  Geno* g = TYPEOF(ptr) == EXTPTRSXP ? static_cast<Geno*>(R_ExternalPtrAddr(ptr)) : nullptr;
+  const Geno* g = api_geno(ptr);
   if (!g) return 1;
   if (!out || (cols && !api_cols_ok(*g, cols, nc))) return 2;
   return api_guard([&] {
     threads = resolve_threads(threads);
-    const std::size_t p = g->p, q = cols ? static_cast<std::size_t>(nc) : p;
+    const std::size_t q = cols ? static_cast<std::size_t>(nc) : g->p;
     if (!q) return 0;
-    const std::vector<double> d = scale ? api_div(*g) : std::vector<double>();
-    if (!cols) {
-      const std::vector<double>& K = raw_xtx(*g, threads);
-      if (!scale) std::copy(K.begin(), K.end(), out);
-      else std_into(K.data(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out,
-                    threads);
-      return 0;
-    }
-    if (!has_xtx(*g)) {
-      xtx_into(*g, cols, q, out, threads);
-    } else {
-      for (std::size_t b = 0; b < q; ++b) {
-        const double* kb = g->xtx.data() + static_cast<std::size_t>(cols[b]) * p;
-        for (std::size_t a = 0; a < q; ++a) out[a + b * q] = kb[static_cast<std::size_t>(cols[a])];
-      }
-    }
+    xtx_into(*g, cols, q, out, threads);
     if (scale) {
+      const std::vector<double> d = api_div(*g);
       std::vector<double> u(q), dq(q);
       for (std::size_t a = 0; a < q; ++a) {
-        const std::size_t j = static_cast<std::size_t>(cols[a]);
+        const std::size_t j = cols ? static_cast<std::size_t>(cols[a]) : a;
         u[a] = g->mu[j];
         dq[a] = d[j];
       }

@@ -1,7 +1,7 @@
 # geno: a PLINK BED or PGEN genotype matrix kept in memory as 2-bit planes
 # (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
-# geno_crossprod() (X'X, cached per object; X'M), geno_multiply() (X B),
+# geno_crossprod() (X'X; X'M), geno_multiply() (X B),
 # geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
 # cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
@@ -130,8 +130,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
 #' with the column's own unit max|x| / 32767 (relative error at most
 #' 1/65534 of max|x|), so a dense or a sparse, 0/1/2 or continuous column is
 #' held the same way. Means and sds are kept per column. `X` is not changed.
-#' The raw X'X of `X` is computed once per object and reused, so only X'M and
-#' M'M are added.
 #'
 #' @param X A `geno` object.
 #' @param M Numeric matrix (or vector) with one row per sample.
@@ -247,7 +245,8 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 #' decoded row blocks when more than 7% of the cells have an int16 part
 #' (dosages; exact for the 0.01 dosages of a PGEN); `geno_crossprod(X, M)` is `crossprod(X, M)` for a dense `M`
 #' with one row per sample. With `X$scale = TRUE` both are those of the
-#' column-standardized matrix.
+#' column-standardized matrix. Every call computes its product; the object keeps none, so keep the result when
+#' it is needed again.
 #'
 #' @param X A `geno` object from [geno_open()].
 #' @param M Optional dense matrix (or vector) with one row per sample.

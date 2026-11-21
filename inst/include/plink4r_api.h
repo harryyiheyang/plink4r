@@ -13,8 +13,8 @@
  * error code (no R error is raised); threads is the OpenMP thread count of plink4r's kernels (0 = from
  * plink4r_resources()). With scale != 0 the result is that of the column-standardized matrix (mean 0, sd 1
  * with n - 1; constant columns only centered), with the same values as the R functions named below. The
- * functions may be called from several threads at once, also on one geno object: they only read it, and the
- * X'X kept with it (plink4r_geno_xtx) is formed under a lock.
+ * functions only read the geno object and keep nothing between calls, so they may be called from several
+ * threads at once, also on one object; a caller that needs a result more than once keeps it itself.
  */
 #ifndef PLINK4R_API_H
 #define PLINK4R_API_H
@@ -59,10 +59,7 @@ static inline int plink4r_geno_mx(SEXP ptr, int scale, const double* B, int k, d
 }
 
 /* out (q x q) = X'X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored);
- * geno_crossprod(X)[cols + 1, cols + 1]. The X'X of all columns is computed once per geno object and kept
- * with it (p x p doubles), as geno_crossprod(X) does: the first call with cols NULL forms it, every later
- * call reads it. A call with cols reads the kept X'X when there is one and computes the product of those
- * columns alone otherwise. */
+ * geno_crossprod(X)[cols + 1, cols + 1]. Computed on every call. */
 static inline int plink4r_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
   typedef int (*fn_t)(SEXP, int, const int*, int, double*, int);
   static fn_t fn = NULL;
