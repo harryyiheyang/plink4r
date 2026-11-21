@@ -21,16 +21,16 @@ geno_info_cpp <- function(ptr) {
     .Call(`_plink4r_geno_info_cpp`, ptr)
 }
 
-geno_xtx_cpp <- function(ptr, threads) {
-    .Call(`_plink4r_geno_xtx_cpp`, ptr, threads)
+geno_xtx_cpp <- function(ptr, scale, threads) {
+    .Call(`_plink4r_geno_xtx_cpp`, ptr, scale, threads)
 }
 
-geno_xtm_cpp <- function(ptr, M, threads) {
-    .Call(`_plink4r_geno_xtm_cpp`, ptr, M, threads)
+geno_xtm_cpp <- function(ptr, M, scale, threads) {
+    .Call(`_plink4r_geno_xtm_cpp`, ptr, M, scale, threads)
 }
 
-geno_mx_cpp <- function(ptr, B, threads) {
-    .Call(`_plink4r_geno_mx_cpp`, ptr, B, threads)
+geno_mx_cpp <- function(ptr, B, scale, threads) {
+    .Call(`_plink4r_geno_mx_cpp`, ptr, B, scale, threads)
 }
 
 geno_append_cpp <- function(ptr, M, threads) {
@@ -41,16 +41,12 @@ geno_cross_cpp <- function(ptr_a, ptr_b, threads) {
     .Call(`_plink4r_geno_cross_cpp`, ptr_a, ptr_b, threads)
 }
 
-geno_dense_cpp <- function(ptr, rows, cols, threads) {
-    .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, threads)
+geno_cor_cpp <- function(ptr_a, ptr_b, threads) {
+    .Call(`_plink4r_geno_cor_cpp`, ptr_a, ptr_b, threads)
 }
 
-geno_std_cpp <- function(K, u, v, s, da, db, threads) {
-    .Call(`_plink4r_geno_std_cpp`, K, u, v, s, da, db, threads)
-}
-
-dense_xtx_cpp <- function(A, threads) {
-    .Call(`_plink4r_dense_xtx_cpp`, A, threads)
+geno_dense_cpp <- function(ptr, rows, cols, scale, threads) {
+    .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, scale, threads)
 }
 
 geno_xtwx_cpp <- function(ptr, w, center, div, threads) {
@@ -61,8 +57,8 @@ geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }
 
-geno_fill_cpp <- function(ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads) {
-    .Call(`_plink4r_geno_fill_cpp`, ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads)
+geno_fill_cpp <- function(ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads) {
+    .Call(`_plink4r_geno_fill_cpp`, ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads)
 }
 
 geno_miss_cpp <- function(ptr) {

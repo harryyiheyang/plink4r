@@ -100,40 +100,43 @@ BEGIN_RCPP
 END_RCPP
 }
 // geno_xtx_cpp
-Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, int threads);
-RcppExport SEXP _plink4r_geno_xtx_cpp(SEXP ptrSEXP, SEXP threadsSEXP) {
+Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_xtx_cpp(SEXP ptrSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_xtx_cpp(ptr, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_xtx_cpp(ptr, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
 // geno_xtm_cpp
-Rcpp::NumericMatrix geno_xtm_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads);
-RcppExport SEXP _plink4r_geno_xtm_cpp(SEXP ptrSEXP, SEXP MSEXP, SEXP threadsSEXP) {
+Rcpp::NumericMatrix geno_xtm_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_xtm_cpp(SEXP ptrSEXP, SEXP MSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type M(MSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_xtm_cpp(ptr, M, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_xtm_cpp(ptr, M, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
 // geno_mx_cpp
-Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, int threads);
-RcppExport SEXP _plink4r_geno_mx_cpp(SEXP ptrSEXP, SEXP BSEXP, SEXP threadsSEXP) {
+Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_mx_cpp(SEXP ptrSEXP, SEXP BSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type B(BSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_mx_cpp(ptr, B, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_mx_cpp(ptr, B, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -163,46 +166,31 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// geno_cor_cpp
+Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads);
+RcppExport SEXP _plink4r_geno_cor_cpp(SEXP ptr_aSEXP, SEXP ptr_bSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type ptr_a(ptr_aSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type ptr_b(ptr_bSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_cor_cpp(ptr_a, ptr_b, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // geno_dense_cpp
-Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::IntegerVector& cols, int threads);
-RcppExport SEXP _plink4r_geno_dense_cpp(SEXP ptrSEXP, SEXP rowsSEXP, SEXP colsSEXP, SEXP threadsSEXP) {
+Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::IntegerVector& cols, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_dense_cpp(SEXP ptrSEXP, SEXP rowsSEXP, SEXP colsSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type rows(rowsSEXP);
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type cols(colsSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_dense_cpp(ptr, rows, cols, threads));
-    return rcpp_result_gen;
-END_RCPP
-}
-// geno_std_cpp
-Rcpp::NumericMatrix geno_std_cpp(const Rcpp::NumericMatrix& K, const Rcpp::NumericVector& u, const Rcpp::NumericVector& v, double s, const Rcpp::NumericVector& da, const Rcpp::NumericVector& db, int threads);
-RcppExport SEXP _plink4r_geno_std_cpp(SEXP KSEXP, SEXP uSEXP, SEXP vSEXP, SEXP sSEXP, SEXP daSEXP, SEXP dbSEXP, SEXP threadsSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type K(KSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type u(uSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type v(vSEXP);
-    Rcpp::traits::input_parameter< double >::type s(sSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type da(daSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type db(dbSEXP);
-    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_std_cpp(K, u, v, s, da, db, threads));
-    return rcpp_result_gen;
-END_RCPP
-}
-// dense_xtx_cpp
-Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads);
-RcppExport SEXP _plink4r_dense_xtx_cpp(SEXP ASEXP, SEXP threadsSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type A(ASEXP);
-    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(dense_xtx_cpp(A, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_dense_cpp(ptr, rows, cols, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -237,19 +225,22 @@ BEGIN_RCPP
 END_RCPP
 }
 // geno_fill_cpp
-SEXP geno_fill_cpp(SEXP ptr, const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector& cell_ptr, const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, bool inplace, int threads);
-RcppExport SEXP _plink4r_geno_fill_cpp(SEXP ptrSEXP, SEXP fill_cSEXP, SEXP cell_ptrSEXP, SEXP cell_iSEXP, SEXP cell_gSEXP, SEXP inplaceSEXP, SEXP threadsSEXP) {
+SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const Rcpp::NumericVector& fill_const, const Rcpp::LogicalVector& cols, const Rcpp::IntegerVector& cell_ptr, const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, bool inplace, int threads);
+RcppExport SEXP _plink4r_geno_fill_cpp(SEXP ptrSEXP, SEXP use_meanSEXP, SEXP afSEXP, SEXP fill_constSEXP, SEXP colsSEXP, SEXP cell_ptrSEXP, SEXP cell_iSEXP, SEXP cell_gSEXP, SEXP inplaceSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type fill_c(fill_cSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_mean(use_meanSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type af(afSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type fill_const(fill_constSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::LogicalVector& >::type cols(colsSEXP);
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type cell_ptr(cell_ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type cell_i(cell_iSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type cell_g(cell_gSEXP);
     Rcpp::traits::input_parameter< bool >::type inplace(inplaceSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_fill_cpp(ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_fill_cpp(ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -565,17 +556,16 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 7},
     {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 7},
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},
-    {"_plink4r_geno_xtx_cpp", (DL_FUNC) &_plink4r_geno_xtx_cpp, 2},
-    {"_plink4r_geno_xtm_cpp", (DL_FUNC) &_plink4r_geno_xtm_cpp, 3},
-    {"_plink4r_geno_mx_cpp", (DL_FUNC) &_plink4r_geno_mx_cpp, 3},
+    {"_plink4r_geno_xtx_cpp", (DL_FUNC) &_plink4r_geno_xtx_cpp, 3},
+    {"_plink4r_geno_xtm_cpp", (DL_FUNC) &_plink4r_geno_xtm_cpp, 4},
+    {"_plink4r_geno_mx_cpp", (DL_FUNC) &_plink4r_geno_mx_cpp, 4},
     {"_plink4r_geno_append_cpp", (DL_FUNC) &_plink4r_geno_append_cpp, 3},
     {"_plink4r_geno_cross_cpp", (DL_FUNC) &_plink4r_geno_cross_cpp, 3},
-    {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 4},
-    {"_plink4r_geno_std_cpp", (DL_FUNC) &_plink4r_geno_std_cpp, 7},
-    {"_plink4r_dense_xtx_cpp", (DL_FUNC) &_plink4r_dense_xtx_cpp, 2},
+    {"_plink4r_geno_cor_cpp", (DL_FUNC) &_plink4r_geno_cor_cpp, 3},
+    {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 5},
     {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
     {"_plink4r_geno_take_cpp", (DL_FUNC) &_plink4r_geno_take_cpp, 5},
-    {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 7},
+    {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 10},
     {"_plink4r_geno_miss_cpp", (DL_FUNC) &_plink4r_geno_miss_cpp, 1},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
     {"_plink4r_score_stream_cpp", (DL_FUNC) &_plink4r_score_stream_cpp, 13},

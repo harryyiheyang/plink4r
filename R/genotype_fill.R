@@ -114,39 +114,36 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
                ld_write = ld_write)
 }
 
-# Refill the missing cells of X through geno_fill_cpp. Per column f = default ("mean": observed mean, 0 when
-# every cell is missing; "keep": the current fill), then af (anchored), then const; cells (CSR from
-# .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
+# Refill the missing cells of X through geno_fill_cpp, which computes the per-column value f: default ("mean":
+# observed mean, 0 when every cell is missing; "keep": the current fill), then af (anchored), then const; cells
+# (CSR from .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
 # writes the LD fills into the new store after the per-column values and before the cells (so cells > LD > f).
 .geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, default = c("mean", "keep"), inplace = FALSE,
                          impute = X$impute, threads = X$threads, cols = NULL, ld_write = NULL) {
   default <- match.arg(default)
-  p <- X$p; n <- X$n
+  p <- X$p
   if (!is.null(af)) {
     af <- as.numeric(af)
     if (length(af) != p) stop("af needs one value per selected variant.", call. = FALSE)
     if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
   }
-  info <- geno_info_cpp(X$ptr)
-  m <- info$n_miss; S <- info$obs_sum
-  f <- if (default == "mean") ifelse(m < n, S / (n - m), 0) else rep(NaN, p)
-  if (length(af)) {
-    ok <- is.finite(af) & m > 0
-    f[ok] <- pmin(2, pmax(0, (2 * n * af[ok] - S[ok]) / m[ok]))
-  }
   if (length(const)) {
-    ok <- is.finite(const)
-    f[ok] <- const[ok]
+    const <- as.numeric(const)
+    if (length(const) != p) stop("const needs one value per selected variant.", call. = FALSE)
   }
-  f[m == 0] <- NaN
-  if (!is.null(cols)) f[!cols] <- NaN  # columns outside `cols` keep their current fill
+  um <- default == "mean"
+  af <- if (is.null(af)) numeric(0) else af
+  const <- if (is.null(const)) numeric(0) else const
+  cols <- if (is.null(cols)) logical(0) else as.logical(cols)
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
+  th <- .threads(threads)
   if (is.null(ld_write)) {
-    ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, cells$ptr, cells$i, cells$g, inplace, th)
   } else {
-    ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), inplace, .threads(threads))
+    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, integer(0), integer(0), numeric(0), inplace, th)
     ld_write(ptr)
-    if (length(cells$ptr)) ptr <- geno_fill_cpp(ptr, numeric(0), cells$ptr, cells$i, cells$g, TRUE, .threads(threads))
+    if (length(cells$ptr))
+      ptr <- geno_fill_cpp(ptr, FALSE, numeric(0), numeric(0), logical(0), cells$ptr, cells$i, cells$g, TRUE, th)
   }
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
             threads = X$threads, file = X$file, appended = X$appended)

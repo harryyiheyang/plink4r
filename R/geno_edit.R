@@ -104,9 +104,7 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
     G <- X[[k]]; m <- metas[[k]]; t <- tgt[[k]]
     flip <- m$A1 != t$A1
     H <- if (any(flip)) .geno_take(G, seq_len(G$n), seq_len(G$p), flip, if (is.null(threads)) G$threads else threads) else {
-      H <- G; H$cache <- new.env(parent = emptyenv())
-      if (!is.null(G$cache$xtx)) H$cache$xtx <- G$cache$xtx
-      H
+      G
     }
     H$snp <- paste(m$chr, m$pos, t$A1, t$A2, sep = ":"); H$a1 <- t$A1; H$a2 <- t$A2
     H
