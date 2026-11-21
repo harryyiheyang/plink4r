@@ -17,7 +17,7 @@
 #'   so observed + filled allele count equals `2 n p`; without one, `c` is the observed mean, which is
 #'   exactly plink2's default mean imputation. With `ld`, variants in the eigen.bin panel take the LD fill
 #'   instead (per-cell LD conditional mean, stage 2 anchored to `p` or to `AF_PanUKB`), one LD
-#'   block at a time through the same kernel as [genotype_impute()]; variants outside the panel keep
+#'   block at a time through the same kernel as the LD fill of [genotype_fill()]; variants outside the panel keep
 #'   the anchored constant.
 #' * `"none"`: plink2 `no-mean-imputation`; a missing call adds nothing and lowers `allele_ct` by 2.
 #'
@@ -35,7 +35,7 @@
 #' @param impute `"anchor"` or `"none"`.
 #' @param ld `NULL`, or `list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
 #'   table in place of that parquet)` as for
-#'   [genotype_impute()]: the panel is aligned to the .pvar by ID and alleles, else by chromosome, position and
+#'   [genotype_fill()]: the panel is aligned to the .pvar by ID and alleles, else by chromosome, position and
 #'   allele pair, in either orientation; only panel SNPs present in the .pvar enter the imputation.
 #' @param transform `"none"`, `"center"` or `"standardize"`.
 #' @param sample IIDs to score (`NULL` = all .psam rows), in the row order wanted.
@@ -185,7 +185,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 
 #' Defaults of [geno_score()]
 #'
-#' chunk 512 variants read per streaming step; progress: a bar over chromosomes, then one over LD blocks; for the LD path (as [genotype_impute()]): thresh 0 = all
+#' chunk 512 variants read per streaming step; progress: a bar over chromosomes, then one over LD blocks; for the LD path (as the LD fill of [genotype_fill()]): thresh 0 = all
 #' stored eigenpairs, delta 0.01 ridge of stage 1, anchor_min_miss 0.01 (stage 2 at or above this missing
 #' rate), nb_people NULL (people per batch from mem_gb), mem_gb 2.
 #' @export

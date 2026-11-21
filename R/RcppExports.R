@@ -81,16 +81,8 @@ simd_isa_cpp <- function() {
     .Call(`_plink4r_simd_isa_cpp`)
 }
 
-genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
-    .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step)
-}
-
-genotype_impute_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
-    .Call(`_plink4r_genotype_impute_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step)
-}
-
-genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
-    .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step)
+genotype_fill_ld_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
+    invisible(.Call(`_plink4r_genotype_fill_ld_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step))
 }
 
 gwas_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block) {
