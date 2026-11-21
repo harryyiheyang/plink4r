@@ -6,4 +6,4 @@ src/pgenlib/: pgenlib from plink-ng by Christopher Chang, LGPL-3 or later.
 src/simde/: SIMD Everywhere (SIMDe) by Evan Nemerson and contributors, MIT.
   License file: src/simde/COPYING.
 
-summarystat_impute(): ported from SBayesRC.QC2.
+sumstat_impute(): ported from SBayesRC.QC2.
