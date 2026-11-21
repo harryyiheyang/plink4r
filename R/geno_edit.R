@@ -50,10 +50,9 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
 #' (palindromic variants are only marked).
 #'
 #' @param X A named list of `geno` objects (or one object), in order of priority.
-#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns as in the file route
-#'   of [genotype_fill()]: `CHR` (or chr / CHROM), `BP37` or `BP38` (or pos / POS / BP; the build of the
-#'   objects' positions), `A1`, `A2`, optional `A1Freq` (frequency of A1); "chr" prefixes are removed and
-#'   alleles upper-cased.
+#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns: `CHR` (or chr /
+#'   CHROM), `BP37` or `BP38` (or pos / POS / BP; the build of the objects' positions), `A1`, `A2`, optional
+#'   `A1Freq` (frequency of A1); "chr" prefixes are removed and alleles upper-cased.
 #' @param build 37 or 38: which of `BP37` / `BP38` to use when `ref` has both.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A list of `geno` objects like `X`, with column names `chr:pos:a1:a2` (a1 = counted allele)
@@ -129,8 +128,8 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   out
 }
 
-# A SNP table as given to genotype_fill(pfile, snp) (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos,
-# a1, a2), cleaned the same way: "chr" prefix removed, alleles upper-cased, positions integer.
+# The SNP table `ref` of geno_harmonise() (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos, a1, a2),
+# cleaned: "chr" prefix removed, alleles upper-cased, positions integer.
 .harm_ref <- function(ref, build = NULL) {
   r <- data.table::as.data.table(ref)
   pick <- function(cands, what) {

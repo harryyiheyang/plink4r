@@ -239,6 +239,20 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// geno_merge_cpp
+Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerMatrix& rows, int threads);
+RcppExport SEXP _plink4r_geno_merge_cpp(SEXP ptrsSEXP, SEXP colsSEXP, SEXP rowsSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::List >::type ptrs(ptrsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type cols(colsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerMatrix& >::type rows(rowsSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_merge_cpp(ptrs, cols, rows, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // geno_fill_cpp
 SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const Rcpp::NumericVector& fill_const, const Rcpp::LogicalVector& cols, const Rcpp::IntegerVector& cell_ptr, const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, bool inplace, int threads);
 RcppExport SEXP _plink4r_geno_fill_cpp(SEXP ptrSEXP, SEXP use_meanSEXP, SEXP afSEXP, SEXP fill_constSEXP, SEXP colsSEXP, SEXP cell_ptrSEXP, SEXP cell_iSEXP, SEXP cell_gSEXP, SEXP inplaceSEXP, SEXP threadsSEXP) {
@@ -390,22 +404,6 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type rows(rowsSEXP);
     Rcpp::traits::input_parameter< double >::type dosage_step(dosage_stepSEXP);
     rcpp_result_gen = Rcpp::wrap(genotype_impute_geno_cpp(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step));
-    return rcpp_result_gen;
-END_RCPP
-}
-// pgen_stats_cpp
-Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, int threads);
-RcppExport SEXP _plink4r_pgen_stats_cpp(SEXP pgenSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP threadsSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< const std::string& >::type pgen(pgenSEXP);
-    Rcpp::traits::input_parameter< int >::type n_raw(n_rawSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
-    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(pgen_stats_cpp(pgen, n_raw, allele_ct, var_idx, sample_idx, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -581,6 +579,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
     {"_plink4r_geno_xtwx_bin_cpp", (DL_FUNC) &_plink4r_geno_xtwx_bin_cpp, 5},
     {"_plink4r_geno_take_cpp", (DL_FUNC) &_plink4r_geno_take_cpp, 5},
+    {"_plink4r_geno_merge_cpp", (DL_FUNC) &_plink4r_geno_merge_cpp, 4},
     {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 10},
     {"_plink4r_geno_miss_cpp", (DL_FUNC) &_plink4r_geno_miss_cpp, 1},
     {"_plink4r_resources_cpp", (DL_FUNC) &_plink4r_resources_cpp, 2},
@@ -589,7 +588,6 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_simd_isa_cpp", (DL_FUNC) &_plink4r_simd_isa_cpp, 0},
     {"_plink4r_genotype_impute_cpp", (DL_FUNC) &_plink4r_genotype_impute_cpp, 17},
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 14},
-    {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 14},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 10},
     {"_plink4r_gxe_kin_stream_cpp", (DL_FUNC) &_plink4r_gxe_kin_stream_cpp, 12},

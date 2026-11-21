@@ -1175,7 +1175,7 @@ Rcpp::List geno_info_cpp(SEXP ptr) {
   for (std::size_t j = 0; j < p; ++j) {
     os[j] = obs_sum_col(*g, j);
     const double obs = static_cast<double>(g->n) - g->nmiss[j];
-    af[j] = (g->D[j].unit != kDUnit || obs <= 0) ? NA_REAL : os[j] / (2.0 * obs);
+    af[j] = (!unit_steps(g->D[j].unit) || obs <= 0) ? NA_REAL : os[j] / (2.0 * obs);
   }
   return Rcpp::List::create(Rcpp::Named("n") = static_cast<double>(g->n),
                             Rcpp::Named("p") = static_cast<double>(p),
@@ -1485,6 +1485,148 @@ SEXP geno_take_cpp(SEXP ptr, const Rcpp::IntegerVector& rows, const Rcpp::Intege
   return g;
 }
 
+// A new geno merged from the objects ptrs. cols(k, c) / rows(k, r) (0-based, -1 = none) give the column of
+// object k that is output column c and the row of object k that is output row r. Cell (r, c) is copied as
+// stored (H, D, and whether it is a missing cell) from the first object k with rows(k, r) >= 0 and
+// cols(k, c) >= 0. A cell no object holds becomes a missing cell of the result, filled with the observed mean
+// of its column (over the cells copied that are not missing cells; 0 when there is none). The objects of a
+// column must share the unit of D. A column held by one object in the output row order (rows(k, r) = r, all
+// its rows) is copied word by word. Returns list(ptr, uncovered = cells no object holds, per column).
+// [[Rcpp::export]]
+Rcpp::List geno_merge_cpp(Rcpp::List ptrs, const Rcpp::IntegerMatrix& cols, const Rcpp::IntegerMatrix& rows,
+                          int threads) {
+  threads = resolve_threads(threads);
+  const std::size_t K = ptrs.size(), p = cols.ncol(), n = rows.ncol();
+  if (!K || static_cast<std::size_t>(cols.nrow()) != K || static_cast<std::size_t>(rows.nrow()) != K)
+    Rcpp::stop("cols and rows must have one row per object.");
+  const int* cm = cols.begin();
+  const int* rm = rows.begin();
+  auto col = [cm, K](std::size_t k, std::size_t c) { return cm[k + c * K]; };
+  auto row = [rm, K](std::size_t k, std::size_t r) { return rm[k + r * K]; };
+  std::vector<const Geno*> a(K);
+  for (std::size_t k = 0; k < K; ++k) a[k] = Rcpp::XPtr<Geno>(static_cast<SEXP>(ptrs[k])).get();
+  std::vector<char> ident(K, 1);  // object k holds exactly the output rows, in their order
+  bool dosage = false;
+  for (std::size_t k = 0; k < K; ++k) {
+    dosage = dosage || a[k]->dosage;
+    if (a[k]->n != n) ident[k] = 0;
+    for (std::size_t r = 0; r < n; ++r) {
+      const int i = row(k, r);
+      if (i >= 0 && static_cast<std::size_t>(i) >= a[k]->n) Rcpp::stop("rows out of range.");
+      if (i != static_cast<int>(r)) ident[k] = 0;
+    }
+  }
+  for (std::size_t c = 0; c < p; ++c) {
+    double unit = 0;
+    bool first = true;
+    for (std::size_t k = 0; k < K; ++k) {
+      const int j = col(k, c);
+      if (j < 0) continue;
+      if (static_cast<std::size_t>(j) >= a[k]->p) Rcpp::stop("cols out of range.");
+      const double u = a[k]->D[j].unit;
+      if (!first && u != unit) Rcpp::stop("The objects hold column %d in different units (hard calls / dosages).", static_cast<int>(c) + 1);
+      unit = u;
+      first = false;
+    }
+    if (first) Rcpp::stop("A column comes from no object.");
+  }
+  Rcpp::XPtr<Geno> g(new Geno, true);
+  init_geno(*g, n, p, a[0]->mean);
+  g->dosage = dosage;
+  const std::size_t W = g->G.words;
+  std::vector<std::size_t> base(K + 1, 0);  // start of object k in the per-thread row buffers
+  for (std::size_t k = 0; k < K; ++k) base[k + 1] = base[k] + a[k]->n;
+  Rcpp::NumericVector unc(p);
+  double* uncp = unc.begin();
+  #pragma omp parallel num_threads(threads)
+  {
+    std::vector<std::int16_t> qbuf, qo;
+    std::vector<unsigned char> mbuf, ho, st;  // st: 0 copied, 1 copied missing cell, 2 held by no object
+    std::vector<std::size_t> ks;
+    #pragma omp for schedule(dynamic, 16)
+    for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(p); ++cc) {
+      const std::size_t c = static_cast<std::size_t>(cc);
+      u64* lo = g->G.bits.data() + 2 * c * W;
+      u64* hi = lo + W;
+      std::vector<std::uint32_t>& Mc = g->M[c];
+      ks.clear();
+      for (std::size_t k = 0; k < K; ++k) if (col(k, c) >= 0) ks.push_back(k);
+      g->D[c].unit = a[ks[0]]->D[col(ks[0], c)].unit;
+      DBuilder db(*g, c);
+      if (ident[ks[0]]) {  // the first object holds every row in order: its column as it is
+        const Geno& s = *a[ks[0]];
+        const std::size_t j = static_cast<std::size_t>(col(ks[0], c));
+        const DCol& dc = s.D[j];
+        std::copy(s.G.lo(j), s.G.lo(j) + (n + 63) / 64, lo);
+        std::copy(s.G.hi(j), s.G.hi(j) + (n + 63) / 64, hi);
+        g->D[c].q.reserve(dc.q.size());
+        std::size_t e = 0;
+        for (std::size_t w = 0; w < dc.mask.size(); ++w)
+          for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) {
+            const std::size_t i = 64 * w + __builtin_ctzll(bits);
+            db.add(i, h_at(s.G, j, i), dc.q[e++]);
+          }
+        Mc = s.M[j];
+      } else {
+        if (qbuf.empty()) { qbuf.assign(base[K], 0); mbuf.assign(base[K], 0); qo.resize(n); ho.resize(n); st.resize(n); }
+        for (std::size_t k : ks) {
+          const DCol& dc = a[k]->D[col(k, c)];
+          std::size_t e = 0;
+          for (std::size_t w = 0; w < dc.mask.size(); ++w)
+            for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) qbuf[base[k] + 64 * w + __builtin_ctzll(bits)] = dc.q[e++];
+          for (std::uint32_t i : a[k]->M[col(k, c)]) mbuf[base[k] + i] = 1;
+        }
+        const double unit = g->D[c].unit;
+        const int us = unit_steps(unit);  // observed sum exactly in int16 steps (an appended column: in double)
+        std::int64_t ss = 0;
+        double so = 0.0;
+        std::size_t no = 0, nu = 0;
+        for (std::size_t r = 0; r < n; ++r) {
+          st[r] = 2;
+          for (std::size_t k : ks) {
+            const int i = row(k, r);
+            if (i < 0) continue;
+            ho[r] = static_cast<unsigned char>(h_at(a[k]->G, static_cast<std::size_t>(col(k, c)), static_cast<std::size_t>(i)));
+            qo[r] = qbuf[base[k] + i];
+            st[r] = mbuf[base[k] + i];
+            if (!st[r]) {
+              if (us) ss += us * static_cast<std::int64_t>(ho[r]) + qo[r];
+              else so += ho[r] + qo[r] * unit;
+              ++no;
+            }
+            break;
+          }
+          if (st[r] == 2) ++nu;
+        }
+        unsigned int hf = 0;
+        int qf = 0;
+        if (us) so = static_cast<double>(ss) / us;
+        if (nu) quantize_fill(no ? so / static_cast<double>(no) : 0.0, unit, hf, qf);
+        uncp[c] = static_cast<double>(nu);
+        for (std::size_t r = 0; r < n; ++r) {
+          const unsigned int h = st[r] == 2 ? hf : ho[r];
+          const int q = st[r] == 2 ? qf : qo[r];
+          if (h == 1u) lo[r >> 6] |= u64(1) << (r & 63u);
+          else if (h == 2u) hi[r >> 6] |= u64(1) << (r & 63u);
+          if (q) db.add(r, h, q);
+          if (st[r]) Mc.push_back(static_cast<std::uint32_t>(r));
+        }
+        for (std::size_t k : ks) {
+          const DCol& dc = a[k]->D[col(k, c)];
+          for (std::size_t w = 0; w < dc.mask.size(); ++w)
+            for (u64 bits = dc.mask[w]; bits; bits &= bits - 1) qbuf[base[k] + 64 * w + __builtin_ctzll(bits)] = 0;
+          for (std::uint32_t i : a[k]->M[col(k, c)]) mbuf[base[k] + i] = 0;
+        }
+      }
+      db.finish();
+      plane_stats(*g, c);
+      g->nmiss[c] = static_cast<double>(Mc.size());
+    }
+  }
+  finish_stats(*g);
+  return Rcpp::List::create(Rcpp::Named("ptr") = g, Rcpp::Named("uncovered") = unc);
+}
+
 namespace {
 
 // A fill value must keep the int16 part in range.
@@ -1557,7 +1699,7 @@ void fill_column(Geno& g, std::size_t j, bool hasc, double fc, const RowT* ci, c
 // mean when use_mean (0 when every cell is missing); replaced by the anchored value
 // min(2, max(0, (2 n af_j - obs_sum_j) / missing_j)) where af_j is finite; replaced by const_j where finite.
 // af and fill_const are empty or one value per column. A value f is stored as H = round(f) (halves up, within
-// 0..2) and D = f - H in 1/16384. Cells not missing are never touched. inplace = TRUE changes ptr itself (only
+// 0..2) and D = f - H in the column's unit. Cells not missing are never touched. inplace = TRUE changes ptr itself (only
 // for an object nobody else references yet); otherwise a modified copy is returned and ptr is unchanged.
 // [[Rcpp::export]]
 SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const Rcpp::NumericVector& fill_const,
@@ -1657,9 +1799,9 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vect
   const std::size_t n = g->n, sb = (n + 3) / 4, m = cols.size();
   for (int j : cols) {
     if (j < 0 || static_cast<std::size_t>(j) >= g->p) Rcpp::stop("cols out of range.");
-    if (g->D[j].unit != kDUnit) Rcpp::stop("LD imputation does not take appended columns.");
+    if (!unit_steps(g->D[j].unit)) Rcpp::stop("LD imputation does not take appended columns.");
   }
-  // dosage part of the observed cells: D = q / 16384 on the step grid, d = round(D / step) != 0
+  // dosage part of the observed cells: D = q x unit (1/16384 or 0.01) on the step grid, d = round(D / step) != 0
   std::vector<std::vector<int>> li(m);
   std::vector<std::vector<std::int8_t>> ld(m);
   std::vector<double> dsum(m, 0.0);
@@ -1675,7 +1817,7 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vect
         const std::size_t i = 64 * w + __builtin_ctzll(bits);
         while (r < Mj.size() && Mj[r] < i) ++r;
         if (r < Mj.size() && Mj[r] == i) continue;  // a missing cell's fill
-        const long q = std::lround(d.q[e] / (16384.0 * step));
+        const long q = std::lround(d.q[e] / (unit_steps(d.unit) * step));
         const int v = static_cast<int>(std::max(-127L, std::min(127L, q)));
         if (!v) continue;
         li[c].push_back(static_cast<int>(i)); ld[c].push_back(static_cast<std::int8_t>(v)); s += v;

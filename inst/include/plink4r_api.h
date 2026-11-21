@@ -1,7 +1,7 @@
 /* C / C++ interface to the genotype kernels of plink4r, for other packages' compiled code.
  *
  * In the dependent package: DESCRIPTION `LinkingTo: plink4r` and `Imports: plink4r`, NAMESPACE
- * `importFrom(plink4r, geno_open)` (or any import, so that plink4r is loaded), then in C / C++
+ * `importFrom(plink4r, geno_crossprod)` (any import, so that plink4r is loaded), then in C / C++
  *   #include <Rcpp.h>            // or <Rinternals.h>; before this header
  *   #include <plink4r_api.h>
  * and pass the geno object's external pointer X$ptr and scale flag X$scale from R. The functions are

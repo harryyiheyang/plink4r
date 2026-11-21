@@ -1,6 +1,5 @@
 # geno: a PLINK BED or PGEN genotype matrix kept in memory as 2-bit planes
-# (n p / 4 bytes) instead of an n x p double matrix (moved here from SuSiE4I,
-# which now uses these functions). The object behaves like a numeric matrix
+# (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X, cached per object; X'M), geno_multiply() (X B),
 # geno_wcrossprod(), geno_append() (extra columns) and geno_cor() /
@@ -49,18 +48,14 @@
 #' @param scale Whether products and dense blocks are of the standardized
 #'   matrix.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @param fill Externally computed fills of missing calls: a [genotype_fill()] result of the file route (its
-#'   per-SNP `fill_const` and, with `ld`, its per-cell LD fills `cells`, matched to the selected variants by
-#'   chromosome, position and allele pair, not by ID, so it works the same with `geno_file(id = FALSE)`), or `list(const = one value per selected variant (NA = built-in fill), cells = data.frame(j = column,
-#'   IID, g))`. A missing cell takes its per-cell value when given, else the constant. Values are ALT (PGEN) /
-#'   bim A1 (BED) dosages. Same as opening with `impute` and then [genotype_fill()] on the new object.
 #' @param af Optional anchor frequency of the counted allele (bim column 5 for
 #'   BED, ALT for PGEN), one value per selected variant; `NA` entries keep
 #'   `impute`. With a finite `af`, every missing call of that variant takes
 #'   c = (2 n af - sum of observed) / (number missing), clipped to `[0, 2]`
 #'   (stored as round(c) in the planes and the rest in D), so the filled
-#'   column has mean 2 af and `sd` is the sample sd after filling. `NULL`
-#'   (default) leaves the behaviour unchanged.
+#'   column has mean 2 af and `sd` is the sample sd after filling: the same as
+#'   [genotype_fill()] with `af` on the opened object. `NULL` (default): no
+#'   anchor.
 #' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
 #'   tables (then leave `bedfile` and `pgenfile` `NULL`).
 #' @return An object of class `geno` with fields `n`, `p`, `snp`,
@@ -78,7 +73,7 @@
 #' @export
 geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                       sample_vec = NULL, impute = c("median", "mean"),
-                      scale = TRUE, threads = 4L, fill = NULL, af = NULL, file = NULL) {
+                      scale = TRUE, threads = 4L, af = NULL, file = NULL) {
   impute <- match.arg(impute)
   threads <- .threads(threads)
   gf <- .as_geno_file(file, bedfile, pgenfile)
@@ -101,11 +96,8 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
                            flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = impute, scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
-  if (!is.null(fill) || !is.null(af)) {  # on the new object, which nothing else references yet: in place
-    fs <- .geno_fill_spec(fill, X)
-    X <- .geno_refill(X, af = af, const = fs$c, cells = fs, default = "keep", inplace = TRUE,
-                      impute = if (!is.null(fill)) "custom" else "af", threads = threads)
-  }
+  if (!is.null(af))  # on the new object, which nothing else references yet: in place
+    X <- .geno_refill(X, af = af, default = "keep", inplace = TRUE, impute = "af", threads = threads)
   X
 }
 
@@ -165,7 +157,7 @@ geno_append <- function(X, M, threads = X$threads) {
   out <- .geno_new(ptr, cols, list(sample = X$sample, fid = if (is.null(X$fid)) rep(NA_character_, X$n) else X$fid),
                    impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
                    appended = c(X$appended, p0 + seq_len(k)))
-  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller (e.g. SuSiE4I's `fill`) stay
+  for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller stay
   out
 }
 

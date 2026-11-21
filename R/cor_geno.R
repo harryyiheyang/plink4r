@@ -9,7 +9,7 @@
 #'
 #' Missing calls: with `af` (the counted allele's anchor frequency) every
 #' missing call of the variant takes c = (2 n af - sum of observed) /
-#' (number missing), clipped to `[0, 2]` (scheme 3), so the filled column has
+#' (number missing), clipped to `[0, 2]` (the anchored fill of [genotype_fill()]), so the filled column has
 #' mean 2 af; `NA` entries of `af`, or `af = NULL`, use `impute`. The sd is
 #' always the sample sd after filling.
 #'

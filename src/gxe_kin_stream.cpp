@@ -105,7 +105,7 @@ struct Worker {
   bool dosage = false;
   std::size_t sb = 0;
   std::vector<unsigned char> g8;   // cap x sb: 2-bit codes (0/1/2 = count, 3 = missing)
-  std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
+  std::vector<std::uint16_t> g16;  // cap x n: dosage in steps of 0.01 (dosage_grid), kDosMiss = missing
   std::vector<double> mean, G, G2, C1, C2, z, Zt;
   std::vector<int> mono, sing;
   Eigen::MatrixXd U;               // nr x S: the related samples' scaled columns of Z, then L^-1 of them
@@ -124,7 +124,7 @@ struct Worker {
     const double mu = mean[s];
     if (dosage) {
       const std::uint16_t* d = &g16[static_cast<std::size_t>(s) * n + row0];
-      for (int i = 0; i < rows; ++i) out[i] = d[i] == kDosMiss ? 0.0 : d[i] * (1.0 / 16384.0) - mu;
+      for (int i = 0; i < rows; ++i) out[i] = d[i] == kDosMiss ? 0.0 : d[i] * 0.01 - mu;
       return;
     }
     const double lut[4] = {-mu, 1.0 - mu, 2.0 - mu, 0.0};
@@ -141,7 +141,7 @@ struct Worker {
     const double mu = mean[s];
     if (dosage) {
       const std::uint16_t v = g16[static_cast<std::size_t>(s) * n + i];
-      return v == kDosMiss ? 0.0 : v * (1.0 / 16384.0) - mu;
+      return v == kDosMiss ? 0.0 : v * 0.01 - mu;
     }
     const unsigned code = (g8[s * sb + (i >> 2)] >> ((i & 3) << 1)) & 3;
     return code == 3 ? 0.0 : static_cast<double>(code) - mu;
@@ -318,9 +318,10 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp
           std::uint16_t* o = &W.g16[static_cast<std::size_t>(s) * ns];
           for (int i = 0; i < ns; ++i) {
             const std::uint16_t v = dd[si[i]];
-            o[i] = v;
-            if (v == kDosMiss) continue;
-            const double x = v * (1.0 / 16384.0);
+            if (v == kDosMiss) { o[i] = v; continue; }
+            const unsigned int c = plink4r::dosage_grid(v);
+            o[i] = static_cast<std::uint16_t>(c);
+            const double x = c * 0.01;
             no += 1; sum += x; sq += x * x;
           }
         } else {

@@ -61,6 +61,10 @@ geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }
 
+geno_merge_cpp <- function(ptrs, cols, rows, threads) {
+    .Call(`_plink4r_geno_merge_cpp`, ptrs, cols, rows, threads)
+}
+
 geno_fill_cpp <- function(ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads) {
     .Call(`_plink4r_geno_fill_cpp`, ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads)
 }
@@ -91,10 +95,6 @@ genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eig
 
 genotype_impute_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
     .Call(`_plink4r_genotype_impute_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step)
-}
-
-pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads) {
-    .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
 }
 
 genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
