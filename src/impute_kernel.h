@@ -1,4 +1,4 @@
-// Core of the eigen.bin LD imputation of hard-call missing cells, free of Rcpp types so that several
+// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types so that several
 // R entry points share it: genotype_impute_cpp (returns every filled cell) and the LD path of geno_score
 // (adds w * filled cell into scores without keeping the cells).
 //
@@ -7,7 +7,7 @@
 // sign s = +1 when PGEN ALT is the panel alt, -1 when REF/ALT are swapped (the panel is not assumed to share the
 // PGEN's orientation).
 // Stage 1 (per person i):
-//   z~ = (g - 2p) / (s sqrt(2p(1-p))) in panel orientation, 0 at missing;  C_S = I - delta (R_SS + delta I)^{-1}
+//   z~ = (g - 2p) / (s sqrt(2p(1-p))) in panel orientation, 0 at missing (g = observed hard call or dosage);  C_S = I - delta (R_SS + delta I)^{-1}
 //   (la_kernel.cpp: Woodbury U_S G U_S' or direct, whichever of k and |S| is smaller)
 //   z_M = (I - C_MM)^{-1} C_{M,.} z~            ( = R_MO (R_OO + delta I)^{-1} z_O )
 //   delta must be > 0 (at delta = 0, C = I - delta (R + delta I)^{-1} degenerates).
@@ -17,13 +17,17 @@
 //
 // Layout for speed (exact, same result as the per-person dot product):
 //   with a_lj = C_lj / sd_l (sd signed) and A_j = -sum_l a_lj mu_l,
-//   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l het_i} a_lj + 2 sum_{l homalt_i} a_lj.
+//   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l het_i} a_lj + 2 sum_{l homalt_i} a_lj
+//            + step sum_{(l, d) in D_i} a_lj d.
+//   An observed dosage g enters as H + step d: H = round(g) (halves up) in the planes, d = round((g - H) / step)
+//   (int8, |d| <= 0.5 / step) in the person's sparse list D_i of observed cells with d != 0; hard calls have
+//   D_i empty. step (dosage_step) quantizes only this LD input; stored observed values are never changed.
 //   People are processed in blocks; inside a block the loop runs over SNP columns j (column a_.j / C_.j hot in
 //   cache) and over the people missing j, using 1-bit planes (het / homalt; la_kernel.cpp plane_dot), so C is
 //   streamed from memory once per person block instead of once per (person, missing SNP). C_MM is gathered
 //   from the same hot column.
 //
-// Pipeline: build_impute_ld -> read_block_genotypes -> build_planes -> impute_stage1 -> impute_stage2,
+// Pipeline: build_impute_ld -> read_block_genotypes (or geno_genovec) -> build_planes -> impute_stage1 -> impute_stage2,
 // then for_each_cell visits every filled cell (i, j, g1, g). Errors are thrown as std::runtime_error.
 #ifndef PLINK4R_IMPUTE_KERNEL_H
 #define PLINK4R_IMPUTE_KERNEL_H
@@ -132,21 +136,79 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
 }
 
 // ---- genotypes of one block: SNP-major genovecs of the selected samples (codes 0/1/2 ALT count, 3 missing)
+// plus the dosage part of the observed cells: d = round((g - H) / step) != 0, per row j the selected samples
+// di[dptr[j] .. dptr[j + 1]) (ascending) and their d.
 struct BlockGenotypes {
   int m = 0, ns = 0, sb = 0;
   std::vector<uint8_t> GS;       // m x sb bytes
-  std::vector<double> sum_obs;   // observed ALT count per row
+  std::vector<double> sum_obs;   // observed ALT sum per row (H + step d)
+  double step = 0.01;            // dosage grid of the LD input
+  std::vector<long long> dptr;   // m + 1
+  std::vector<int> di;
+  std::vector<int8_t> dd;
   double t_geno = 0;
 };
 
-inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>& vi, const std::vector<int>& sidx, int T) {
+// d of an observed ALT dosage v (1/16384 units, 0..32768) with H = round(v / 16384) (halves up).
+inline int dosage_grid(std::uint16_t v, unsigned h, double step) {
+  const int q = static_cast<int>(v) - static_cast<int>(h << 14);
+  const long d = std::lround(q / (16384.0 * step));
+  return static_cast<int>(std::max(-127L, std::min(127L, d)));
+}
+
+// Gathers per-row (sample, d) lists into the CSR of B.
+inline void set_dosage_lists(BlockGenotypes& B, std::vector<std::vector<int>>& li, std::vector<std::vector<int8_t>>& ld) {
+  const int m = B.m;
+  B.dptr.assign(m + 1, 0);
+  for (int j = 0; j < m; ++j) B.dptr[j + 1] = B.dptr[j] + static_cast<long long>(li[j].size());
+  B.di.resize(B.dptr[m]); B.dd.resize(B.dptr[m]);
+  for (int j = 0; j < m; ++j) {
+    std::copy(li[j].begin(), li[j].end(), B.di.begin() + B.dptr[j]);
+    std::copy(ld[j].begin(), ld[j].end(), B.dd.begin() + B.dptr[j]);
+    std::vector<int>().swap(li[j]); std::vector<int8_t>().swap(ld[j]);
+  }
+}
+
+inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>& vi, const std::vector<int>& sidx,
+                                           double step, int T) {
   auto t0 = std::chrono::steady_clock::now();
   BlockGenotypes B;
   const int m = static_cast<int>(vi.size()), ns = static_cast<int>(sidx.size()), sb = (ns + 3) / 4;
-  B.m = m; B.ns = ns; B.sb = sb;
+  B.m = m; B.ns = ns; B.sb = sb; B.step = step;
   B.GS.assign(static_cast<std::size_t>(m) * sb, 0);
   B.sum_obs.assign(m, 0.0);
   std::vector<int> bad(T, -1);
+  if (pf.dosage()) {  // H = round(dosage) into the codes, the rest on the step grid into the lists
+    std::vector<std::vector<int>> li(m);
+    std::vector<std::vector<int8_t>> ld(m);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(T)
+#endif
+    for (int j = 0; j < m; ++j) {
+      const std::uint16_t* x = pf.read_dosage(static_cast<std::size_t>(vi[j]), ik::tid());
+      if (!x) { bad[ik::tid()] = j; continue; }
+      uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
+      long long hs = 0, ds = 0;
+      for (int i = 0; i < ns; ++i) {
+        const std::uint16_t v = x[sidx[i]];
+        unsigned code = 3u;
+        if (v != PgenFile::kMissing) {
+          code = (static_cast<unsigned>(v) + 8192u) >> 14;
+          const int d = dosage_grid(v, code, step);
+          if (d) { li[j].push_back(i); ld[j].push_back(static_cast<int8_t>(d)); ds += d; }
+          hs += code;
+        }
+        dst[i >> 2] |= static_cast<uint8_t>(code << (2 * (i & 3)));
+      }
+      B.sum_obs[j] = static_cast<double>(hs) + step * static_cast<double>(ds);
+    }
+    for (int t = 0; t < T; ++t)
+      if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
+    set_dosage_lists(B, li, ld);
+    B.t_geno = ik::secs(t0);
+    return B;
+  }
+  B.dptr.assign(m + 1, 0);
   const bool ident = identity_samples(sidx.data(), ns, static_cast<int>(pf.samples()));
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(T)
@@ -171,6 +233,10 @@ struct PersonPlanes {
   int ns = 0, nbyte = 0;
   std::vector<uint8_t> het, hom;          // ns x nbyte
   std::vector<std::vector<int>> Mi;       // missing rows per person, ascending
+  double step = 0.01;                     // dosage grid
+  std::vector<long long> doff;            // ns + 1: person i's observed (row, d) pairs dl / dv[doff[i] .. doff[i + 1])
+  std::vector<int> dl;
+  std::vector<int8_t> dv;
   double t_planes = 0;
 };
 
@@ -212,6 +278,21 @@ inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
     }
   }
   std::vector<uint8_t>().swap(B.GS);
+  // dosage lists, person-major (counting sort of the per-row lists)
+  P.step = B.step;
+  P.doff.assign(static_cast<std::size_t>(ns) + 1, 0);
+  for (int i : B.di) ++P.doff[static_cast<std::size_t>(i) + 1];
+  for (int s = 0; s < ns; ++s) P.doff[s + 1] += P.doff[s];
+  P.dl.resize(B.di.size()); P.dv.resize(B.di.size());
+  {
+    std::vector<long long> pos(P.doff.begin(), P.doff.end() - 1);
+    for (int j = 0; j < m; ++j)
+      for (long long e = B.dptr[j]; e < B.dptr[j + 1]; ++e) {
+        const long long t = pos[B.di[e]]++;
+        P.dl[t] = j; P.dv[t] = B.dd[e];
+      }
+  }
+  std::vector<int>().swap(B.di); std::vector<int8_t>().swap(B.dd);
   P.t_planes = ik::secs(t0);
   return P;
 }
@@ -363,6 +444,14 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, doub
         const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
         const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
         float r = L.Aj[j] + plane_dot(aj, hi, oi_, nbyte);
+        {  // dosage part of the observed cells
+          const long long d0 = P.doff[b0 + i], d1 = P.doff[b0 + i + 1];
+          if (d0 < d1) {
+            float sd_ = 0;
+            for (long long e = d0; e < d1; ++e) sd_ += aj[P.dl[e]] * static_cast<float>(P.dv[e]);
+            r += static_cast<float>(P.step) * sd_;
+          }
+        }
         float r0 = 0, r1 = 0, r2 = 0, r3 = 0;  // independent partial sums (no single add chain)
         int bq = 0;
         for (; bq + 4 <= q; bq += 4) {

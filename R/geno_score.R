@@ -58,7 +58,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "), call. = FALSE)
   P[names(para)] <- para
   threads <- .threads(threads); P$mem_gb <- .mem_gb(P$mem_gb, threads)
-  if (!is.null(ld)) .check_delta(P$delta)
+  if (!is.null(ld)) { .check_delta(P$delta); .check_dosage_step(P$dosage_step) }
   w <- data.table::as.data.table(weights)
   if (!all(c(id_col, a1_col) %in% names(w))) stop("weights lacks ", id_col, " or ", a1_col, ".", call. = FALSE)
   if (is.null(score_cols))
@@ -165,7 +165,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
       out <- score_ld_block_cpp(pgen, length(iid), act, as.integer(wr$vi), as.integer(si - 1L), normalizePath(ef),
                                 wr$anchor, as.integer(wr$sign), P$thresh, P$delta, P$anchor_min_miss, Bb, threads,
                                 if (is.null(P$nb_people)) 0L else as.integer(P$nb_people), P$mem_gb,
-                                as.integer(wr$ld_index))
+                                as.integer(wr$ld_index), P$dosage_step)
       S <- S + out$score
       tick()
       ld_info[[b]] <- data.table::data.table(block = blocks[b], m = nrow(wr), scored = sum(rowSums(Bb != 0) > 0),
@@ -190,5 +190,6 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 #' rate), nb_people NULL (people per batch from mem_gb), mem_gb 2.
 #' @export
 geno_score_para <- function() {
-  list(chunk = 512L, progress = interactive(), thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2)
+  list(chunk = 512L, progress = interactive(), thresh = 0, delta = 0.01, anchor_min_miss = 0.01, nb_people = NULL, mem_gb = 2,
+       dosage_step = 0.01)
 }

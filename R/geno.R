@@ -115,16 +115,12 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   n <- as.integer(info$n); p <- as.integer(info$p)
   for (k in names(cols)) if (length(cols[[k]]) != p) stop("internal: column field ", k, " has the wrong length", call. = FALSE)
   for (k in names(rows)) if (length(rows[[k]]) != n) stop("internal: row field ", k, " has the wrong length", call. = FALSE)
-  obs <- n - info$n_miss
-  af <- info$obs_sum / (2 * obs)
-  af[obs <= 0] <- NA_real_
-  af[appended] <- NA_real_
   structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, a1 = cols$a1, a2 = cols$a2, sample = rows$sample,
                  impute = impute, scale = scale, center = info$mean, sd = info$sd, threads = threads,
                  dosage = isTRUE(info$dosage), dosage_nnz = info$dosage_nnz,
-                 appended = as.integer(appended), cache = new.env(parent = emptyenv()),
+                 appended = as.integer(appended),
                  id = cols$id, chr = cols$chr, pos = cols$pos, row = cols$row, flipped = cols$flipped,
-                 n_miss = info$n_miss, af = af, fid = rows$fid, file = file),
+                 n_miss = info$n_miss, af = info$af, fid = rows$fid, file = file),
             class = "geno")
 }
 
@@ -169,23 +165,7 @@ geno_append <- function(X, M, threads = X$threads) {
                    impute = X$impute, scale = X$scale, threads = X$threads, file = X$file,
                    appended = c(X$appended, p0 + seq_len(k)))
   for (f in setdiff(names(X), names(out))) out[[f]] <- X[[f]]  # fields set by the caller (e.g. SuSiE4I's `fill`) stay
-  A <- geno_dense_cpp(ptr, seq_len(X$n) - 1L, p0 + seq_len(k) - 1L, threads)  # stored values of the appended columns
-  K01 <- geno_xtm_cpp(X$ptr, A, threads)
-  K <- matrix(0, p, p)
-  K[seq_len(p0), seq_len(p0)] <- .geno_raw_xtx(X, threads)
-  K[seq_len(p0), p0 + seq_len(k)] <- K01
-  K[p0 + seq_len(k), seq_len(p0)] <- t(K01)
-  K[p0 + seq_len(k), p0 + seq_len(k)] <- dense_xtx_cpp(A, threads)
-  out$cache$xtx <- K
   out
-}
-
-# Raw (unstandardized) X'X of a geno, computed once per object.
-.geno_raw_xtx <- function(X, threads = X$threads) {
-  if (!is.null(X$cache) && !is.null(X$cache$xtx)) return(X$cache$xtx)
-  K <- geno_xtx_cpp(X$ptr, as.integer(threads))
-  if (!is.null(X$cache)) X$cache$xtx <- K
-  K
 }
 
 .geno_index <- function(x, ids, alt_ids, arg) {
@@ -236,10 +216,7 @@ print.geno <- function(x, ...) {
   rows <- if (missing(i)) seq_len(x$n) else seq_len(x$n)[i]
   cols <- if (missing(j)) seq_len(x$p) else if (is.character(j)) match(j, x$snp) else seq_len(x$p)[j]
   if (anyNA(rows) || anyNA(cols)) stop("subscript out of bounds", call. = FALSE)
-  G <- geno_dense_cpp(x$ptr, rows - 1L, cols - 1L, x$threads)
-  if (x$scale) {
-    G <- sweep(sweep(G, 2L, x$center[cols], "-"), 2L, .geno_div(x)[cols], "/")
-  }
+  G <- geno_dense_cpp(x$ptr, rows - 1L, cols - 1L, x$scale, x$threads)
   colnames(G) <- x$snp[cols]
   if (drop) drop(G) else G
 }
@@ -284,17 +261,12 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 #' @export
 geno_crossprod <- function(X, M = NULL, threads = X$threads) {
   if (is.null(M)) {
-    out <- .geno_raw_xtx(X, threads)
-    if (X$scale) {
-      d <- .geno_div(X)
-      out <- geno_std_cpp(out, X$center, X$center, X$n, d, d, .threads(threads))
-    }
+    out <- geno_xtx_cpp(X$ptr, X$scale, .threads(threads))
     dimnames(out) <- list(X$snp, X$snp)
     return(out)
   }
   M <- as.matrix(M) + 0
-  out <- geno_xtm_cpp(X$ptr, M, threads)
-  if (X$scale) out <- geno_std_cpp(out, X$center, colSums(M), 1, .geno_div(X), numeric(0), .threads(threads))
+  out <- geno_xtm_cpp(X$ptr, M, X$scale, threads)
   rownames(out) <- X$snp
   out
 }
@@ -313,13 +285,7 @@ geno_crossprod <- function(X, M = NULL, threads = X$threads) {
 geno_multiply <- function(X, B, threads = X$threads) {
   vec <- is.null(dim(B))
   B <- as.matrix(B) + 0
-  if (X$scale) {
-    B <- B / .geno_div(X)
-    out <- geno_mx_cpp(X$ptr, B, threads)
-    out <- sweep(out, 2L, colSums(B * X$center), "-")
-  } else {
-    out <- geno_mx_cpp(X$ptr, B, threads)
-  }
+  out <- geno_mx_cpp(X$ptr, B, X$scale, threads)
   if (vec) as.numeric(out) else out
 }
 
@@ -373,30 +339,10 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
 #' @export
 geno_cor <- function(A, B = NULL, threads = A$threads) {
   threads <- .threads(threads)
-  n <- A$n
-  if (is.null(B)) {
-    K <- .geno_raw_xtx(A, threads)
-    B <- A
-  } else {
-    if (!inherits(B, "geno") || B$n != n || !identical(A$sample, B$sample)) {
-      stop("A and B must be geno objects with the same samples in the same order.", call. = FALSE)
-    }
-    if (A$dosage_nnz == 0 && B$dosage_nnz == 0) {
-      K <- geno_cross_cpp(A$ptr, B$ptr, threads)
-    } else {
-      K <- matrix(0, A$p, B$p)
-      rows <- seq_len(n) - 1L
-      for (s in seq.int(1L, B$p, by = 64L)) {
-        cols <- s:min(B$p, s + 63L)
-        K[, cols] <- geno_xtm_cpp(A$ptr, geno_dense_cpp(B$ptr, rows, cols - 1L, threads), threads)
-      }
-    }
-  }
-  R <- geno_std_cpp(K, A$center, B$center, n, (n - 1) * A$sd, B$sd, threads)
-  R[A$sd == 0, ] <- NA_real_
-  R[, B$sd == 0] <- NA_real_
-  R <- pmin(pmax(R, -1), 1)
-  dimnames(R) <- list(A$snp, B$snp)
+  if (!is.null(B) && (!inherits(B, "geno") || B$n != A$n || !identical(A$sample, B$sample)))
+    stop("A and B must be geno objects with the same samples in the same order.", call. = FALSE)
+  R <- geno_cor_cpp(A$ptr, if (is.null(B)) NULL else B$ptr, threads)
+  dimnames(R) <- list(A$snp, if (is.null(B)) A$snp else B$snp)
   R
 }
 

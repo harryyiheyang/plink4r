@@ -1,4 +1,4 @@
-#' Impute hard-call missing genotypes from eigen.bin LD (whole block or a SNP window)
+#' Impute missing genotypes (hard calls or dosages) from eigen.bin LD (whole block or a SNP window)
 #'
 #' Works on the panel SNPs that are in the PGEN (the intersection S; panel SNPs absent from the PGEN are not
 #' carried). The panel need not share the PGEN's REF/ALT orientation, IDs or build: SNPs are aligned by ID and
@@ -10,9 +10,10 @@
 #' block (blocks are independent in the panel, so a region spanning blocks is imputed block by block).
 #' Stage 2: for SNPs with missing rate >= anchor_min_miss, shift the filled cells so that observed + filled
 #' allele count = 2 n p, then clip to [0, 2]; below the cutoff stage 1 is kept. anchor_min_miss < 0 disables it.
-#' A `geno` object (hard calls) may be given in place of the PGEN: its columns, counted allele (ALT = `a1`)
+#' A `geno` object (hard calls or dosages) may be given in place of the PGEN: its columns, counted allele (ALT = `a1`)
 #' and missing cells take the place of the .pvar and the file's missing calls, every row is imputed (subset
-#' first with [geno_subset()]), and BED-based objects work the same way. Dosage objects are not accepted.
+#' first with [geno_subset()]), and BED-based objects work the same way. Observed dosages enter z_O as they are (no hard-call threshold);
+#' a cell is missing when its dosage is missing.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam), or a `geno` object.
 #' @param ref panel SNP table; NULL (default) reads the .parquet in `ld_dir`. A parquet path or data.frame with
 #'   ID, block, ld_index (0-based eigen row), AF_PanUKB (frequency of alt) and, for orientation and position
@@ -26,6 +27,9 @@
 #' @param thresh eigenvalue variance kept; <= 0 keeps every stored pair.
 #' @param nb_people people per batch (NULL = largest batch whose S_i, rhs and SNP lists fit in `mem_gb`).
 #' @param mem_gb memory budget of the people batches; 0 takes it from [plink4r_resources()].
+#' @param dosage_step grid of the dosage part of an observed cell in the LD input: an observed dosage g enters
+#'   stage 1 as round(g) + dosage_step * round((g - round(g)) / dosage_step) (hard calls are exact). Only this
+#'   input is quantized; observed values are never changed. Must be >= 0.5 / 127 (the step count is int8).
 #' @param af optional anchor frequencies of the PGEN ALT allele, named by PGEN ID; they replace AF_PanUKB.
 #' @param cond optional IDs (panel or PGEN IDs; column names for a `geno` object) of the conditioning set:
 #'   only these SNPs enter S, so a person's missing cells are predicted from their observed calls at these SNPs
@@ -38,22 +42,25 @@
 #' @export
 genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
-                            mem_gb = 2, af = NULL, cond = NULL) {
+                            mem_gb = 2, af = NULL, cond = NULL, dosage_step = 0.01) {
   .genotype_impute(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh, threads,
-                   nb_people, mem_gb, af, cond)
+                   nb_people, mem_gb, af, cond, dosage_step = dosage_step)
 }
 
 # write_ptr: for a geno object, the external pointer of a fresh clone of it (same columns, nobody else references
 # it) into which the final fills of the imputed SNPs are written directly; the result then has no `fill` table.
+# aligned: the panel already aligned to this PGEN / object (.ld_align of the whole panel), when the caller has
+# it; the panel is then neither read nor aligned again.
 .genotype_impute <- function(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh,
-                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL) {
+                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL, dosage_step = 0.01,
+                             aligned = NULL) {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
+  .check_dosage_step(dosage_step)
   obj <- inherits(pfile, "geno")
   if (!is.null(write_ptr) && !obj) stop("internal: write_ptr needs a geno object", call. = FALSE)
   if (obj) {
     if (!is.null(sample)) stop("with a geno object, sample must be NULL (use geno_subset() first)", call. = FALSE)
-    if (pfile$dosage) stop("LD imputation on an object needs hard calls; for a PGEN with dosages give the PGEN prefix.", call. = FALSE)
     X <- pfile
     pvar <- .geno_vartab(X)  # appended columns have allele_ct 0: never aligned to the panel
     iid <- X$sample
@@ -67,10 +74,11 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
   }
   if (is.null(snps)) {
     if (is.null(block)) stop("give `block` or `snps`")
-    al <- .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)
+    al <- if (!is.null(aligned)) aligned[aligned$block %in% block] else
+      .ld_align(.ld_panel(ref, ld_dir, blocks = block), pvar)
     jobs <- list(list(block = block, lo = NULL, hi = NULL, keep = NULL))
   } else {
-    al <- .ld_align(.ld_panel(ref, ld_dir), pvar)  # whole panel: `snps` may be panel or PGEN IDs
+    al <- if (!is.null(aligned)) aligned else .ld_align(.ld_panel(ref, ld_dir), pvar)  # whole panel: `snps` may be panel or PGEN IDs
     rs <- al[al$ID %in% snps | pvar$ID[al$vi + 1L] %in% snps]
     if (nrow(rs) < length(unique(snps))) warning(length(unique(snps)) - nrow(rs), " of `snps` not in both `ref` and the PGEN")
     if (!nrow(rs)) stop("none of `snps` is in both `ref` and ", what)
@@ -103,15 +111,15 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
     out <- if (!is.null(write_ptr)) {
       genotype_fill_ld_geno_cpp(write_ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
                                 as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
-                                mem_gb, as.integer(w$ld_index))
+                                mem_gb, as.integer(w$ld_index), dosage_step)
     } else if (obj) {
       genotype_impute_geno_cpp(X$ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
                                as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
-                               mem_gb, as.integer(w$ld_index))
+                               mem_gb, as.integer(w$ld_index), dosage_step)
     } else {
       genotype_impute_cpp(normalizePath(paste0(pfile, ".pgen")), length(iid), pvar$allele_ct, as.integer(w$vi),
                           as.integer(si), normalizePath(ef), p_alt, as.integer(w$sign), thresh, delta,
-                          anchor_min_miss, kr, as.integer(threads), nbp, mem_gb, as.integer(w$ld_index))
+                          anchor_min_miss, kr, as.integer(threads), nbp, mem_gb, as.integer(w$ld_index), dosage_step)
     }
     f <- NULL
     if (is.null(write_ptr)) {

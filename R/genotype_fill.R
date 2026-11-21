@@ -21,8 +21,8 @@
 #'
 #' The file route of earlier versions is kept: when `x` is a character PLINK2 prefix the call is
 #' `genotype_fill(pfile, snp, ld, sample, para)` and behaves as before (match `snp` to the .pvar, QC, per-SNP
-#' fill constants and LD cells, for `geno_open(fill = )`). It stays the route for LD fills of a PGEN with
-#' dosages (the object route takes hard calls only).
+#' fill constants and LD cells, for `geno_open(fill = )`). The object route takes hard calls and dosages alike
+#' (observed dosages condition the LD fill; missing dosages are filled).
 #'
 #' @param x A `geno` object; or (old route) a PLINK2 prefix.
 #' @param ... Old route only: `snp`, `ld`, `sample` by position or name (see `.genotype_fill_file`).
@@ -97,8 +97,6 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
   if (!is.null(ld) && any(x$n_miss > 0)) {
     P$mem_gb <- .mem_gb(P$mem_gb, P$threads)
     .check_delta(P$delta)
-    if (x$dosage) stop("LD fill on an object needs hard calls; for a PGEN with dosages use the file route ",
-                       "genotype_fill(pfile, snp, ld, sample) and geno_open(pgenfile =, fill = ).", call. = FALSE)
     pan <- .ld_panel(ld$ref, ld$dir)
     al <- .ld_align(pan, .geno_vartab(x))
     use <- sort(intersect(al$vi + 1L, which(sel & x$n_miss > 0 & !(seq_len(p) %in% x$appended))))
@@ -108,7 +106,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       # the kernel writes the LD fills straight into the new object (no per-cell table in R)
       ld_write <- function(ptr) .genotype_impute(x, pan, ld$dir, NULL, x$snp[use], P$flank, NULL, P$delta,
                                                  P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb, a, cond,
-                                                 write_ptr = ptr)
+                                                 write_ptr = ptr, dosage_step = P$dosage_step, aligned = al)
     }
   }
   .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
@@ -116,39 +114,36 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
                ld_write = ld_write)
 }
 
-# Refill the missing cells of X through geno_fill_cpp. Per column f = default ("mean": observed mean, 0 when
-# every cell is missing; "keep": the current fill), then af (anchored), then const; cells (CSR from
-# .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
+# Refill the missing cells of X through geno_fill_cpp, which computes the per-column value f: default ("mean":
+# observed mean, 0 when every cell is missing; "keep": the current fill), then af (anchored), then const; cells
+# (CSR from .geno_fill_spec) win over all. inplace only for an object nothing else references. ld_write(ptr), when given,
 # writes the LD fills into the new store after the per-column values and before the cells (so cells > LD > f).
 .geno_refill <- function(X, af = NULL, const = NULL, cells = NULL, default = c("mean", "keep"), inplace = FALSE,
                          impute = X$impute, threads = X$threads, cols = NULL, ld_write = NULL) {
   default <- match.arg(default)
-  p <- X$p; n <- X$n
+  p <- X$p
   if (!is.null(af)) {
     af <- as.numeric(af)
     if (length(af) != p) stop("af needs one value per selected variant.", call. = FALSE)
     if (any(af < 0 | af > 1, na.rm = TRUE)) stop("af must lie in [0, 1].", call. = FALSE)
   }
-  info <- geno_info_cpp(X$ptr)
-  m <- info$n_miss; S <- info$obs_sum
-  f <- if (default == "mean") ifelse(m < n, S / (n - m), 0) else rep(NaN, p)
-  if (length(af)) {
-    ok <- is.finite(af) & m > 0
-    f[ok] <- pmin(2, pmax(0, (2 * n * af[ok] - S[ok]) / m[ok]))
-  }
   if (length(const)) {
-    ok <- is.finite(const)
-    f[ok] <- const[ok]
+    const <- as.numeric(const)
+    if (length(const) != p) stop("const needs one value per selected variant.", call. = FALSE)
   }
-  f[m == 0] <- NaN
-  if (!is.null(cols)) f[!cols] <- NaN  # columns outside `cols` keep their current fill
+  um <- default == "mean"
+  af <- if (is.null(af)) numeric(0) else af
+  const <- if (is.null(const)) numeric(0) else const
+  cols <- if (is.null(cols)) logical(0) else as.logical(cols)
   if (is.null(cells) || !length(cells$ptr)) cells <- list(ptr = integer(0), i = integer(0), g = numeric(0))
+  th <- .threads(threads)
   if (is.null(ld_write)) {
-    ptr <- geno_fill_cpp(X$ptr, f, cells$ptr, cells$i, cells$g, inplace, .threads(threads))
+    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, cells$ptr, cells$i, cells$g, inplace, th)
   } else {
-    ptr <- geno_fill_cpp(X$ptr, f, integer(0), integer(0), numeric(0), inplace, .threads(threads))
+    ptr <- geno_fill_cpp(X$ptr, um, af, const, cols, integer(0), integer(0), numeric(0), inplace, th)
     ld_write(ptr)
-    if (length(cells$ptr)) ptr <- geno_fill_cpp(ptr, numeric(0), cells$ptr, cells$i, cells$g, TRUE, .threads(threads))
+    if (length(cells$ptr))
+      ptr <- geno_fill_cpp(ptr, FALSE, numeric(0), numeric(0), logical(0), cells$ptr, cells$i, cells$g, TRUE, th)
   }
   .geno_new(ptr, .geno_cols(X), list(sample = X$sample, fid = X$fid), impute = impute, scale = X$scale,
             threads = X$threads, file = X$file, appended = X$appended)
@@ -267,10 +262,9 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
     m[, in_ld := (row - 1L) %in% al$vi]
     if (any(m$in_ld)) {
       ua <- m[in_ld == TRUE & is.finite(p_alt)]
-      gi <- genotype_impute(pfile, pan, ld$dir, snps = m$ID[m$in_ld], flank = P$flank, sample = iid[si],
-                            delta = P$delta, anchor_min_miss = P$anchor_min_miss, thresh = P$thresh,
-                            threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID),
-                            cond = P$cond)
+      gi <- .genotype_impute(pfile, pan, ld$dir, NULL, m$ID[m$in_ld], P$flank, iid[si], P$delta,
+                             P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb,
+                             stats::setNames(ua$p_alt, ua$ID), P$cond, dosage_step = P$dosage_step, aligned = al)
       cells <- gi$fill[, .(ID = snp, IID, g)]
       method <- paste0("scheme4+", method)
     }
@@ -288,9 +282,10 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
 #' missing rate exceeds it); delta 0.01 ridge of stage 1; anchor_min_miss 0.01 (stage 2 only at or above
 #' this missing rate); flank 2500 panel rows each side; thresh 0 = all stored eigenpairs; threads; mem_gb
 #' memory budget for the people batches of stage 1; cond NULL = condition on every panel SNP of the window,
-#' else the IDs of the conditioning set (see `cond` of [genotype_impute()]; the object route's `snps` sets it).
+#' else the IDs of the conditioning set (see `cond` of [genotype_impute()]; the object route's `snps` sets it);
+#' dosage_step 0.01 grid of the dosage part of an observed cell in the LD input (see [genotype_impute()]).
 #' @export
 genotype_fill_para <- function() {
   list(build = NULL, maf = 0.01, miss_max = 1, delta = 0.01, anchor_min_miss = 0.01, flank = 2500L,
-       thresh = 0, threads = 4L, mem_gb = 2, cond = NULL)
+       thresh = 0, threads = 4L, mem_gb = 2, cond = NULL, dosage_step = 0.01)
 }

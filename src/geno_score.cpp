@@ -233,7 +233,7 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
                               Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                               const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                               double anchor_min_miss, Rcpp::NumericMatrix B, int threads, int nb_people,
-                              double mem_gb, Rcpp::IntegerVector rows) {
+                              double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const plink4r::EigenBlock eb = plink4r::read_eigen_block(eigen_file, thresh);
   const std::vector<int> rw(rows.begin(), rows.end());
@@ -251,7 +251,7 @@ Rcpp::List score_ld_block_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerV
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
-  plink4r::BlockGenotypes G = plink4r::read_block_genotypes(pf, vi, sidx, T);
+  plink4r::BlockGenotypes G = plink4r::read_block_genotypes(pf, vi, sidx, dosage_step, T);
   const int ns = G.ns;
   const plink4r::PersonPlanes P = plink4r::build_planes(L, G, T);
   const plink4r::Stage1Result R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);

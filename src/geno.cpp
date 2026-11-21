@@ -67,6 +67,7 @@ struct Geno {
   std::vector<double> mu, sd;   // column mean and sd (n - 1) of X = H + D
   std::vector<double> nmiss;    // missing calls per variant before filling
   std::vector<std::vector<std::uint32_t>> M;  // rows of those missing calls per variant, ascending
+  std::vector<double> xtx;      // raw X'X (p x p), formed once on first use; empty = not formed (cleared on any change)
   std::size_t dnnz() const {
     std::size_t s = 0;
     for (const DCol& c : D) s += c.q.size();
@@ -404,6 +405,81 @@ void add_d_xtx(const Geno& g, double* out, int threads, const int* cols = nullpt
   }
 }
 
+// The D terms of A'B (a: p_a columns, b: p_b columns, same rows) added to out (p_a x p_b, holding Ha'Hb):
+// Ha'Db + Da'Db (a's columns expanded as H + D, b's D entries visited) and Da'Hb (b's columns expanded as H,
+// a's D entries visited). Cost: the D entries of each object times the columns of the other.
+void add_d_cross(const Geno& a, const Geno& b, double* out, int threads) {
+  const std::size_t n = a.n, pa = a.p, pb = b.p;
+  constexpr std::size_t T = 8;
+  // expands columns [x0, x0 + nx) of g into buf (n x T): H, plus D when with_d
+  auto expand = [n](const Geno& g, std::size_t x0, std::size_t nx, bool with_d, std::vector<double>& buf) {
+    std::fill(buf.begin(), buf.end(), 0.0);
+    for (std::size_t t = 0; t < nx; ++t) {
+      const std::size_t j = x0 + t;
+      const u64* lo = g.G.lo(j);
+      const u64* hi = g.G.hi(j);
+      for (std::size_t w = 0; w < g.G.words; ++w) {
+        for (u64 bits = lo[w]; bits; bits &= bits - 1) buf[(64 * w + __builtin_ctzll(bits)) * T + t] = 1.0;
+        for (u64 bits = hi[w]; bits; bits &= bits - 1) buf[(64 * w + __builtin_ctzll(bits)) * T + t] = 2.0;
+      }
+      if (!with_d) continue;
+      const DCol& c = g.D[j];
+      std::size_t e = 0;
+      for (std::size_t w = 0; w < c.mask.size(); ++w)
+        for (u64 bits = c.mask[w]; bits; bits &= bits - 1)
+          buf[(64 * w + __builtin_ctzll(bits)) * T + t] += c.q[e++] * c.unit;
+    }
+    (void) n;
+  };
+  // acc[t] = sum over the D entries of column j of g: d * buf[row, t]
+  auto dsum_rows = [](const Geno& g, std::size_t j, const std::vector<double>& buf, double* acc) {
+    const DCol& c = g.D[j];
+    std::size_t e = 0;
+    for (std::size_t w = 0; w < c.mask.size(); ++w)
+      for (u64 bits = c.mask[w]; bits; bits &= bits - 1) {
+        const double d = c.q[e++] * c.unit;
+        const double* r = buf.data() + (64 * w + __builtin_ctzll(bits)) * T;
+        for (std::size_t t = 0; t < T; ++t) acc[t] += d * r[t];
+      }
+  };
+  if (b.dnnz()) {  // (Ha + Da)' Db
+    const std::size_t tiles = (pa + T - 1) / T;
+    #pragma omp parallel num_threads(threads)
+    {
+      std::vector<double> buf(n * T);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles); ++tt) {
+        const std::size_t a0 = static_cast<std::size_t>(tt) * T, na = std::min(T, pa - a0);
+        expand(a, a0, na, true, buf);
+        for (std::size_t jb = 0; jb < pb; ++jb) {
+          if (b.D[jb].mask.empty()) continue;
+          double acc[T] = {};
+          dsum_rows(b, jb, buf, acc);
+          for (std::size_t t = 0; t < na; ++t) out[a0 + t + jb * pa] += acc[t];
+        }
+      }
+    }
+  }
+  if (a.dnnz()) {  // Da' Hb
+    const std::size_t tiles = (pb + T - 1) / T;
+    #pragma omp parallel num_threads(threads)
+    {
+      std::vector<double> buf(n * T);
+      #pragma omp for schedule(dynamic, 1)
+      for (std::ptrdiff_t tt = 0; tt < static_cast<std::ptrdiff_t>(tiles); ++tt) {
+        const std::size_t b0 = static_cast<std::size_t>(tt) * T, nb = std::min(T, pb - b0);
+        expand(b, b0, nb, false, buf);
+        for (std::size_t ja = 0; ja < pa; ++ja) {
+          if (a.D[ja].mask.empty()) continue;
+          double acc[T] = {};
+          dsum_rows(a, ja, buf, acc);
+          for (std::size_t t = 0; t < nb; ++t) out[ja + (b0 + t) * pa] += acc[t];
+        }
+      }
+    }
+  }
+}
+
 } // namespace
 
 // [[Rcpp::export]]
@@ -491,16 +567,17 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
 
 namespace {
 
-// Sum of the stored values of column j over its observed (not missing) cells. Genotype columns (unit
-// 1/16384) are summed exactly in int16 steps, so the result equals the sum of the file's observed calls
-// (hard calls) or dosages; an appended column (no missing cells) gives its column sum.
+// Sum of the stored values of column j over its observed (not missing) cells: the column sum (plane sum + D
+// sum, both kept) less the missing cells, so only the missing cells are visited. A genotype column's D sum is
+// a sum of multiples of 1/16384 and is exact in double, so the result equals the sum of the file's observed
+// calls (hard calls) or dosages; an appended column (no missing cells) gives its column sum.
 double obs_sum_col(const Geno& g, std::size_t j) {
   const DCol& c = g.D[j];
-  if (c.unit != kDUnit) return static_cast<double>(g.G.s[j]) + g.dsum[j];
-  std::int64_t tot = 16384 * static_cast<std::int64_t>(g.G.s[j]);
-  for (std::int16_t q : c.q) tot += q;
-  for (std::uint32_t i : g.M[j]) tot -= 16384 * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
-  return static_cast<double>(tot) / 16384.0;
+  double tot = static_cast<double>(g.G.s[j]) + g.dsum[j];
+  if (c.unit != kDUnit) return tot;
+  std::int64_t miss = 0;
+  for (std::uint32_t i : g.M[j]) miss += 16384 * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
+  return tot - static_cast<double>(miss) / 16384.0;
 }
 
 // Rebuilds D of column j from (row, q) entries in ascending row order and refreshes the column's sums,
@@ -666,37 +743,69 @@ void std_into(const double* k, std::size_t r, std::size_t c, const double* u, co
 
 }  // namespace
 
+namespace {
+
+// The raw X'X of g, formed on first use and kept in g (cleared whenever g's values change).
+const std::vector<double>& raw_xtx(Geno& g, int threads) {
+  if (g.xtx.empty()) {
+    g.xtx.assign(g.p * g.p, 0.0);
+    xtx_into(g, nullptr, 0, g.xtx.data(), threads);
+  }
+  return g.xtx;
+}
+
+// Column divisors of the standardized matrix: sd, or 1 for a constant column.
+std::vector<double> col_div(const Geno& g) {
+  std::vector<double> d(g.p);
+  for (std::size_t j = 0; j < g.p; ++j) d[j] = g.sd[j] > 0 ? g.sd[j] : 1.0;
+  return d;
+}
+
+}  // namespace
+
+// Per-column summaries of the store: mean, sd, missing calls, the sum of the observed cells (obs_sum) and the
+// observed allele frequency af = obs_sum / (2 observed cells) (NA with no observed cell and for appended columns).
 // [[Rcpp::export]]
 Rcpp::List geno_info_cpp(SEXP ptr) {
   Rcpp::XPtr<Geno> g(ptr);
-  std::vector<double> os(g->p);
-  for (std::size_t j = 0; j < g->p; ++j) os[j] = obs_sum_col(*g, j);
+  const std::size_t p = g->p;
+  Rcpp::NumericVector os(p), af(p);
+  for (std::size_t j = 0; j < p; ++j) {
+    os[j] = obs_sum_col(*g, j);
+    const double obs = static_cast<double>(g->n) - g->nmiss[j];
+    af[j] = (g->D[j].unit != kDUnit || obs <= 0) ? NA_REAL : os[j] / (2.0 * obs);
+  }
   return Rcpp::List::create(Rcpp::Named("n") = static_cast<double>(g->n),
-                            Rcpp::Named("p") = static_cast<double>(g->p),
+                            Rcpp::Named("p") = static_cast<double>(p),
                             Rcpp::Named("mean") = g->mu,
                             Rcpp::Named("sd") = g->sd,
                             Rcpp::Named("n_miss") = g->nmiss,
                             Rcpp::Named("obs_sum") = os,
+                            Rcpp::Named("af") = af,
                             Rcpp::Named("dosage") = g->dosage,
                             Rcpp::Named("dosage_nnz") = static_cast<double>(g->dnnz()),
                             Rcpp::Named("bytes_H") = bytes_h(*g),
                             Rcpp::Named("bytes_D") = bytes_d(*g));
 }
 
-// X'X of the stored, unstandardized matrix.
+// X'X of the stored matrix (formed once per object and kept), or of its column-standardized form (scale).
 // [[Rcpp::export]]
-Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, int threads) {
+Rcpp::NumericMatrix geno_xtx_cpp(SEXP ptr, bool scale, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t p = g->p;
+  const std::vector<double>& K = raw_xtx(*g, threads);
   Rcpp::NumericMatrix out(p, p);
-  xtx_into(*g, nullptr, 0, out.begin(), threads);
+  if (!scale) { std::copy(K.begin(), K.end(), out.begin()); return out; }
+  const std::vector<double> d = col_div(*g);
+  std_into(K.data(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out.begin(),
+           threads);
   return out;
 }
 
-// X'M for a dense n x k matrix M.
+// X'M for a dense n x k matrix M, or (scale) that of the column-standardized X.
 // [[Rcpp::export]]
-Rcpp::NumericMatrix geno_xtm_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
+Rcpp::NumericMatrix geno_xtm_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, bool scale, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t n = g->n, p = g->p;
@@ -704,19 +813,36 @@ Rcpp::NumericMatrix geno_xtm_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int thr
   if (static_cast<std::size_t>(M.nrow()) != n) Rcpp::stop("M must have one row per sample.");
   Rcpp::NumericMatrix out(p, k);
   xtm_into(*g, M.begin(), k, out.begin(), threads);
+  if (!scale) return out;
+  std::vector<double> cs(k, 0.0);
+  for (std::size_t c = 0; c < k; ++c)
+    for (std::size_t i = 0; i < n; ++i) cs[c] += M[i + c * n];
+  const std::vector<double> d = col_div(*g);
+  std_into(out.begin(), p, k, g->mu.data(), cs.data(), 1.0, d.data(), nullptr, out.begin(), threads);
   return out;
 }
 
-// X B for a dense p x k matrix B; all-zero rows of B are skipped.
+// X B for a dense p x k matrix B (all-zero rows of B are skipped), or (scale) that of the column-standardized X:
+// X (B / sd) - 1 (mu' (B / sd)).
 // [[Rcpp::export]]
-Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, int threads) {
+Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, bool scale, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t n = g->n, p = g->p;
   const std::size_t k = B.ncol();
   if (static_cast<std::size_t>(B.nrow()) != p) Rcpp::stop("B must have one row per variant.");
   Rcpp::NumericMatrix out(n, k);
-  mx_into(*g, B.begin(), k, out.begin(), threads);
+  if (!scale) { mx_into(*g, B.begin(), k, out.begin(), threads); return out; }
+  const std::vector<double> d = col_div(*g);
+  std::vector<double> Bs(p * k), shift(k, 0.0);
+  for (std::size_t c = 0; c < k; ++c)
+    for (std::size_t j = 0; j < p; ++j) {
+      Bs[j + c * p] = B[j + c * p] / d[j];
+      shift[c] += Bs[j + c * p] * g->mu[j];
+    }
+  mx_into(*g, Bs.data(), k, out.begin(), threads);
+  for (std::size_t c = 0; c < k; ++c)
+    for (std::size_t i = 0; i < n; ++i) out[i + c * n] -= shift[c];
   return out;
 }
 
@@ -766,69 +892,91 @@ SEXP geno_append_cpp(SEXP ptr, const Rcpp::NumericMatrix& M, int threads) {
     plane_stats(*g, j);
   }
   finish_stats(*g);
+  // X'X of the source already formed: extend it by the appended columns (X'A from their stored values)
+  if (!a->xtx.empty()) {
+    const std::size_t p = p0 + k;
+    std::vector<int> rows(n), cols(k);
+    for (std::size_t i = 0; i < n; ++i) rows[i] = static_cast<int>(i);
+    for (std::size_t c = 0; c < k; ++c) cols[c] = static_cast<int>(p0 + c);
+    std::vector<double> A(n * k), XA(p * k);
+    dense_into(*g, rows.data(), n, cols.data(), k, A.data(), threads);
+    xtm_into(*g, A.data(), k, XA.data(), threads);
+    g->xtx.assign(p * p, 0.0);
+    for (std::size_t c = 0; c < p0; ++c)
+      std::copy(a->xtx.begin() + c * p0, a->xtx.begin() + (c + 1) * p0, g->xtx.begin() + c * p);
+    for (std::size_t c = 0; c < k; ++c)
+      for (std::size_t r = 0; r < p; ++r) {
+        g->xtx[r + (p0 + c) * p] = XA[r + c * p];
+        g->xtx[(p0 + c) + r * p] = XA[r + c * p];
+      }
+  }
   return g;
 }
 
-// Raw A'B of two geno objects over the same samples, both without D (hard
-// calls, median fill): exact popcount on the planes.
+// Raw A'B of two geno objects over the same samples: exact popcount on the planes (Ha'Hb), plus the D terms
+// when either object has an int16 part (add_d_cross); no dense copy of either matrix.
 // [[Rcpp::export]]
 Rcpp::NumericMatrix geno_cross_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
   Rcpp::XPtr<Geno> a(ptr_a), b(ptr_b);
   threads = resolve_threads(threads);
   if (a->n != b->n) Rcpp::stop("A and B must have the same samples.");
-  if (a->dnnz() || b->dnnz()) Rcpp::stop("geno_cross_cpp needs hard-call genotypes without D.");
   const TileKernel kernel = select_kernel();
   Rcpp::NumericMatrix out(a->p, b->p);
   dot_block(a->G, 0, a->p, b->G, 0, b->p, false, out.begin(), a->p, threads, kernel);
+  add_d_cross(*a, *b, out.begin(), threads);
   return out;
 }
 
-// Dense block X[rows, cols] of the stored, unstandardized matrix (0-based).
+// cor(A, B) of the columns of two geno objects over the same samples (B = A when ptr_b is NULL: from A's kept
+// X'X), from the raw cross products: (K - n mu_a mu_b') / ((n - 1) sd_a sd_b'), NA for a constant column,
+// clipped to [-1, 1].
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_cor_cpp(SEXP ptr_a, SEXP ptr_b, int threads) {
+  Rcpp::XPtr<Geno> a(ptr_a);
+  threads = resolve_threads(threads);
+  const bool self = Rf_isNull(ptr_b);
+  Rcpp::XPtr<Geno> b(self ? ptr_a : ptr_b);
+  if (a->n != b->n) Rcpp::stop("A and B must have the same samples.");
+  const std::size_t pa = a->p, pb = b->p;
+  Rcpp::NumericMatrix out(pa, pb);
+  if (self) {
+    const std::vector<double>& K = raw_xtx(*a, threads);
+    std::copy(K.begin(), K.end(), out.begin());
+  } else {
+    dot_block(a->G, 0, pa, b->G, 0, pb, false, out.begin(), pa, threads, select_kernel());
+    add_d_cross(*a, *b, out.begin(), threads);
+  }
+  const double n = static_cast<double>(a->n);
+  std::vector<double> da(pa);
+  for (std::size_t i = 0; i < pa; ++i) da[i] = (n - 1) * a->sd[i];
+  std_into(out.begin(), pa, pb, a->mu.data(), b->mu.data(), n, da.data(), b->sd.data(), out.begin(), threads);
+  double* o = out.begin();
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(pb); ++jj) {
+    const std::size_t j = static_cast<std::size_t>(jj);
+    for (std::size_t i = 0; i < pa; ++i) {
+      double& r = o[i + j * pa];
+      r = (a->sd[i] == 0 || b->sd[j] == 0) ? NA_REAL : std::min(1.0, std::max(-1.0, r));
+    }
+  }
+  return out;
+}
+
+// Dense block X[rows, cols] of the stored matrix (0-based), or (scale) of the column-standardized matrix.
 // [[Rcpp::export]]
 Rcpp::NumericMatrix geno_dense_cpp(SEXP ptr, const Rcpp::IntegerVector& rows,
-                                   const Rcpp::IntegerVector& cols, int threads) {
+                                   const Rcpp::IntegerVector& cols, bool scale, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
   const std::size_t nr = rows.size(), nc = cols.size();
   Rcpp::NumericMatrix out(nr, nc);
   dense_into(*g, rows.begin(), nr, cols.begin(), nc, out.begin(), threads);
-  return out;
-}
-
-// Standardized products in C++ (no BLAS from R): out = (K - s u v') / (da db'), elementwise; an empty
-// da or db is 1. geno_crossprod / geno_cor give their centered, scaled forms through this.
-// [[Rcpp::export]]
-Rcpp::NumericMatrix geno_std_cpp(const Rcpp::NumericMatrix& K, const Rcpp::NumericVector& u,
-                                 const Rcpp::NumericVector& v, double s, const Rcpp::NumericVector& da,
-                                 const Rcpp::NumericVector& db, int threads) {
-  threads = resolve_threads(threads);
-  const std::size_t r = K.nrow(), c = K.ncol();
-  if (static_cast<std::size_t>(u.size()) != r || static_cast<std::size_t>(v.size()) != c) Rcpp::stop("u, v do not match K.");
-  const bool ha = da.size() > 0, hb = db.size() > 0;
-  if ((ha && static_cast<std::size_t>(da.size()) != r) || (hb && static_cast<std::size_t>(db.size()) != c)) Rcpp::stop("da, db do not match K.");
-  Rcpp::NumericMatrix out(r, c);
-  std_into(K.begin(), r, c, u.begin(), v.begin(), s, ha ? da.begin() : nullptr, hb ? db.begin() : nullptr, out.begin(),
-           threads);
-  return out;
-}
-
-// A'A of a dense n x k matrix (double, columns pairs shared out by OpenMP).
-// [[Rcpp::export]]
-Rcpp::NumericMatrix dense_xtx_cpp(const Rcpp::NumericMatrix& A, int threads) {
-  threads = resolve_threads(threads);
-  const std::size_t n = A.nrow(), k = A.ncol();
-  Rcpp::NumericMatrix out(k, k);
-  const double* a = A.begin();
-  double* o = out.begin();
-  #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
-  for (std::ptrdiff_t jj = 0; jj < static_cast<std::ptrdiff_t>(k); ++jj) {
-    const std::size_t j = static_cast<std::size_t>(jj);
-    for (std::size_t i = j; i < k; ++i) {
-      double acc = 0.0;
-      for (std::size_t r = 0; r < n; ++r) acc += a[r + i * n] * a[r + j * n];
-      o[i + j * k] = acc; o[j + i * k] = acc;
+  if (scale)
+    for (std::size_t c = 0; c < nc; ++c) {
+      const std::size_t j = static_cast<std::size_t>(cols[c]);
+      const double mu = g->mu[j], d = g->sd[j] > 0 ? g->sd[j] : 1.0;
+      for (std::size_t r = 0; r < nr; ++r) out[r + c * nr] = (out[r + c * nr] - mu) / d;
     }
-  }
   return out;
 }
 
@@ -1075,29 +1223,48 @@ void fill_column(Geno& g, std::size_t j, bool hasc, double fc, const RowT* ci, c
 
 // The one fill routine: writes the missing cells (rows M[j]) of ptr. Column j's missing cells take the
 // per-cell value when given (CSR: cells of column j at cell_ptr[j]..cell_ptr[j+1], 0-based row cell_i
-// ascending, value cell_g; the first of repeated rows wins), else fill_c[j] when finite, else keep their
-// current value. A value f is stored as H = round(f) (halves up, within 0..2) and D = f - H in 1/16384.
-// Cells not missing are never touched. inplace = TRUE changes ptr itself (only for an object nobody else
-// references yet); otherwise a modified copy is returned and ptr is unchanged.
+// ascending, value cell_g; the first of repeated rows wins), else the column value f_j when defined, else keep
+// their current value. f_j, for a column with missing cells (and selected: cols empty or cols[j]): the observed
+// mean when use_mean (0 when every cell is missing); replaced by the anchored value
+// min(2, max(0, (2 n af_j - obs_sum_j) / missing_j)) where af_j is finite; replaced by const_j where finite.
+// af and fill_const are empty or one value per column. A value f is stored as H = round(f) (halves up, within
+// 0..2) and D = f - H in 1/16384. Cells not missing are never touched. inplace = TRUE changes ptr itself (only
+// for an object nobody else references yet); otherwise a modified copy is returned and ptr is unchanged.
 // [[Rcpp::export]]
-SEXP geno_fill_cpp(SEXP ptr, const Rcpp::NumericVector& fill_c, const Rcpp::IntegerVector& cell_ptr,
+SEXP geno_fill_cpp(SEXP ptr, bool use_mean, const Rcpp::NumericVector& af, const Rcpp::NumericVector& fill_const,
+                   const Rcpp::LogicalVector& cols, const Rcpp::IntegerVector& cell_ptr,
                    const Rcpp::IntegerVector& cell_i, const Rcpp::NumericVector& cell_g, bool inplace, int threads) {
   Rcpp::XPtr<Geno> src(ptr);
   threads = resolve_threads(threads);
   const std::size_t p = src->p;
-  const bool hc = fill_c.size() > 0, hcell = cell_ptr.size() > 0;
-  if (hc && static_cast<std::size_t>(fill_c.size()) != p) Rcpp::stop("fill constants must have one value per variant.");
+  const double n = static_cast<double>(src->n);
+  const bool hcell = cell_ptr.size() > 0;
+  if ((af.size() && static_cast<std::size_t>(af.size()) != p) ||
+      (fill_const.size() && static_cast<std::size_t>(fill_const.size()) != p) ||
+      (cols.size() && static_cast<std::size_t>(cols.size()) != p))
+    Rcpp::stop("af, fill_const and cols must be empty or have one value per variant.");
   if (hcell) {
     if (static_cast<std::size_t>(cell_ptr.size()) != p + 1) Rcpp::stop("cell_ptr must have p + 1 entries.");
     if (cell_i.size() != cell_g.size() || cell_ptr[p] != cell_i.size()) Rcpp::stop("cell_i / cell_g do not match cell_ptr.");
   }
-  for (std::size_t j = 0; j < static_cast<std::size_t>(fill_c.size()); ++j)
+  std::vector<double> fill_c(p, std::nan(""));
+  for (std::size_t j = 0; j < p; ++j) {
+    const double m = src->nmiss[j];
+    if (m == 0 || (cols.size() && cols[j] != TRUE)) continue;
+    double f = std::nan("");
+    if (use_mean) f = m < n ? obs_sum_col(*src, j) / (n - m) : 0.0;
+    if (af.size() && std::isfinite(af[j])) f = std::min(2.0, std::max(0.0, (2.0 * n * af[j] - obs_sum_col(*src, j)) / m));
+    if (fill_const.size() && std::isfinite(fill_const[j])) f = fill_const[j];
+    fill_c[j] = f;
+  }
+  for (std::size_t j = 0; j < p; ++j)
     if (!std::isnan(fill_c[j]) && !fill_value_ok(fill_c[j])) Rcpp::stop("fill values must be finite and within (-2, 4).");
   for (R_xlen_t k = 0; k < cell_g.size(); ++k)
     if (!fill_value_ok(cell_g[k])) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
   Rcpp::XPtr<Geno> out = inplace ? src : Rcpp::XPtr<Geno>(new Geno(*src), true);
   Geno& g = *out;
-  const double* fc = hc ? fill_c.begin() : nullptr;
+  g.xtx.clear();  // its values change
+  const double* fc = fill_c.data();
   const int* cp = hcell ? cell_ptr.begin() : nullptr;
   const int* ci = hcell ? cell_i.begin() : nullptr;
   const double* cg = hcell ? cell_g.begin() : nullptr;
@@ -1145,6 +1312,7 @@ void geno_write_cells(SEXP ptr, const std::vector<int>& cols, const std::vector<
     Rcpp::stop("geno_write_cells: cols / off / rows / vals do not match.");
   for (int j : cols) if (j < 0 || static_cast<std::size_t>(j) >= g.p) Rcpp::stop("geno_write_cells: column out of range.");
   for (double v : vals) if (!fill_value_ok(v)) Rcpp::stop("cell fill values must be finite and within (-2, 4).");
+  g.xtx.clear();  // its values change
   #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
   for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
     const std::size_t c = static_cast<std::size_t>(cc);
@@ -1152,24 +1320,45 @@ void geno_write_cells(SEXP ptr, const std::vector<int>& cols, const std::vector<
   }
 }
 
-void geno_genovec(SEXP ptr, const std::vector<int>& cols, std::vector<unsigned char>& gs,
-                  std::vector<double>& sum_obs, int& n_out, int threads) {
+void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vector<unsigned char>& gs,
+                  std::vector<double>& sum_obs, std::vector<long long>& dptr, std::vector<int>& di,
+                  std::vector<std::int8_t>& dd, int& n_out, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
   threads = resolve_threads(threads);
-  if (g->dosage) Rcpp::stop("LD imputation needs hard calls; this geno object holds dosages.");
   const std::size_t n = g->n, sb = (n + 3) / 4, m = cols.size();
   for (int j : cols) {
     if (j < 0 || static_cast<std::size_t>(j) >= g->p) Rcpp::stop("cols out of range.");
+    if (g->D[j].unit != kDUnit) Rcpp::stop("LD imputation does not take appended columns.");
+  }
+  // dosage part of the observed cells: D = q / 16384 on the step grid, d = round(D / step) != 0
+  std::vector<std::vector<int>> li(m);
+  std::vector<std::vector<std::int8_t>> ld(m);
+  std::vector<double> dsum(m, 0.0);
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+  for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
+    const std::size_t c = static_cast<std::size_t>(cc), j = static_cast<std::size_t>(cols[c]);
     const DCol& d = g->D[j];
-    if (d.unit != kDUnit) Rcpp::stop("LD imputation does not take appended columns.");
     const std::vector<std::uint32_t>& Mj = g->M[j];
-    std::size_t r = 0;
+    std::size_t r = 0, e = 0;
+    long long s = 0;
     for (std::size_t w = 0; w < d.mask.size(); ++w)
-      for (u64 bits = d.mask[w]; bits; bits &= bits - 1) {
+      for (u64 bits = d.mask[w]; bits; bits &= bits - 1, ++e) {
         const std::size_t i = 64 * w + __builtin_ctzll(bits);
         while (r < Mj.size() && Mj[r] < i) ++r;
-        if (r == Mj.size() || Mj[r] != i) Rcpp::stop("LD imputation needs hard calls at every observed cell.");
+        if (r < Mj.size() && Mj[r] == i) continue;  // a missing cell's fill
+        const long q = std::lround(d.q[e] / (16384.0 * step));
+        const int v = static_cast<int>(std::max(-127L, std::min(127L, q)));
+        if (!v) continue;
+        li[c].push_back(static_cast<int>(i)); ld[c].push_back(static_cast<std::int8_t>(v)); s += v;
       }
+    dsum[c] = step * static_cast<double>(s);
+  }
+  dptr.assign(m + 1, 0);
+  for (std::size_t c = 0; c < m; ++c) dptr[c + 1] = dptr[c] + static_cast<long long>(li[c].size());
+  di.resize(dptr[m]); dd.resize(dptr[m]);
+  for (std::size_t c = 0; c < m; ++c) {
+    std::copy(li[c].begin(), li[c].end(), di.begin() + dptr[c]);
+    std::copy(ld[c].begin(), ld[c].end(), dd.begin() + dptr[c]);
   }
   gs.assign(m * sb, 0);
   sum_obs.assign(m, 0.0);
@@ -1206,7 +1395,7 @@ void geno_genovec(SEXP ptr, const std::vector<int>& cols, std::vector<unsigned c
       s -= h_at(g->G, j, i);
       dst[i >> 2] |= static_cast<unsigned char>(3u << (2 * (i & 3u)));
     }
-    sum_obs[c] = static_cast<double>(s);
+    sum_obs[c] = static_cast<double>(s) + dsum[c];
   }
   n_out = static_cast<int>(n);
 }

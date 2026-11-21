@@ -1,4 +1,4 @@
-// Genotype imputation of hard-call missing cells from an eigen.bin LD block: R entry point.
+// Genotype imputation of missing cells (hard calls or dosages) from an eigen.bin LD block: R entry point.
 // The algorithm (stage 1 conditional mean, stage 2 anchor) lives in impute_kernel.h, shared with geno_score.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
@@ -147,7 +147,7 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                                const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
                                double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
-                               int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
+                               int nb_people, double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
@@ -155,18 +155,18 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
   plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
-  plink4r::BlockGenotypes B = plink4r::read_block_genotypes(pf, J.vi, sidx, T);
+  plink4r::BlockGenotypes B = plink4r::read_block_genotypes(pf, J.vi, sidx, dosage_step, T);
   return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
 }
 
-// Same on a geno object (hard calls): var_idx = 0-based columns of the object, every row of the object is
-// imputed; the genotypes come from its planes and its missing-cell rows, in its current counted-allele
-// orientation (af and sign refer to that allele).
+// Same on a geno object (hard calls or dosages): var_idx = 0-based columns of the object, every row of the
+// object is imputed; the genotypes come from its planes, its observed dosage parts (on the dosage_step grid)
+// and its missing-cell rows, in its current counted-allele orientation (af and sign refer to that allele).
 // [[Rcpp::export]]
 Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
                                     Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                                     double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
-                                    double mem_gb, Rcpp::IntegerVector rows) {
+                                    double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
@@ -174,7 +174,8 @@ Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const
   const auto t0 = std::chrono::steady_clock::now();
   plink4r::BlockGenotypes B;
   int ns = 0;
-  plink4r::geno_genovec(ptr, J.vi, B.GS, B.sum_obs, ns, T);
+  B.step = dosage_step;
+  plink4r::geno_genovec(ptr, J.vi, dosage_step, B.GS, B.sum_obs, B.dptr, B.di, B.dd, ns, T);
   B.m = J.m;
   B.ns = ns;
   B.sb = (ns + 3) / 4;
@@ -230,7 +231,7 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
 Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
                                      Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                                      double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
-                                     double mem_gb, Rcpp::IntegerVector rows) {
+                                     double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
@@ -238,7 +239,8 @@ Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, cons
   const auto t0 = std::chrono::steady_clock::now();
   plink4r::BlockGenotypes B;
   int ns = 0;
-  plink4r::geno_genovec(ptr, J.vi, B.GS, B.sum_obs, ns, T);
+  B.step = dosage_step;
+  plink4r::geno_genovec(ptr, J.vi, dosage_step, B.GS, B.sum_obs, B.dptr, B.di, B.dd, ns, T);
   B.m = J.m;
   B.ns = ns;
   B.sb = (ns + 3) / 4;

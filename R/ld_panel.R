@@ -96,6 +96,13 @@
   a[!duplicated(ld_index)]
 }
 
+# The dosage grid of the LD input: the step count round(D / step), |D| <= 0.5, is int8.
+.check_dosage_step <- function(step) {
+  if (!is.numeric(step) || length(step) != 1L || !is.finite(step) || step < 0.5 / 127)
+    stop("dosage_step must be a single number >= 0.5 / 127", call. = FALSE)
+  invisible(step)
+}
+
 # The ridge delta of every LD imputation must be > 0 (delta = 0 has no stable C = I - delta (R + delta I)^-1).
 .check_delta <- function(delta) {
   if (!is.numeric(delta) || length(delta) != 1L || !is.finite(delta) || delta <= 0)
