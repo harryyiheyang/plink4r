@@ -27,6 +27,9 @@
 #' @param thresh eigenvalue variance kept; <= 0 keeps every stored pair.
 #' @param nb_people people per batch (NULL = largest batch whose S_i, rhs and SNP lists fit in `mem_gb`).
 #' @param mem_gb memory budget of the people batches; 0 takes it from [plink4r_resources()].
+#' @param dosage_step grid of the dosage part of an observed cell in the LD input: an observed dosage g enters
+#'   stage 1 as round(g) + dosage_step * round((g - round(g)) / dosage_step) (hard calls are exact). Only this
+#'   input is quantized; observed values are never changed. Must be >= 0.5 / 127 (the step count is int8).
 #' @param af optional anchor frequencies of the PGEN ALT allele, named by PGEN ID; they replace AF_PanUKB.
 #' @param cond optional IDs (panel or PGEN IDs; column names for a `geno` object) of the conditioning set:
 #'   only these SNPs enter S, so a person's missing cells are predicted from their observed calls at these SNPs
@@ -39,17 +42,18 @@
 #' @export
 genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL, flank = 2500L, sample = NULL,
                             delta = 0.01, anchor_min_miss = 0.01, thresh = 0, threads = 4L, nb_people = NULL,
-                            mem_gb = 2, af = NULL, cond = NULL) {
+                            mem_gb = 2, af = NULL, cond = NULL, dosage_step = 0.01) {
   .genotype_impute(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh, threads,
-                   nb_people, mem_gb, af, cond)
+                   nb_people, mem_gb, af, cond, dosage_step = dosage_step)
 }
 
 # write_ptr: for a geno object, the external pointer of a fresh clone of it (same columns, nobody else references
 # it) into which the final fills of the imputed SNPs are written directly; the result then has no `fill` table.
 .genotype_impute <- function(pfile, ref, ld_dir, block, snps, flank, sample, delta, anchor_min_miss, thresh,
-                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL) {
+                             threads, nb_people, mem_gb, af, cond, write_ptr = NULL, dosage_step = 0.01) {
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
   .check_delta(delta)
+  .check_dosage_step(dosage_step)
   obj <- inherits(pfile, "geno")
   if (!is.null(write_ptr) && !obj) stop("internal: write_ptr needs a geno object", call. = FALSE)
   if (obj) {
@@ -103,15 +107,15 @@ genotype_impute <- function(pfile, ref = NULL, ld_dir, block = NULL, snps = NULL
     out <- if (!is.null(write_ptr)) {
       genotype_fill_ld_geno_cpp(write_ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
                                 as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
-                                mem_gb, as.integer(w$ld_index))
+                                mem_gb, as.integer(w$ld_index), dosage_step)
     } else if (obj) {
       genotype_impute_geno_cpp(X$ptr, as.integer(pvar$row[w$vi + 1L] - 1L), normalizePath(ef), p_alt,
                                as.integer(w$sign), thresh, delta, anchor_min_miss, kr, as.integer(threads), nbp,
-                               mem_gb, as.integer(w$ld_index))
+                               mem_gb, as.integer(w$ld_index), dosage_step)
     } else {
       genotype_impute_cpp(normalizePath(paste0(pfile, ".pgen")), length(iid), pvar$allele_ct, as.integer(w$vi),
                           as.integer(si), normalizePath(ef), p_alt, as.integer(w$sign), thresh, delta,
-                          anchor_min_miss, kr, as.integer(threads), nbp, mem_gb, as.integer(w$ld_index))
+                          anchor_min_miss, kr, as.integer(threads), nbp, mem_gb, as.integer(w$ld_index), dosage_step)
     }
     f <- NULL
     if (is.null(write_ptr)) {

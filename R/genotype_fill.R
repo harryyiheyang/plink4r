@@ -106,7 +106,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       # the kernel writes the LD fills straight into the new object (no per-cell table in R)
       ld_write <- function(ptr) .genotype_impute(x, pan, ld$dir, NULL, x$snp[use], P$flank, NULL, P$delta,
                                                  P$anchor_min_miss, P$thresh, P$threads, NULL, P$mem_gb, a, cond,
-                                                 write_ptr = ptr)
+                                                 write_ptr = ptr, dosage_step = P$dosage_step)
     }
   }
   .geno_refill(x, af = af, const = const, cells = .geno_fill_spec(list(cells = cl), x),
@@ -268,7 +268,7 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
       gi <- genotype_impute(pfile, pan, ld$dir, snps = m$ID[m$in_ld], flank = P$flank, sample = iid[si],
                             delta = P$delta, anchor_min_miss = P$anchor_min_miss, thresh = P$thresh,
                             threads = P$threads, mem_gb = P$mem_gb, af = stats::setNames(ua$p_alt, ua$ID),
-                            cond = P$cond)
+                            cond = P$cond, dosage_step = P$dosage_step)
       cells <- gi$fill[, .(ID = snp, IID, g)]
       method <- paste0("scheme4+", method)
     }
@@ -286,9 +286,10 @@ genotype_fill <- function(x, ..., af = NULL, ld = NULL, const = NULL, cells = NU
 #' missing rate exceeds it); delta 0.01 ridge of stage 1; anchor_min_miss 0.01 (stage 2 only at or above
 #' this missing rate); flank 2500 panel rows each side; thresh 0 = all stored eigenpairs; threads; mem_gb
 #' memory budget for the people batches of stage 1; cond NULL = condition on every panel SNP of the window,
-#' else the IDs of the conditioning set (see `cond` of [genotype_impute()]; the object route's `snps` sets it).
+#' else the IDs of the conditioning set (see `cond` of [genotype_impute()]; the object route's `snps` sets it);
+#' dosage_step 0.01 grid of the dosage part of an observed cell in the LD input (see [genotype_impute()]).
 #' @export
 genotype_fill_para <- function() {
   list(build = NULL, maf = 0.01, miss_max = 1, delta = 0.01, anchor_min_miss = 0.01, flank = 2500L,
-       thresh = 0, threads = 4L, mem_gb = 2, cond = NULL)
+       thresh = 0, threads = 4L, mem_gb = 2, cond = NULL, dosage_step = 0.01)
 }

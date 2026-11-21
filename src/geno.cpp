@@ -1152,72 +1152,84 @@ void geno_write_cells(SEXP ptr, const std::vector<int>& cols, const std::vector<
   }
 }
 
-void geno_ld_prepare(SEXP ptr, const std::vector<int>& cols, const std::vector<char>& keep,
-                     std::vector<double>& sum_obs, std::vector<int>& q, int& n_out) {
+void geno_genovec(SEXP ptr, const std::vector<int>& cols, double step, std::vector<unsigned char>& gs,
+                  std::vector<double>& sum_obs, std::vector<long long>& dptr, std::vector<int>& di,
+                  std::vector<std::int8_t>& dd, int& n_out, int threads) {
   Rcpp::XPtr<Geno> g(ptr);
-  const std::size_t n = g->n, m = cols.size();
-  if (keep.size() != m) Rcpp::stop("geno_ld_prepare: keep and cols differ in length.");
+  threads = resolve_threads(threads);
+  const std::size_t n = g->n, sb = (n + 3) / 4, m = cols.size();
   for (int j : cols) {
     if (j < 0 || static_cast<std::size_t>(j) >= g->p) Rcpp::stop("cols out of range.");
     if (g->D[j].unit != kDUnit) Rcpp::stop("LD imputation does not take appended columns.");
   }
-  sum_obs.assign(m, 0.0);
-  q.assign(n, 0);
-  std::vector<char> kept(n, 0);
+  // dosage part of the observed cells: D = q / 16384 on the step grid, d = round(D / step) != 0
+  std::vector<std::vector<int>> li(m);
+  std::vector<std::vector<std::int8_t>> ld(m);
+  std::vector<double> dsum(m, 0.0);
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+  for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
+    const std::size_t c = static_cast<std::size_t>(cc), j = static_cast<std::size_t>(cols[c]);
+    const DCol& d = g->D[j];
+    const std::vector<std::uint32_t>& Mj = g->M[j];
+    std::size_t r = 0, e = 0;
+    long long s = 0;
+    for (std::size_t w = 0; w < d.mask.size(); ++w)
+      for (u64 bits = d.mask[w]; bits; bits &= bits - 1, ++e) {
+        const std::size_t i = 64 * w + __builtin_ctzll(bits);
+        while (r < Mj.size() && Mj[r] < i) ++r;
+        if (r < Mj.size() && Mj[r] == i) continue;  // a missing cell's fill
+        const long q = std::lround(d.q[e] / (16384.0 * step));
+        const int v = static_cast<int>(std::max(-127L, std::min(127L, q)));
+        if (!v) continue;
+        li[c].push_back(static_cast<int>(i)); ld[c].push_back(static_cast<std::int8_t>(v)); s += v;
+      }
+    dsum[c] = step * static_cast<double>(s);
+  }
+  dptr.assign(m + 1, 0);
+  for (std::size_t c = 0; c < m; ++c) dptr[c + 1] = dptr[c] + static_cast<long long>(li[c].size());
+  di.resize(dptr[m]); dd.resize(dptr[m]);
   for (std::size_t c = 0; c < m; ++c) {
-    const std::size_t j = static_cast<std::size_t>(cols[c]);
-    sum_obs[c] = obs_sum_col(*g, j);
-    for (std::uint32_t i : g->M[j]) { ++q[i]; if (keep[c]) kept[i] = 1; }
+    std::copy(li[c].begin(), li[c].end(), di.begin() + dptr[c]);
+    std::copy(ld[c].begin(), ld[c].end(), dd.begin() + dptr[c]);
   }
-  for (std::size_t i = 0; i < n; ++i) if (!kept[i]) q[i] = 0;
-  n_out = static_cast<int>(n);
-}
-
-void geno_ld_rows(SEXP ptr, const std::vector<int>& cols, int r0, int r1, std::uint16_t* out, int ld, int threads) {
-  Rcpp::XPtr<Geno> gp(ptr);
-  const Geno& g = *gp;
-  threads = resolve_threads(threads);
-  const int m = static_cast<int>(cols.size());
-  const int nr = r1 - r0;
-  if (r0 < 0 || r1 < r0 || static_cast<std::size_t>(r1) > g.n || ld < m) Rcpp::stop("geno_ld_rows: bad range.");
-  // 64-row chunks (one mask word of every column) per task: no two threads write the same output row
-  const int c0 = r0 / 64, c1 = (r1 + 63) / 64;
-  #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
-  for (int w = c0; w < c1; ++w) {
-    const int a = std::max(r0, 64 * w), b = std::min(r1, 64 * w + 64);
-    for (int i = a; i < b; ++i) std::fill(out + static_cast<std::size_t>(i - r0) * ld + m, out + static_cast<std::size_t>(i - r0 + 1) * ld, 0);
-    for (int c = 0; c < m; ++c) {
-      const std::size_t j = static_cast<std::size_t>(cols[c]);
-      const u64 lo = g.G.lo(j)[w], hi = g.G.hi(j)[w] & ~lo;
-      for (int i = a; i < b; ++i) {
-        const int bit = i & 63;
-        out[static_cast<std::size_t>(i - r0) * ld + c] =
-          static_cast<std::uint16_t>((((lo >> bit) & 1u) << 14) | (((hi >> bit) & 1u) << 15));
-      }
-      const DCol& d = g.D[j];
-      if (!d.mask.empty() && d.mask[w]) {
-        std::size_t e = d_rank(d, static_cast<std::size_t>(w));
-        for (u64 bits = d.mask[w]; bits; bits &= bits - 1, ++e) {
-          const int i = 64 * w + __builtin_ctzll(bits);
-          if (i < a || i >= b) continue;
-          std::uint16_t& o = out[static_cast<std::size_t>(i - r0) * ld + c];
-          o = static_cast<std::uint16_t>(static_cast<int>(o) + d.q[e]);
-        }
-      }
-      const std::vector<std::uint32_t>& Mj = g.M[j];
-      for (auto it = std::lower_bound(Mj.begin(), Mj.end(), static_cast<std::uint32_t>(a));
-           it != Mj.end() && *it < static_cast<std::uint32_t>(b); ++it)
-        out[static_cast<std::size_t>(*it - r0) * ld + c] = 65535u;
+  gs.assign(m * sb, 0);
+  sum_obs.assign(m, 0.0);
+  #pragma omp parallel for num_threads(threads) schedule(dynamic, 16)
+  for (std::ptrdiff_t cc = 0; cc < static_cast<std::ptrdiff_t>(m); ++cc) {
+    const std::size_t c = static_cast<std::size_t>(cc), j = static_cast<std::size_t>(cols[c]);
+    unsigned char* dst = gs.data() + c * sb;
+    // 64 rows per step: code = lo | hi << 1 (h_at: lo wins), i.e. the bits of lo and hi interleaved
+    const u64* lo = g->G.lo(j);
+    const u64* hi = g->G.hi(j);
+    auto spread = [](u64 x) {  // bit t of the low 32 bits -> bit 2t
+      x &= 0xFFFFFFFFull;
+      x = (x | (x << 16)) & 0x0000FFFF0000FFFFull;
+      x = (x | (x << 8)) & 0x00FF00FF00FF00FFull;
+      x = (x | (x << 4)) & 0x0F0F0F0F0F0F0F0Full;
+      x = (x | (x << 2)) & 0x3333333333333333ull;
+      x = (x | (x << 1)) & 0x5555555555555555ull;
+      return x;
+    };
+    const std::size_t nw = (n + 63) / 64;
+    for (std::size_t w = 0; w < nw; ++w) {
+      u64 l = lo[w], h = hi[w] & ~l;
+      const std::size_t rows = std::min<std::size_t>(64, n - 64 * w);
+      if (rows < 64) { const u64 keep = (u64(1) << rows) - 1; l &= keep; h &= keep; }
+      const u64 out[2] = {spread(l) | (spread(h) << 1), spread(l >> 32) | (spread(h >> 32) << 1)};
+      const std::size_t b0 = 16 * w, nbyt = std::min<std::size_t>(16, sb - b0);
+      unsigned char tmp[16];
+      for (int k = 0; k < 2; ++k)
+        for (int b = 0; b < 8; ++b) tmp[8 * k + b] = static_cast<unsigned char>(out[k] >> (8 * b));
+      std::memcpy(dst + b0, tmp, nbyt);
     }
+    std::int64_t s = g->G.s[j];
+    for (std::uint32_t i : g->M[j]) {
+      s -= h_at(g->G, j, i);
+      dst[i >> 2] |= static_cast<unsigned char>(3u << (2 * (i & 3u)));
+    }
+    sum_obs[c] = static_cast<double>(s) + dsum[c];
   }
-  (void) nr;
-}
-
-SEXP geno_from_pgen(const std::string& pgen, int n_raw, const std::vector<int>& allele_ct,
-                    const std::vector<int>& variants, const std::vector<int>& samples, int threads) {
-  return geno_open_pgen_cpp(pgen, n_raw, Rcpp::IntegerVector(allele_ct.begin(), allele_ct.end()),
-                            Rcpp::IntegerVector(variants.begin(), variants.end()),
-                            Rcpp::IntegerVector(samples.begin(), samples.end()), false, threads);
+  n_out = static_cast<int>(n);
 }
 
 }  // namespace plink4r

@@ -1,4 +1,4 @@
-// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages alike), free of Rcpp types so that several
+// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types so that several
 // R entry points share it: genotype_impute_cpp (returns every filled cell) and the LD path of geno_score
 // (adds w * filled cell into scores without keeping the cells).
 //
@@ -15,17 +15,19 @@
 //   sum_obs g + sum_miss g_hat = 2 n p_j, clip [0,2]. Below the cutoff stage 1 is kept: the anchor error is
 //   amplified by 2/missing-rate.
 //
-// Layout (exact, same result as the per-person dot product):
+// Layout for speed (exact, same result as the per-person dot product):
 //   with a_lj = C_lj / sd_l (sd signed) and A_j = -sum_l a_lj mu_l,
-//   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l observed} a_lj g_il.
-//   People are processed in blocks sized by mem_gb; each block's genotypes are materialized as a dense
-//   person-major uint16 matrix (g in 1/16384 units, so hard calls and dosages share one path; missing cells
-//   0, their rows listed in M_i). Inside a block the loop runs over SNP columns j (column a_.j / C_.j hot in
-//   cache) and over the people missing j (la_kernel.cpp dense_dot over the person's row), so C is streamed
-//   from memory once per person block instead of once per (person, missing SNP). C_MM is gathered from the
-//   same hot column.
+//   rhs_ij = C_{.j}' z~_i = A_j + sum_{l in M_i} a_lj mu_l + sum_{l het_i} a_lj + 2 sum_{l homalt_i} a_lj
+//            + step sum_{(l, d) in D_i} a_lj d.
+//   An observed dosage g enters as H + step d: H = round(g) (halves up) in the planes, d = round((g - H) / step)
+//   (int8, |d| <= 0.5 / step) in the person's sparse list D_i of observed cells with d != 0; hard calls have
+//   D_i empty. step (dosage_step) quantizes only this LD input; stored observed values are never changed.
+//   People are processed in blocks; inside a block the loop runs over SNP columns j (column a_.j / C_.j hot in
+//   cache) and over the people missing j, using 1-bit planes (het / homalt; la_kernel.cpp plane_dot), so C is
+//   streamed from memory once per person block instead of once per (person, missing SNP). C_MM is gathered
+//   from the same hot column.
 //
-// Pipeline: build_impute_ld -> LDRows (geno_access.h: geno_ld_rows) -> impute_stage1 -> impute_stage2,
+// Pipeline: build_impute_ld -> read_block_genotypes (or geno_genovec) -> build_planes -> impute_stage1 -> impute_stage2,
 // then for_each_cell visits every filled cell (i, j, g1, g). Errors are thrown as std::runtime_error.
 #ifndef PLINK4R_IMPUTE_KERNEL_H
 #define PLINK4R_IMPUTE_KERNEL_H
@@ -42,7 +44,6 @@
 #include <memory>
 #include <vector>
 #include <cstdlib>
-#include <functional>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -104,7 +105,7 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
     L.isd[j] = 1.0f / L.sd[j];
   }
   L.t_eig += ik::secs(t0); t0 = std::chrono::steady_clock::now();
-  const int mp = (m + 15) / 16 * 16;  // padded rows (and dense row stride) for the 16-wide dense dot
+  const int mp = (m + 15) / 16 * 16;  // padded rows for the 16-wide plane dot
   L.mp = mp;
   MatrixXf& C = L.C;
   C.resize(m, m);
@@ -134,17 +135,167 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   return L;
 }
 
-// ---- genotypes of the working rows, delivered by person block: rows [r0, r1) x the m working rows as a
-// person-major uint16 matrix (row stride ld >= m, entries m..ld-1 written 0), the ALT dosage in 1/16384 units
-// (0..32768; hard calls 0 / 16384 / 32768) or kDenseMiss for a missing cell.
-constexpr std::uint16_t kDenseMiss = 65535;
-struct LDRows {
-  int ns = 0;
-  std::vector<double> sum_obs;  // observed ALT sum per working row (hard calls or dosages)
-  std::vector<int> q;           // missing working rows per person; 0 = no solve (nothing missing in a kept row)
-  std::function<void(int r0, int r1, std::uint16_t* out, int ld)> rows;
+// ---- genotypes of one block: SNP-major genovecs of the selected samples (codes 0/1/2 ALT count, 3 missing)
+// plus the dosage part of the observed cells: d = round((g - H) / step) != 0, per row j the selected samples
+// di[dptr[j] .. dptr[j + 1]) (ascending) and their d.
+struct BlockGenotypes {
+  int m = 0, ns = 0, sb = 0;
+  std::vector<uint8_t> GS;       // m x sb bytes
+  std::vector<double> sum_obs;   // observed ALT sum per row (H + step d)
+  double step = 0.01;            // dosage grid of the LD input
+  std::vector<long long> dptr;   // m + 1
+  std::vector<int> di;
+  std::vector<int8_t> dd;
   double t_geno = 0;
 };
+
+// d of an observed ALT dosage v (1/16384 units, 0..32768) with H = round(v / 16384) (halves up).
+inline int dosage_grid(std::uint16_t v, unsigned h, double step) {
+  const int q = static_cast<int>(v) - static_cast<int>(h << 14);
+  const long d = std::lround(q / (16384.0 * step));
+  return static_cast<int>(std::max(-127L, std::min(127L, d)));
+}
+
+// Gathers per-row (sample, d) lists into the CSR of B.
+inline void set_dosage_lists(BlockGenotypes& B, std::vector<std::vector<int>>& li, std::vector<std::vector<int8_t>>& ld) {
+  const int m = B.m;
+  B.dptr.assign(m + 1, 0);
+  for (int j = 0; j < m; ++j) B.dptr[j + 1] = B.dptr[j] + static_cast<long long>(li[j].size());
+  B.di.resize(B.dptr[m]); B.dd.resize(B.dptr[m]);
+  for (int j = 0; j < m; ++j) {
+    std::copy(li[j].begin(), li[j].end(), B.di.begin() + B.dptr[j]);
+    std::copy(ld[j].begin(), ld[j].end(), B.dd.begin() + B.dptr[j]);
+    std::vector<int>().swap(li[j]); std::vector<int8_t>().swap(ld[j]);
+  }
+}
+
+inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>& vi, const std::vector<int>& sidx,
+                                           double step, int T) {
+  auto t0 = std::chrono::steady_clock::now();
+  BlockGenotypes B;
+  const int m = static_cast<int>(vi.size()), ns = static_cast<int>(sidx.size()), sb = (ns + 3) / 4;
+  B.m = m; B.ns = ns; B.sb = sb; B.step = step;
+  B.GS.assign(static_cast<std::size_t>(m) * sb, 0);
+  B.sum_obs.assign(m, 0.0);
+  std::vector<int> bad(T, -1);
+  if (pf.dosage()) {  // H = round(dosage) into the codes, the rest on the step grid into the lists
+    std::vector<std::vector<int>> li(m);
+    std::vector<std::vector<int8_t>> ld(m);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(T)
+#endif
+    for (int j = 0; j < m; ++j) {
+      const std::uint16_t* x = pf.read_dosage(static_cast<std::size_t>(vi[j]), ik::tid());
+      if (!x) { bad[ik::tid()] = j; continue; }
+      uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
+      long long hs = 0, ds = 0;
+      for (int i = 0; i < ns; ++i) {
+        const std::uint16_t v = x[sidx[i]];
+        unsigned code = 3u;
+        if (v != PgenFile::kMissing) {
+          code = (static_cast<unsigned>(v) + 8192u) >> 14;
+          const int d = dosage_grid(v, code, step);
+          if (d) { li[j].push_back(i); ld[j].push_back(static_cast<int8_t>(d)); ds += d; }
+          hs += code;
+        }
+        dst[i >> 2] |= static_cast<uint8_t>(code << (2 * (i & 3)));
+      }
+      B.sum_obs[j] = static_cast<double>(hs) + step * static_cast<double>(ds);
+    }
+    for (int t = 0; t < T; ++t)
+      if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
+    set_dosage_lists(B, li, ld);
+    B.t_geno = ik::secs(t0);
+    return B;
+  }
+  B.dptr.assign(m + 1, 0);
+  const bool ident = identity_samples(sidx.data(), ns, static_cast<int>(pf.samples()));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(T)
+#endif
+  for (int j = 0; j < m; ++j) {
+    const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), ik::tid());
+    if (!gv) { bad[ik::tid()] = j; continue; }
+    uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
+    compact_genovec(gv, sidx.data(), ns, ident, dst);
+    long long miss = 0, alt = 0;
+    count_genovec(dst, sb, &miss, &alt);
+    B.sum_obs[j] = static_cast<double>(alt);
+  }
+  for (int t = 0; t < T; ++t)
+    if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
+  B.t_geno = ik::secs(t0);
+  return B;
+}
+
+// ---- bit-planes and missing lists of every person (chunks of 256 people = one cache line per SNP row)
+struct PersonPlanes {
+  int ns = 0, nbyte = 0;
+  std::vector<uint8_t> het, hom;          // ns x nbyte
+  std::vector<std::vector<int>> Mi;       // missing rows per person, ascending
+  double step = 0.01;                     // dosage grid
+  std::vector<long long> doff;            // ns + 1: person i's observed (row, d) pairs dl / dv[doff[i] .. doff[i + 1])
+  std::vector<int> dl;
+  std::vector<int8_t> dv;
+  double t_planes = 0;
+};
+
+// Consumes B.GS (released on return).
+inline PersonPlanes build_planes(const ImputeLD& L, BlockGenotypes& B, int T) {
+  auto t0 = std::chrono::steady_clock::now();
+  PersonPlanes P;
+  const int m = L.m, ns = B.ns, sb = B.sb;
+  const int nbyte = L.mp / 8;
+  P.ns = ns; P.nbyte = nbyte;
+  P.het.assign(static_cast<std::size_t>(ns) * nbyte, 0);
+  P.hom.assign(static_cast<std::size_t>(ns) * nbyte, 0);
+  P.Mi.assign(ns, std::vector<int>());
+  const std::vector<uint8_t>& GS = B.GS;
+  const int nch = (ns + 255) / 256;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(T)
+#endif
+  for (int ch = 0; ch < nch; ++ch) {
+    const int i0 = ch * 256, i1 = std::min(ns, i0 + 256);
+    for (int lb = 0; lb < nbyte; ++lb) {  // 8 SNPs -> one plane byte per person, branch-free
+      const int l0 = 8 * lb, nl = std::min(8, m - l0);
+      if (nl <= 0) break;
+      const uint8_t* g[8];
+      for (int b = 0; b < nl; ++b) g[b] = &GS[static_cast<std::size_t>(l0 + b) * sb];
+      for (int s = i0; s < i1; ++s) {
+        const int byte = s >> 2, sh = 2 * (s & 3);
+        unsigned h = 0, o = 0, x = 0;
+        for (int b = 0; b < nl; ++b) {
+          const unsigned c = (g[b][byte] >> sh) & 3u;
+          h |= static_cast<unsigned>(c == 1u) << b;
+          o |= static_cast<unsigned>(c == 2u) << b;
+          x |= static_cast<unsigned>(c == 3u) << b;
+        }
+        P.het[static_cast<std::size_t>(s) * nbyte + lb] = static_cast<uint8_t>(h);
+        P.hom[static_cast<std::size_t>(s) * nbyte + lb] = static_cast<uint8_t>(o);
+        while (x) { P.Mi[s].push_back(l0 + __builtin_ctz(x)); x &= x - 1; }
+      }
+    }
+  }
+  std::vector<uint8_t>().swap(B.GS);
+  // dosage lists, person-major (counting sort of the per-row lists)
+  P.step = B.step;
+  P.doff.assign(static_cast<std::size_t>(ns) + 1, 0);
+  for (int i : B.di) ++P.doff[static_cast<std::size_t>(i) + 1];
+  for (int s = 0; s < ns; ++s) P.doff[s + 1] += P.doff[s];
+  P.dl.resize(B.di.size()); P.dv.resize(B.di.size());
+  {
+    std::vector<long long> pos(P.doff.begin(), P.doff.end() - 1);
+    for (int j = 0; j < m; ++j)
+      for (long long e = B.dptr[j]; e < B.dptr[j + 1]; ++e) {
+        const long long t = pos[B.di[e]]++;
+        P.dl[t] = j; P.dv[t] = B.dd[e];
+      }
+  }
+  std::vector<int>().swap(B.di); std::vector<int8_t>().swap(B.dd);
+  P.t_planes = ik::secs(t0);
+  return P;
+}
 
 // ---- stage 1: the conditional mean of every missing cell, per thread lists (person, row, g1 clipped to [0,2])
 struct Stage1Result {
@@ -152,36 +303,34 @@ struct Stage1Result {
   std::vector<std::vector<float>> og;
   long long persons_solved = 0;
   int n_blocks = 0;
-  double t_dense = 0, t_lists = 0, t_rhs = 0, t_chol = 0, t_solve = 0;
+  double t_lists = 0, t_rhs = 0, t_chol = 0, t_solve = 0;
 };
 
-inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double delta, int nb_people,
+inline Stage1Result impute_stage1(const ImputeLD& L, const PersonPlanes& P, double delta, int nb_people,
                                   double mem_gb, int T) {
   using Eigen::MatrixXf;
   using Eigen::VectorXf;
   const auto t_start = std::chrono::steady_clock::now();
   Stage1Result R;
-  const int m = L.m, ns = G.ns, ld = L.mp;
+  const int m = L.m, ns = P.ns, nbyte = P.nbyte;
   const MatrixXf& C = L.C;
   const MatrixXf& Aw = L.Aw;
   const std::vector<float>& mu = L.mu;
   const std::vector<float>& sd = L.sd;
-  const std::vector<int>& qv = G.q;
-  const auto dense_dot = la().dense_dot;
-  constexpr float kInv = 1.0f / 16384.0f;
+  const std::vector<std::vector<int>>& MiA = P.Mi;
+  const auto plane_dot = la().plane_dot;
   // S_i = I - C_MM: gathered from C in the per-person solve when C is small enough to stay in cache (no S
   // buffer, no scattered writes in the rhs pass); otherwise written column by column in the rhs pass, where
   // column j of C is hot.
   const bool gatherS = static_cast<double>(m) * m * 4.0 <= 32e6;
-  // person blocks: fixed size, or as large as the memory budget for the dense rows, S_i, rhs and the SNP lists
-  // allows
+  // person blocks: fixed size, or as large as the memory budget for S_i, rhs and the SNP lists allows
   std::vector<int> bstart{0};
   {
     const double budget = mem_gb * 1e9;
     double acc = 0;
     for (int s = 0; s < ns; ++s) {
-      const double q = static_cast<double>(qv[s]);
-      const double cost = 2.0 * ld + (gatherS ? 0.0 : 4.0 * q * q) + 40.0 * q;  // row, S_i, rhs, M_i, cell refs
+      const double q = static_cast<double>(MiA[s].size());
+      const double cost = (gatherS ? 0.0 : 4.0 * q * q) + 36.0 * q;  // S_i, rhs, flat M_i, cell refs
       const bool full = nb_people > 0 ? (s - bstart.back() >= nb_people) : (acc + cost > budget && s > bstart.back());
       if (full) { bstart.push_back(s); acc = 0; }
       acc += cost;
@@ -205,27 +354,12 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
   std::size_t rhs_cap = 0, S_cap = 0;
   float* rhs = nullptr;
   float* S = nullptr;
-  std::vector<std::uint16_t> Gd;           // dense rows of the block (nb x ld)
-  std::vector<std::vector<int>> MiB;       // missing rows of each person of the block, ascending
   for (int bk = 0; bk < nblk; ++bk) {
     const int b0 = bstart[bk], nb = bstart[bk + 1] - b0;
     auto tb = std::chrono::steady_clock::now();
-    Gd.resize(static_cast<std::size_t>(nb) * ld);
-    G.rows(b0, b0 + nb, Gd.data(), ld);
-    MiB.resize(std::max<std::size_t>(MiB.size(), static_cast<std::size_t>(nb)));
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 64) num_threads(T)
-#endif
-    for (int i = 0; i < nb; ++i) {  // missing lists of the people to solve; missing cells -> 0
-      std::uint16_t* gi = &Gd[static_cast<std::size_t>(i) * ld];
-      std::vector<int>& M = MiB[i];
-      M.clear();
-      const bool solve = qv[b0 + i] > 0;
-      for (int l = 0; l < m; ++l)
-        if (gi[l] == kDenseMiss) { gi[l] = 0; if (solve) M.push_back(l); }
-    }
-    const std::vector<int>* Mi = MiB.data();
-    R.t_dense += ik::secs(tb); tb = std::chrono::steady_clock::now();
+    const uint8_t* het = &P.het[static_cast<std::size_t>(b0) * nbyte];
+    const uint8_t* hom = &P.hom[static_cast<std::size_t>(b0) * nbyte];
+    const std::vector<int>* Mi = &MiA[b0];
     // offsets and per-SNP lists of (person, position in M)
     moff.assign(nb + 1, 0);
     soff.assign(nb + 1, 0);
@@ -293,12 +427,13 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
       const float* cj = C.col(j).data();
       const CellRef* cref = cref_buf.get();
       const int* mflat = mflat_buf.get();
-      constexpr int kAhead = 6;  // prefetch the row head, M_i and S_i column of the cell kAhead ahead
+      constexpr int kAhead = 6;  // prefetch the planes, M_i and S_i column of the cell kAhead ahead
       for (int e = e0; e < e1; ++e) {
         if (e + kAhead < e1) {
           const CellRef& cp = cref[e + kAhead];
-          const std::uint16_t* gp = &Gd[static_cast<std::size_t>(cp.i) * ld];
-          __builtin_prefetch(gp); __builtin_prefetch(gp + 32);
+          const uint8_t* hp = &het[static_cast<std::size_t>(cp.i) * nbyte];
+          const uint8_t* op = &hom[static_cast<std::size_t>(cp.i) * nbyte];
+          for (int b = 0; b < nbyte; b += 64) { __builtin_prefetch(hp + b); __builtin_prefetch(op + b); }
           __builtin_prefetch(mflat + cp.mo);
           if (!gatherS) __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
           __builtin_prefetch(&rhs[cp.mo + cp.a], 1);
@@ -306,7 +441,17 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
         const CellRef& ce = cref[e];
         const int i = ce.i, a = ce.a, q = ce.q;
         const int* M = mflat + ce.mo;
-        float r = L.Aj[j] + kInv * dense_dot(aj, &Gd[static_cast<std::size_t>(i) * ld], ld);
+        const uint8_t* hi = &het[static_cast<std::size_t>(i) * nbyte];
+        const uint8_t* oi_ = &hom[static_cast<std::size_t>(i) * nbyte];
+        float r = L.Aj[j] + plane_dot(aj, hi, oi_, nbyte);
+        {  // dosage part of the observed cells
+          const long long d0 = P.doff[b0 + i], d1 = P.doff[b0 + i + 1];
+          if (d0 < d1) {
+            float sd_ = 0;
+            for (long long e = d0; e < d1; ++e) sd_ += aj[P.dl[e]] * static_cast<float>(P.dv[e]);
+            r += static_cast<float>(P.step) * sd_;
+          }
+        }
         float r0 = 0, r1 = 0, r2 = 0, r3 = 0;  // independent partial sums (no single add chain)
         int bq = 0;
         for (; bq + 4 <= q; bq += 4) {

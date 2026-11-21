@@ -48,30 +48,36 @@ ImputeJob impute_job(const std::string& eigen_file, double thresh, const Rcpp::I
 struct ImputeOut {
   plink4r::Stage1Result R;
   plink4r::Stage2Result A;
-  double t_anchor = 0;
+  double t_anchor = 0, t_planes = 0;
   int ns = 0;
 };
 
-ImputeOut impute_compute(const ImputeJob& J, const plink4r::ImputeLD& L, const plink4r::LDRows& B, double delta,
+ImputeOut impute_compute(const ImputeJob& J, const plink4r::ImputeLD& L, plink4r::BlockGenotypes& B, double delta,
                          double anchor_min_miss, int nb_people, double mem_gb, int T) {
+  const std::vector<char>& kr = J.kr;
+  const int ns = B.ns;
+  plink4r::PersonPlanes P = plink4r::build_planes(L, B, T);
+  // People whose missing cells all sit in rows that are not returned (flank rows) need no solve: drop their
+  // lists. Every person with a missing kept cell keeps the full M_i, so the kept fills are unchanged.
+  if (std::find(kr.begin(), kr.end(), 0) != kr.end()) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256) num_threads(T)
+#endif
+    for (int i = 0; i < ns; ++i) {
+      std::vector<int>& M = P.Mi[i];
+      bool any = false;
+      for (int l : M) if (kr[l]) { any = true; break; }
+      if (!any) std::vector<int>().swap(M);
+    }
+  }
   ImputeOut O;
-  O.ns = B.ns;
-  O.R = plink4r::impute_stage1(L, B, delta, nb_people, mem_gb, T);
+  O.ns = ns;
+  O.t_planes = P.t_planes;
+  O.R = plink4r::impute_stage1(L, P, delta, nb_people, mem_gb, T);
   const auto t2 = std::chrono::steady_clock::now();
-  O.A = plink4r::impute_stage2(O.R, B.sum_obs, J.afv, B.ns, anchor_min_miss);
+  O.A = plink4r::impute_stage2(O.R, B.sum_obs, J.afv, ns, anchor_min_miss);
   O.t_anchor = plink4r::ik::secs(t2);
   return O;
-}
-
-// The working rows of a geno object: columns cols, every row of the object. ptr must stay protected while the
-// result is used.
-plink4r::LDRows geno_rows(SEXP ptr, const std::vector<int>& cols, const std::vector<char>& keep, int T) {
-  const auto t0 = std::chrono::steady_clock::now();
-  plink4r::LDRows B;
-  plink4r::geno_ld_prepare(ptr, cols, keep, B.sum_obs, B.q, B.ns);
-  B.rows = [ptr, cols, T](int r0, int r1, std::uint16_t* out, int ld) { plink4r::geno_ld_rows(ptr, cols, r0, r1, out, ld, T); };
-  B.t_geno = plink4r::ik::secs(t0);
-  return B;
 }
 
 Rcpp::NumericVector na_vec(const std::vector<double>& x) {
@@ -80,12 +86,12 @@ Rcpp::NumericVector na_vec(const std::vector<double>& x) {
   return out;
 }
 
-Rcpp::NumericVector impute_times(const plink4r::ImputeLD& L, const plink4r::LDRows& B, const ImputeOut& O,
+Rcpp::NumericVector impute_times(const plink4r::ImputeLD& L, const plink4r::BlockGenotypes& B, const ImputeOut& O,
                                  double t_write, std::chrono::steady_clock::time_point t_all) {
   const plink4r::Stage1Result& R = O.R;
   Rcpp::NumericVector t = Rcpp::NumericVector::create(
     Rcpp::_["read_eigen"] = L.t_eig, Rcpp::_["build_C"] = L.t_C, Rcpp::_["read_geno"] = B.t_geno,
-    Rcpp::_["dense"] = R.t_dense, Rcpp::_["lists"] = R.t_lists, Rcpp::_["rhs_CMM"] = R.t_rhs,
+    Rcpp::_["planes"] = O.t_planes, Rcpp::_["lists"] = R.t_lists, Rcpp::_["rhs_CMM"] = R.t_rhs,
     Rcpp::_["cholesky"] = R.t_chol, Rcpp::_["solve"] = R.t_solve, Rcpp::_["anchor"] = O.t_anchor);
   if (t_write >= 0) t.push_back(t_write, "write");
   t.push_back(plink4r::ik::secs(t_all), "total");
@@ -93,7 +99,7 @@ Rcpp::NumericVector impute_times(const plink4r::ImputeLD& L, const plink4r::LDRo
 }
 
 // Per-SNP table, info and timings (everything but the cells); t_write < 0 = no write step.
-Rcpp::List impute_summary(const ImputeJob& J, const plink4r::ImputeLD& L, const plink4r::LDRows& B,
+Rcpp::List impute_summary(const ImputeJob& J, const plink4r::ImputeLD& L, const plink4r::BlockGenotypes& B,
                           const ImputeOut& O, double delta, int T, double t_write,
                           std::chrono::steady_clock::time_point t_all) {
   const int m = J.m;
@@ -113,7 +119,7 @@ Rcpp::List impute_summary(const ImputeJob& J, const plink4r::ImputeLD& L, const 
 }
 
 // Cells of the kept rows as an R data frame (i, j = working row, g1, g), plus the summary.
-Rcpp::List impute_run(const ImputeJob& J, const plink4r::ImputeLD& L, const plink4r::LDRows& B, double delta,
+Rcpp::List impute_run(const ImputeJob& J, const plink4r::ImputeLD& L, plink4r::BlockGenotypes& B, double delta,
                       double anchor_min_miss, int nb_people, double mem_gb, int T,
                       std::chrono::steady_clock::time_point t_all) {
   const ImputeOut O = impute_compute(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T);
@@ -141,35 +147,39 @@ Rcpp::List genotype_impute_cpp(const std::string& pgen, int n_raw, Rcpp::Integer
                                Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
                                const std::string& eigen_file, Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh,
                                double delta, double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads,
-                               int nb_people, double mem_gb, Rcpp::IntegerVector rows) {
+                               int nb_people, double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
   const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
   const std::vector<int> sidx(sample_idx.begin(), sample_idx.end());
   const std::vector<int> act(allele_ct.begin(), allele_ct.end());
-  const auto t0 = std::chrono::steady_clock::now();
-  Rcpp::RObject X = plink4r::geno_from_pgen(pgen, n_raw, act, J.vi, sidx, T);
-  std::vector<int> cols(J.m);
-  for (int j = 0; j < J.m; ++j) cols[j] = j;
-  plink4r::LDRows B = geno_rows(X, cols, J.kr, T);
-  B.t_geno = plink4r::ik::secs(t0);
+  plink4r::PgenFile pf(pgen, static_cast<std::size_t>(n_raw), act, T);
+  plink4r::BlockGenotypes B = plink4r::read_block_genotypes(pf, J.vi, sidx, dosage_step, T);
   return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
 }
 
 // Same on a geno object (hard calls or dosages): var_idx = 0-based columns of the object, every row of the
-// object is imputed; the genotypes are its stored values and its missing-cell rows, in its current
-// counted-allele orientation (af and sign refer to that allele).
+// object is imputed; the genotypes come from its planes, its observed dosage parts (on the dosage_step grid)
+// and its missing-cell rows, in its current counted-allele orientation (af and sign refer to that allele).
 // [[Rcpp::export]]
 Rcpp::List genotype_impute_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
                                     Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                                     double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
-                                    double mem_gb, Rcpp::IntegerVector rows) {
+                                    double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
   const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
-  const plink4r::LDRows B = geno_rows(ptr, J.vi, J.kr, T);
+  const auto t0 = std::chrono::steady_clock::now();
+  plink4r::BlockGenotypes B;
+  int ns = 0;
+  B.step = dosage_step;
+  plink4r::geno_genovec(ptr, J.vi, dosage_step, B.GS, B.sum_obs, B.dptr, B.di, B.dd, ns, T);
+  B.m = J.m;
+  B.ns = ns;
+  B.sb = (ns + 3) / 4;
+  B.t_geno = plink4r::ik::secs(t0);
   return impute_run(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T, t_all);
 }
 
@@ -221,12 +231,20 @@ Rcpp::List pgen_stats_cpp(const std::string& pgen, int n_raw, Rcpp::IntegerVecto
 Rcpp::List genotype_fill_ld_geno_cpp(SEXP ptr, Rcpp::IntegerVector var_idx, const std::string& eigen_file,
                                      Rcpp::NumericVector af, Rcpp::IntegerVector sign, double thresh, double delta,
                                      double anchor_min_miss, Rcpp::LogicalVector keep_row, int threads, int nb_people,
-                                     double mem_gb, Rcpp::IntegerVector rows) {
+                                     double mem_gb, Rcpp::IntegerVector rows, double dosage_step) {
   const int T = plink4r::resolve_threads(threads);
   const auto t_all = std::chrono::steady_clock::now();
   const ImputeJob J = impute_job(eigen_file, thresh, rows, var_idx, af, sign, keep_row, t_all);
   const plink4r::ImputeLD L = plink4r::build_impute_ld(J.eb, J.rw, J.vi, J.afv, J.sg, delta, T, J.t_read);
-  const plink4r::LDRows B = geno_rows(ptr, J.vi, J.kr, T);
+  const auto t0 = std::chrono::steady_clock::now();
+  plink4r::BlockGenotypes B;
+  int ns = 0;
+  B.step = dosage_step;
+  plink4r::geno_genovec(ptr, J.vi, dosage_step, B.GS, B.sum_obs, B.dptr, B.di, B.dd, ns, T);
+  B.m = J.m;
+  B.ns = ns;
+  B.sb = (ns + 3) / 4;
+  B.t_geno = plink4r::ik::secs(t0);
   ImputeOut O = impute_compute(J, L, B, delta, anchor_min_miss, nb_people, mem_gb, T);
   const auto tw = std::chrono::steady_clock::now();
   // CSR over the kept working rows, rows ascending within a column
