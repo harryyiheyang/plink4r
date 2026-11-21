@@ -2,8 +2,7 @@
 # (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X; X'M), geno_multiply() (X B),
-# geno_wcrossprod() and geno_cor() /
-# cor_bed() / cor_pgen() (correlations). Values are A1 (BED) or ALT (PGEN)
+# geno_wcrossprod() and geno_cor() (correlations). Values are A1 (BED) or ALT (PGEN)
 # allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
