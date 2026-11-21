@@ -169,7 +169,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
   const std::vector<int>& qv = G.q;
   const auto dense_dot = la().dense_dot;
   constexpr float kInv = 1.0f / 16384.0f;
-  constexpr double kRowSliceBytes = 8e6;  // row slices of a person block kept cache-resident in the rhs pass
   // S_i = I - C_MM: gathered from C in the per-person solve when C is small enough to stay in cache (no S
   // buffer, no scattered writes in the rhs pass); otherwise written column by column in the rhs pass, where
   // column j of C is hot.
@@ -283,12 +282,7 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
     S = S_buf.get();      // every column of every S_i is written below
     R.t_lists += ik::secs(tb); tb = std::chrono::steady_clock::now();
 
-    // rhs and C_MM, column by column, in slices of the contraction rows l: a slice of every person's row of the
-    // block (nb x lc uint16) stays in the last-level cache while the columns j stream past it
-    const int lc = std::max(64, std::min(ld, static_cast<int>(kRowSliceBytes / (2.0 * std::max(nb, 1))) / 16 * 16));
-    for (int c0 = 0; c0 < ld; c0 += lc) {
-      const int len = std::min(lc, ld - c0);
-      const bool first = c0 == 0;
+    // rhs and C_MM, column by column
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 8) num_threads(T)
 #endif
@@ -299,24 +293,20 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
       const float* cj = C.col(j).data();
       const CellRef* cref = cref_buf.get();
       const int* mflat = mflat_buf.get();
-      constexpr int kAhead = 6;  // prefetch the row slice head, M_i and S_i column of the cell kAhead ahead
+      constexpr int kAhead = 6;  // prefetch the row head, M_i and S_i column of the cell kAhead ahead
       for (int e = e0; e < e1; ++e) {
         if (e + kAhead < e1) {
           const CellRef& cp = cref[e + kAhead];
-          const std::uint16_t* gp = &Gd[static_cast<std::size_t>(cp.i) * ld + c0];
+          const std::uint16_t* gp = &Gd[static_cast<std::size_t>(cp.i) * ld];
           __builtin_prefetch(gp); __builtin_prefetch(gp + 32);
-          if (first) {
-            __builtin_prefetch(mflat + cp.mo);
-            if (!gatherS) __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
-          }
+          __builtin_prefetch(mflat + cp.mo);
+          if (!gatherS) __builtin_prefetch(&S[static_cast<std::size_t>(cp.so) + static_cast<std::size_t>(cp.a) * cp.q], 1);
           __builtin_prefetch(&rhs[cp.mo + cp.a], 1);
         }
         const CellRef& ce = cref[e];
         const int i = ce.i, a = ce.a, q = ce.q;
-        const float d = kInv * dense_dot(aj + c0, &Gd[static_cast<std::size_t>(i) * ld + c0], len);
-        if (!first) { rhs[ce.mo + a] += d; continue; }
         const int* M = mflat + ce.mo;
-        float r = L.Aj[j] + d;
+        float r = L.Aj[j] + kInv * dense_dot(aj, &Gd[static_cast<std::size_t>(i) * ld], ld);
         float r0 = 0, r1 = 0, r2 = 0, r3 = 0;  // independent partial sums (no single add chain)
         int bq = 0;
         for (; bq + 4 <= q; bq += 4) {
@@ -332,7 +322,6 @@ inline Stage1Result impute_stage1(const ImputeLD& L, const LDRows& G, double del
         }
         rhs[ce.mo + a] = r;
       }
-    }
     }
     R.t_rhs += ik::secs(tb); tb = std::chrono::steady_clock::now();
 
