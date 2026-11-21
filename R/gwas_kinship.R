@@ -124,12 +124,16 @@ reml_tau_para <- function() {
 }
 
 # Samples and design of a mixed null model: the samples of .pheno_samples, their phenotype and the numeric design
-# X (intercept first; factors expanded by model.matrix). Aliased columns are found and left out by the fit.
+# X (intercept first; factors expanded by model.matrix), with the term of the formula each column belongs to
+# (assign, an index into labels). Aliased columns are found and left out by the fit.
 .mm_design <- function(formula, data, family, id_col, iid = NULL) {
   s <- .pheno_samples(as.data.frame(data), formula, family, id_col, iid)
-  X <- stats::model.matrix(stats::delete.response(stats::terms(formula)), data = s$d)
+  tm <- stats::delete.response(stats::terms(formula))
+  X <- stats::model.matrix(tm, data = s$d)
+  asg <- attr(X, "assign")
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
-  list(ids = as.character(s$d[[id_col]]), y = s$y, status = s$status, X = X, srow = s$srow)
+  list(ids = as.character(s$d[[id_col]]), y = s$y, status = s$status, X = X, srow = s$srow, assign = asg,
+       labels = attr(tm, "term.labels"))
 }
 
 # K over the analysis samples `ids` from the related pairs (a three-column data.frame: ID, ID, kinship

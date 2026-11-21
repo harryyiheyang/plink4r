@@ -1,4 +1,4 @@
-#' Genome-wide association of one trait (linear or logistic)
+#' Genome-wide association of one trait (linear, logistic or Cox)
 #'
 #' Tests every selected variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
 #' `formula + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
@@ -17,6 +17,11 @@
 #' `BETA = U / I`, `SE = I^-1/2` (`U`, `I` the score and information of `g` given the covariates), `Z` and its
 #' normal `P`; `Z^2` is the score test. No robust SE for the logistic model.
 #'
+#' Common variants: every test here is a large-sample test (normal or chi-square reference), meant for variants
+#' with a minor allele frequency above 0.01. For the logistic and Cox models the reference also needs minor
+#' alleles among the cases (events), about `2 x cases x MAF >= 30`, which MAF > 0.01 gives from 1,500 cases on.
+#' Variants are not filtered here: give the variants to test in `snp_vec`.
+#'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
 #'   the phenotype is coded 0/1 (or 1/2, PLINK case/control). Every variable must be a column of `data`; `.` is
@@ -25,8 +30,8 @@
 #'   missing value in any of them, or not in the genotype file, are left out.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
-#' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards; [gwas()] and
-#'   [reml_tau()] only). Cox: the phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
+#' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards). Cox: the
+#'   phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
 #'   status)`), `status` 1 for an event and 0 for censoring. The null model is fitted once and every variant is
 #'   then tested one step from it (`BETA` a log hazard ratio; `Z` and its normal `P`). Without `kinship` (or with
 #'   no related pair among the analysed samples) the null model is the Cox partial-likelihood fit with the Breslow
@@ -88,11 +93,14 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
   out[]
 }
 
-#' Gene-environment interaction of one trait (GEM, linear or logistic)
+#' Gene-environment interaction of one trait (linear, logistic or Cox)
 #'
-#' For every selected variant fits `formula + g + g:E + g:int_covar` (linear or logistic) as GEM does, from one
-#' null-model fit (`formula`, which contains the exposures and interaction covariates; [stats::glm()], design
-#' taken from the fit) and the same streaming as [gwas()]. Several exposures are tested together: `exposure` may
+#' For every selected variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
+#' (`formula`, which contains the exposures and interaction covariates) and the same streaming as [gwas()]. The
+#' null model is the one of [gwas()] called with the same `formula`, `family`, `kinship` and `para`: without
+#' `kinship` the linear or logistic fit of [stats::glm()] (design taken from the fit); with `kinship`, and for the
+#' Cox model, the null model described there, with the same kinship parameter for the association and the
+#' interaction tests. Several exposures are tested together: `exposure` may
 #' name any number of terms of `formula`, factors and character columns become indicator columns (one interaction
 #' term each), and `int_covar` names terms whose interaction with `g` is adjusted for but not tested. `center = TRUE` centres the exposures and interaction
 #' covariates (numeric ones and indicators alike), so `BETA_G` is the effect of `g` at their mean; the
@@ -106,20 +114,39 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
 #' `TRUE` for linear, as GEM) adds `SE_ROBUST_*`, `P_INT_ROBUST`, `P_JOINT_ROBUST` and `SE_MARGINAL_ROBUST`.
 #' Logistic: one Newton step from the null model (score-based), no robust SE. Chi-square tests throughout.
 #'
+#' With `kinship`, and for the Cox model: with `V` the covariance of the (working) response under the null model,
+#' `P` as in [gwas()] and `Z = [g, g e_1, ..., g e_{S-1}]` (the exposure terms, then the interaction covariates), a
+#' variant gets `c = Z' P y` and `A = Z' P Z`. The marginal effect is `c_1 / A_11` with `SE = A_11^-1/2`, the test
+#' of [gwas()]; `A^-1 c` with covariance `A^-1` gives `BETA_G`, the interactions and the Wald tests `P_INT` and
+#' `P_JOINT` (generalised least squares for the linear model, one step from the null model for the logistic and
+#' Cox models; normal and chi-square references, model-based variances, no robust SE). The exposures of a Cox
+#' model are fixed in time.
+#'
+#' Common variants, as [gwas()]: use variants with a minor allele frequency above 0.01.
+#'
 #' @inheritParams gwas
 #' @param exposure Names of the exposures (one or more): terms of `formula` as written there, e.g. `"smoke"` for
 #'   `y ~ age + smoke`, `"log(bmi)"` for `y ~ age + log(bmi)`.
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), terms of `formula`, or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
-#' @param robust Linear only: add sandwich standard errors (default `TRUE` for linear).
-#' @return data.table, one row per variant, as described above; attribute `info` as [gwas()].
+#' @param robust Linear model without `kinship` only: add sandwich standard errors (default `TRUE` there).
+#' @return data.table, one row per variant, as described above; attribute `info` as [gwas()], with the columns
+#'   of the design used as `exposure_terms` and `int_covar_terms`.
 #' @export
 gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile = NULL,
-                family = c("gaussian", "binomial"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L) {
+                family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, kinship = NULL, para = list()) {
   family <- match.arg(family)
-  if (is.null(robust)) robust <- family == "gaussian"
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
+  if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
+    kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
+  if (!is.null(kinship)) {
+    if (isTRUE(robust)) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
+    return(.gxe_kinship(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center, snp_vec,
+                        threads, mem_gb, block, para))
+  }
+  if (length(para)) stop("para is used with kinship only.", call. = FALSE)
+  if (is.null(robust)) robust <- family == "gaussian"
   r <- .assoc_run(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust, center,
                   threads, mem_gb, block)
   res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp

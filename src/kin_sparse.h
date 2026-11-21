@@ -13,13 +13,14 @@
 // and at any h (solve), with c = 1 / (1 - h + h kd) and H_rr = L L':
 //   Z' H^-1 Z = c Gu + |L^-1 Zr|^2  ->  X' Omega X, X' Omega y, y' Omega y  ->  beta, y' P y, log|X' Omega X|,
 //   log|H| = (n - nr) log(1 - h + h kd) + 2 sum log L_ii.
-// project() then writes, once, what the association stream reads (gwas_kin_stream.cpp), with X' Omega X = La La':
+// project() then writes, once, what the association streams read (gwas_kin_stream.cpp, gxe_kin_stream.cpp), with
+// X' Omega X = La La':
 //   Vb = X La^-T,  L1 = [Q | r],  Q = Omega Vb,  r = Omega (y - X beta) = P y,  om_i = s_i^2 c (0 if related),
 // so that for any g:  g' P g = sum om_i g_i^2 + |L^-1 (s_r o g_r)|^2 - |Q' g|^2.
 // One KinNull is made by a null-model estimator (reml_tau_gaussian.cpp, reml_tau_binomial.cpp, reml_tau_cox.cpp,
-// cox_null.cpp) and handed to the stream by external pointer: the kinship is built once and its factor at the
-// estimate is the one the stream uses. The stream reads om, L1 = [Q | r], rs, ss, the factor (quad_rel) and, when
-// the estimator has one, Vb (empty: no sample-level basis of the projected columns; see reml_tau_cox.cpp).
+// cox_null.cpp) and handed to a stream by external pointer: the kinship is built once and its factor at the
+// estimate is the one the stream uses. A stream reads om, L1 = [Q | r], rs, ss, the factor and, when the estimator
+// has one, Vb (empty: no sample-level basis of the projected columns; see reml_tau_cox.cpp).
 #ifndef PLINK4R_KIN_SPARSE_H
 #define PLINK4R_KIN_SPARSE_H
 

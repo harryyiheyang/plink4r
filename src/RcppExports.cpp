@@ -443,6 +443,28 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// gxe_kin_stream_cpp
+Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, SEXP null, Rcpp::NumericMatrix E, int n_exp, int threads, double mem_gb, int block);
+RcppExport SEXP _plink4r_gxe_kin_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP nullSEXP, SEXP ESEXP, SEXP n_expSEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const std::string& >::type path(pathSEXP);
+    Rcpp::traits::input_parameter< bool >::type bed(bedSEXP);
+    Rcpp::traits::input_parameter< int >::type n_raw(n_rawSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type null(nullSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type E(ESEXP);
+    Rcpp::traits::input_parameter< int >::type n_exp(n_expSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
+    Rcpp::traits::input_parameter< int >::type block(blockSEXP);
+    rcpp_result_gen = Rcpp::wrap(gxe_kin_stream_cpp(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block));
+    return rcpp_result_gen;
+END_RCPP
+}
 // reml_tau_binomial_cpp
 Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_iter, int max_eval, double mu_eps, int start_iter, double h_window, double f_tol, double rank_tol, bool proj);
 RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP start_iterSEXP, SEXP h_windowSEXP, SEXP f_tolSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
@@ -560,6 +582,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 10},
+    {"_plink4r_gxe_kin_stream_cpp", (DL_FUNC) &_plink4r_gxe_kin_stream_cpp, 12},
     {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 16},
     {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
