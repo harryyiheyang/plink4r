@@ -1977,22 +1977,39 @@ int api_geno_mx(SEXP ptr, int scale, const double* B, int k, double* out, int th
   });
 }
 
-// out (q x q) = X'X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, standardized in
-// place in out; geno_crossprod(X)[cols + 1, cols + 1].
+// out (q x q) = X'X of columns cols (0-based, q = nc), or of all p columns when cols is NULL, standardized
+// when scale; geno_crossprod(X)[cols + 1, cols + 1]. It is read from the X'X kept with the object (raw_xtx):
+// a call for all columns forms that X'X when the object does not hold it yet and keeps it, as geno_crossprod(X)
+// does, so the product is computed once per object whoever asks. A call for a subset of the columns reads the
+// kept X'X when there is one and computes the product of the subset alone otherwise (nothing is kept then).
 int api_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
-  const Geno* g = api_geno(ptr);
+  Geno* g = TYPEOF(ptr) == EXTPTRSXP ? static_cast<Geno*>(R_ExternalPtrAddr(ptr)) : nullptr;
   if (!g) return 1;
   if (!out || (cols && !api_cols_ok(*g, cols, nc))) return 2;
   return api_guard([&] {
     threads = resolve_threads(threads);
-    const std::size_t q = cols ? static_cast<std::size_t>(nc) : g->p;
+    const std::size_t p = g->p, q = cols ? static_cast<std::size_t>(nc) : p;
     if (!q) return 0;
-    xtx_into(*g, cols, q, out, threads);
+    const std::vector<double> d = scale ? api_div(*g) : std::vector<double>();
+    if (!cols) {
+      const std::vector<double>& K = raw_xtx(*g, threads);
+      if (!scale) std::copy(K.begin(), K.end(), out);
+      else std_into(K.data(), p, p, g->mu.data(), g->mu.data(), static_cast<double>(g->n), d.data(), d.data(), out,
+                    threads);
+      return 0;
+    }
+    if (g->xtx.empty()) {
+      xtx_into(*g, cols, q, out, threads);
+    } else {
+      for (std::size_t b = 0; b < q; ++b) {
+        const double* kb = g->xtx.data() + static_cast<std::size_t>(cols[b]) * p;
+        for (std::size_t a = 0; a < q; ++a) out[a + b * q] = kb[static_cast<std::size_t>(cols[a])];
+      }
+    }
     if (scale) {
-      const std::vector<double> d = api_div(*g);
       std::vector<double> u(q), dq(q);
       for (std::size_t a = 0; a < q; ++a) {
-        const std::size_t j = cols ? static_cast<std::size_t>(cols[a]) : a;
+        const std::size_t j = static_cast<std::size_t>(cols[a]);
         u[a] = g->mu[j];
         dq[a] = d[j];
       }
