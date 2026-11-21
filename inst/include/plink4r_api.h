@@ -12,9 +12,10 @@
  * result into the caller's buffer (nothing is allocated for the result) and returns PLINK4R_API_OK or an
  * error code (no R error is raised); threads is the OpenMP thread count of plink4r's kernels (0 = from
  * plink4r_resources()). With scale != 0 the result is that of the column-standardized matrix (mean 0, sd 1
- * with n - 1; constant columns only centered), with the same values as the R functions named below. The
- * functions only read the geno object and keep nothing between calls, so they may be called from several
- * threads at once, also on one object; a caller that needs a result more than once keeps it itself.
+ * with n - 1; constant columns only centered). Each function and the R function named with it are wrappers
+ * of one kernel, so the two give identical values. The functions only read the geno object and keep nothing
+ * between calls, so they may be called from several threads at once, also on one object; a caller that
+ * needs a result more than once keeps it itself.
  */
 #ifndef PLINK4R_API_H
 #define PLINK4R_API_H
@@ -24,7 +25,7 @@
 
 #define PLINK4R_API_OK 0
 #define PLINK4R_API_EPTR 1   /* not a live geno external pointer */
-#define PLINK4R_API_EARG 2   /* bad size, NULL buffer or column index out of range */
+#define PLINK4R_API_EARG 2   /* bad size, NULL buffer, column index out of range or non-finite weight */
 #define PLINK4R_API_EFAIL 3  /* failure inside plink4r (e.g. out of memory) */
 
 #ifdef __cplusplus

@@ -138,9 +138,6 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL,
   idx
 }
 
-# Scale divisor: constant columns are centered but not divided (as scale()).
-.geno_div <- function(X) ifelse(X$sd > 0, X$sd, 1)
-
 #' @export
 dim.geno <- function(x) c(x$n, x$p)
 
@@ -216,7 +213,7 @@ geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
 #' @export
 geno_crossprod <- function(X, M = NULL, threads = X$threads) {
   if (is.null(M)) {
-    out <- geno_xtx_cpp(X$ptr, X$scale, .threads(threads))
+    out <- geno_xtx_cpp(X$ptr, X$scale, threads)
     dimnames(out) <- list(X$snp, X$snp)
     return(out)
   }
@@ -248,11 +245,9 @@ geno_multiply <- function(X, B, threads = X$threads) {
 # X'WX by 256 x 256 tiles over blocks of 4096 samples (float products, double sums; geno_xtwx_cpp), X'M by
 # geno_crossprod().
 geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
-  threads <- .threads(threads)
   w <- as.numeric(w)
   if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
-  XtWX <- if (X$scale) geno_xtwx_cpp(X$ptr, w, X$center, .geno_div(X), threads) else
-    geno_xtwx_cpp(X$ptr, w, numeric(0), numeric(0), threads)
+  XtWX <- geno_xtwx_cpp(X$ptr, w, X$scale, threads)
   XtM <- if (is.null(M)) matrix(0, X$p, 0L) else geno_crossprod(X, M, threads = threads)
   dimnames(XtWX) <- list(X$snp, X$snp)
   rownames(XtM) <- X$snp
@@ -265,11 +260,9 @@ geno_wcrossprod <- function(X, w, M = NULL, threads = X$threads) {
 # mean-filled missing calls) the popcounts do not pay: wq = w and the product is
 # geno_wcrossprod's. Returns the matrix and wq, the weights it corresponds to.
 geno_wcrossprod_bin <- function(X, w, threads = X$threads) {
-  threads <- .threads(threads)
   w <- as.numeric(w)
   if (length(w) != X$n) stop("w must have one value per sample.", call. = FALSE)
-  out <- if (X$scale) geno_xtwx_bin_cpp(X$ptr, w, X$center, .geno_div(X), threads) else
-    geno_xtwx_bin_cpp(X$ptr, w, numeric(0), numeric(0), threads)
+  out <- geno_xtwx_bin_cpp(X$ptr, w, X$scale, threads)
   dimnames(out$XtWX) <- list(X$snp, X$snp)
   list(XtWX = out$XtWX, w = out$w)
 }

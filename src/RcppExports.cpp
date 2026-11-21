@@ -169,32 +169,30 @@ BEGIN_RCPP
 END_RCPP
 }
 // geno_xtwx_cpp
-Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center, const Rcpp::NumericVector& div, int threads);
-RcppExport SEXP _plink4r_geno_xtwx_cpp(SEXP ptrSEXP, SEXP wSEXP, SEXP centerSEXP, SEXP divSEXP, SEXP threadsSEXP) {
+Rcpp::NumericMatrix geno_xtwx_cpp(SEXP ptr, const Rcpp::NumericVector& w, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_xtwx_cpp(SEXP ptrSEXP, SEXP wSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type w(wSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type center(centerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type div(divSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_xtwx_cpp(ptr, w, center, div, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_xtwx_cpp(ptr, w, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
 // geno_xtwx_bin_cpp
-Rcpp::List geno_xtwx_bin_cpp(SEXP ptr, const Rcpp::NumericVector& w, const Rcpp::NumericVector& center, const Rcpp::NumericVector& div, int threads);
-RcppExport SEXP _plink4r_geno_xtwx_bin_cpp(SEXP ptrSEXP, SEXP wSEXP, SEXP centerSEXP, SEXP divSEXP, SEXP threadsSEXP) {
+Rcpp::List geno_xtwx_bin_cpp(SEXP ptr, const Rcpp::NumericVector& w, bool scale, int threads);
+RcppExport SEXP _plink4r_geno_xtwx_bin_cpp(SEXP ptrSEXP, SEXP wSEXP, SEXP scaleSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type ptr(ptrSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type w(wSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type center(centerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type div(divSEXP);
+    Rcpp::traits::input_parameter< bool >::type scale(scaleSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(geno_xtwx_bin_cpp(ptr, w, center, div, threads));
+    rcpp_result_gen = Rcpp::wrap(geno_xtwx_bin_cpp(ptr, w, scale, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -548,8 +546,8 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_geno_mx_cpp", (DL_FUNC) &_plink4r_geno_mx_cpp, 4},
     {"_plink4r_geno_cor_cpp", (DL_FUNC) &_plink4r_geno_cor_cpp, 3},
     {"_plink4r_geno_dense_cpp", (DL_FUNC) &_plink4r_geno_dense_cpp, 5},
-    {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 5},
-    {"_plink4r_geno_xtwx_bin_cpp", (DL_FUNC) &_plink4r_geno_xtwx_bin_cpp, 5},
+    {"_plink4r_geno_xtwx_cpp", (DL_FUNC) &_plink4r_geno_xtwx_cpp, 4},
+    {"_plink4r_geno_xtwx_bin_cpp", (DL_FUNC) &_plink4r_geno_xtwx_bin_cpp, 4},
     {"_plink4r_geno_take_cpp", (DL_FUNC) &_plink4r_geno_take_cpp, 5},
     {"_plink4r_geno_merge_cpp", (DL_FUNC) &_plink4r_geno_merge_cpp, 4},
     {"_plink4r_geno_fill_cpp", (DL_FUNC) &_plink4r_geno_fill_cpp, 10},
