@@ -78,18 +78,19 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
       stop(nm[k], " has columns without a chromosome code or a position.", call. = FALSE)
     data.table::data.table(chr = G$chr, pos = as.integer(G$pos), A1 = toupper(G$a1), A2 = toupper(G$a2))
   })
-  r <- if (!is.null(ref)) .harm_ref(ref, build)
+  # of ref, only the rows at a position of some object can name a column: the others are left out before keys are made
+  r <- if (!is.null(ref)) .harm_ref(ref, build)[unique(data.table::rbindlist(metas)[, .(chr, pos)]), on = .(chr, pos),
+                                                 nomatch = NULL][order(ref_row)]
   all_m <- c(if (!is.null(r)) list(r), metas)
   for (m in all_m) m[, cid := paste(chr, pos, pmin(A1, A2), pmax(A1, A2), sep = ":")]
   amb <- unique(unlist(lapply(all_m, function(m) m$cid[duplicated(m$cid)])))
   for (m in all_m) m[, mk := ifelse(cid %in% amb, paste(chr, pos, A1, A2, sep = ":"), cid)]
   # target allele per column: from ref (if given; columns not in ref keep their own), else from the first object
   tgt <- if (!is.null(r)) {
-    r[, ref_row := .I]
     lapply(seq_along(X), function(k) {
       m <- metas[[k]]; i <- match(m$mk, r$mk); hit <- !is.na(i)
       data.table::data.table(A1 = ifelse(hit, r$A1[i], m$A1), A2 = ifelse(hit, r$A2[i], m$A2),
-                             anchor = ifelse(hit, "ref", nm[k]), ref_row = i, A1Freq = r$A1Freq[i])
+                             anchor = ifelse(hit, "ref", nm[k]), ref_row = r$ref_row[i], A1Freq = r$A1Freq[i])
     })
   } else {
     all <- data.table::rbindlist(lapply(seq_along(metas), function(k) metas[[k]][, list(mk, A1, A2, k = k)]))
@@ -129,7 +130,7 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
 }
 
 # The SNP table `ref` of geno_harmonise() (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos, a1, a2),
-# cleaned: chromosome code, alleles upper-cased, positions integer.
+# cleaned: chromosome code, alleles upper-cased, positions integer, ref_row = its row in `ref`.
 .harm_ref <- function(ref, build = NULL) {
   r <- data.table::as.data.table(ref)
   pick <- function(cands, what) {
@@ -145,7 +146,8 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   up <- function(a) .by_unique(as.character(a), toupper)
   data.table::data.table(chr = .chr_code(pick(c("chr", "CHR", "CHROM", "#CHROM"), "chr")), pos = as.integer(r[[pcol]]),
                          A1 = up(pick(c("A1", "a1"), "A1")), A2 = up(pick(c("A2", "a2"), "A2")),
-                         A1Freq = if ("A1Freq" %in% names(r)) as.numeric(r$A1Freq) else NA_real_)
+                         A1Freq = if ("A1Freq" %in% names(r)) as.numeric(r$A1Freq) else NA_real_,
+                         ref_row = seq_len(nrow(r)))
 }
 
 #' Missing cells of a geno object
