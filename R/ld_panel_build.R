@@ -1,61 +1,61 @@
-# Build a blockwise eigen LD panel (one SNP-table parquet + block<N>.eigen.bin) from
-# PLINK genotypes. Offline tool: the columns of a block are opened as a geno object (geno_open(), 2-bit
+# Build a blockwise eigen LD panel (the folder of R/ld_panel.R: snpinfo.parquet, ldminfo.bed, block<N>.eigen.bin)
+# from PLINK genotypes. Offline tool: the columns of a block are opened as a geno object (geno_open(), 2-bit
 # store), its missing calls are filled and the correlations come from geno_cor() (threads);
 # eigendecomposition by base R eigen() (R's BLAS / LAPACK, as the user decided for panel building),
 # blocks one after another.
 
 #' Build an eigen LD panel from PLINK BED / PGEN genotypes
 #'
-#' The output folder is a panel as read by the package (`ld_dir`): one parquet
-#' SNP table (ID, chr, bp37 and/or bp38, ref, alt, AF_PanUKB, block, ld_index)
-#' and `block<N>.eigen.bin`.
+#' The output folder is a panel as read by the package (`ld_dir`):
+#' `snpinfo.parquet` (CHR, BP37, BP38, A1, A2, A1Freq, Block, Index),
+#' `ldminfo.bed` (a header line, then row N = block N: chr, start, end,
+#' NumSNP) and `block<N>.eigen.bin`.
 #'
-#' 1. Rows of `ref` (chr, bp37 and/or bp38, ref, alt; optional ID and
-#'    AF_PanUKB = alt frequency) are matched to the `.pvar` / `.bim` of `geno`
-#'    by chromosome, the `build` position and alleles: a file whose counted
-#'    allele (ALT for PGEN, bim column 5 for BED) is `alt` keeps its sign, one
-#'    whose counted allele is `ref` is flipped; multiallelic `.pvar` rows are
-#'    skipped. The panel is in the `ref` / `alt` orientation of `ref`.
-#' 2. Variants are placed in the blocks of `blocks` by `[start, stop)`. Blocks
+#' 1. Rows of `ref` (CHR, BP37 and/or BP38, A1, A2; optional A1Freq =
+#'    frequency of A1) on chromosomes 1 to 22 are matched to the `.pvar` /
+#'    `.bim` of `geno` by chromosome, the `build` position and alleles: a file
+#'    whose counted allele (ALT for PGEN, bim column 5 for BED) is `A1` keeps
+#'    its sign, one whose counted allele is `A2` is flipped; multiallelic
+#'    `.pvar` rows are skipped. The LD of the panel counts `A1`.
+#' 2. A variant is placed in the block of `blocks` with start <= position < end. Blocks
 #'    without variants are dropped; a block with fewer than `min_snp` variants
 #'    is merged into its neighbour on the same chromosome with fewer variants,
 #'    repeatedly, before anything is computed. Blocks are numbered 1..B.
 #' 3. The plan (one row per block) goes to `out_dir/build/plan.tsv`;
 #'    `dry_run = TRUE` stops here.
 #' 4. Block by block: the block's variants are opened with [geno_open()], their
-#'    missing calls filled as by [genotype_fill()] (with AF_PanUKB the anchored
-#'    value, so the filled column has mean 2 AF; otherwise the observed mean; sd
-#'    is the sample sd after filling), LD by [geno_cor()], signs flipped to the
-#'    alt orientation, variants with sd 0 in the sample dropped, then
+#'    missing calls filled as by [genotype_fill()] (with A1Freq the anchored
+#'    value, so the filled column has mean 2 A1Freq; otherwise the observed
+#'    mean; sd is the sample sd after filling), LD by [geno_cor()], signs
+#'    flipped to count A1, variants with sd 0 in the sample dropped, then
 #'    [write_eigen_bin()]. A finished block is skipped on a rerun unless
 #'    `overwrite`.
-#' 5. The SNP table: the matched rows of `ref` with `block` and `ld_index`
-#'    (0-based eigen row in the block), sorted by block and ld_index; ID is
-#'    kept from `ref` or made as `chr:pos:ref:alt`; AF_PanUKB is kept from
-#'    `ref` or, when absent, the sample alt frequency.
+#' 5. The SNP table: the matched rows of `ref` with `Block` and `Index`
+#'    (0-based eigen row in the block), sorted by Block and Index; CHR is the
+#'    integer chromosome code, a build `ref` lacks is `NA`, and A1Freq is kept
+#'    from `ref` or, when absent, is the sample frequency of A1.
 #'
 #' @param geno PLINK prefix(es) (or `.pgen` / `.bed` paths); each file's
 #'   chromosomes are read from its own `.pvar` (uncompressed) or `.bim`.
 #' @param ref Parquet path or data.frame of candidate variants (see 1.).
 #' @param out_dir Output folder (created if needed).
 #' @param blocks Block file on the same build as the genotypes: a header line
-#'   (names not checked), then exactly three whitespace-separated columns chr,
-#'   start, stop; anything else is an error. `NULL` uses the bundled file for
-#'   `build` ([ld_blocks_default()]).
-#' @param build 38 or 37: the build of the genotypes (picks bp38 or bp37).
+#'   (names not checked), then whitespace-separated columns chr, start, end
+#'   first on every line; further columns are not read, so the `ldminfo.bed`
+#'   of a panel is such a file. `NULL` uses the bundled file for `build`
+#'   ([ld_blocks_default()]).
+#' @param build 38 or 37: the build of the genotypes (picks BP38 or BP37).
 #' @param sample IIDs to use (`NULL` = all samples of each file).
 #' @param thresh Eigenvalue truncation (proportion of the positive sum).
 #' @param min_snp Blocks with fewer matched variants are merged (see 2.).
 #' @param threads OpenMP threads for the correlations; 0 takes them from
 #'   [plink4r_resources()]. The eigendecomposition uses R's BLAS threads.
-#' @param name File name of the SNP table.
 #' @param dry_run Only write and return the plan.
 #' @param overwrite Recompute blocks whose output already exists.
 #' @return Invisibly, list(plan, log, panel) (only `plan` when `dry_run`).
 #' @export
 ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample = NULL,
-                           thresh = 0.999, min_snp = 100L, threads = 4L,
-                           name = "ld_panel.parquet", dry_run = FALSE, overwrite = FALSE) {
+                           thresh = 0.999, min_snp = 100L, threads = 4L, dry_run = FALSE, overwrite = FALSE) {
   threads <- .threads(threads)
   build <- as.integer(build)
   if (!build %in% c(37L, 38L)) stop("build must be 37 or 38.", call. = FALSE)
@@ -82,7 +82,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
   logf <- file.path(wd, "log.tsv")
   has_af <- "AF" %in% names(m)
   for (b in plan$Block) {
-    eig <- file.path(out_dir, paste0("block", b, ".eigen.bin"))
+    eig <- .ld_block_file(out_dir, b)
     rf <- file.path(wd, paste0("block", b, ".rows.tsv"))
     if (!overwrite && .ldb_done(eig, rf)) next
     v <- m[Block == b]
@@ -125,16 +125,15 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
 
   rows <- data.table::rbindlist(lapply(plan$Block, function(b) {
     x <- data.table::fread(file.path(wd, paste0("block", b, ".rows.tsv")))
-    x[, `:=`(block = b, ld_index = seq_len(.N) - 1L)]
+    x[, `:=`(Block = b, Index = seq_len(.N) - 1L)]
   }))
-  panel <- r$table[rows$rid]
-  panel[, `:=`(block = rows$block, ld_index = rows$ld_index)]
-  if (!"AF_PanUKB" %in% names(panel)) panel[, AF_PanUKB := rows$af_sample]
-  if (!"ID" %in% names(panel)) panel[, ID := paste(sub("^chr", "", chr, ignore.case = TRUE),
-                                                   get(paste0("bp", build)), ref, alt, sep = ":")]
-  data.table::setcolorder(panel, intersect(.ldb_cols, names(panel)))
-  for (f in list.files(out_dir, pattern = "\\.parquet$", full.names = TRUE)) if (basename(f) != name) file.remove(f)
-  arrow::write_parquet(panel, file.path(out_dir, name))
+  panel <- .with_bp(r$table[rows$rid])
+  panel[, `:=`(Block = rows$Block, Index = rows$Index)]
+  if (!"A1Freq" %in% names(panel)) panel[, A1Freq := rows$af_sample]
+  data.table::setcolorder(panel, .panel_cols)
+  arrow::write_parquet(panel, file.path(out_dir, .panel_snpinfo))
+  data.table::fwrite(plan[, .(chr = paste0("chr", Chrom), start = StartBP, end = EndBP, NumSNP)],
+                     file.path(out_dir, .panel_ldminfo), sep = "\t")
   invisible(list(plan = plan, log = if (file.exists(logf)) data.table::fread(logf) else NULL, panel = panel))
 }
 
@@ -166,7 +165,7 @@ write_eigen_bin <- function(R, path, thresh = 0.999) {
 #'
 #' GRCh38: pyrho EUR blocks (1,336 blocks, chr1-22). GRCh37: LDetect EUR
 #' blocks (Berisa and Pickrell 2016; 1,702 blocks, chr1-22). Both are a header
-#' line plus chr, start, stop.
+#' line plus chr, start, end.
 #' @param build 38 or 37.
 #' @return Path to the block file.
 #' @export
@@ -178,25 +177,22 @@ ld_blocks_default <- function(build = 38) {
   system.file("extdata", f, package = "plink4r", mustWork = TRUE)
 }
 
-.ldb_chr <- function(x) sub("^chr", "", as.character(x), ignore.case = TRUE)
-.ldb_auto <- as.character(1:22)
-
-.ldb_cols <- c("ID", "chr", "bp37", "bp38", "ref", "alt", "AF_PanUKB", "block", "ld_index")
-
-# ref table (parquet or data.frame): its panel columns, and a key CHR / BP / REF / ALT (/ AF) with row id rid.
+# ref table (parquet or data.frame): its panel columns (chromosome code, alleles in upper case), and the key CHR /
+# BP / A1 / A2 (/ AF) of its rows on chromosomes 1 to 22 with a position on the build, with row id rid.
 .ldb_ref <- function(x, build) {
   d <- if (is.data.frame(x)) data.table::as.data.table(x) else data.table::as.data.table(arrow::read_parquet(x))
-  bp <- paste0("bp", build)
-  miss <- setdiff(c("chr", bp, "ref", "alt"), names(d))
+  bp <- paste0("BP", build)
+  miss <- setdiff(c("CHR", bp, "A1", "A2"), names(d))
   if (length(miss)) stop("ref lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
-  d <- d[, intersect(setdiff(.ldb_cols, c("block", "ld_index")), names(d)), with = FALSE]
-  key <- data.table::data.table(rid = seq_len(nrow(d)), CHR = .ldb_chr(d$chr), BP = as.integer(d[[bp]]),
-                                REF = toupper(d$ref), ALT = toupper(d$alt))
-  if ("AF_PanUKB" %in% names(d)) key[, AF := as.numeric(d$AF_PanUKB)]
-  list(table = d, key = key[CHR %in% .ldb_auto & !is.na(BP)])
+  d <- d[, intersect(setdiff(.panel_cols, c("Block", "Index")), names(d)), with = FALSE]
+  d[, `:=`(CHR = .chr_code(CHR), A1 = .by_unique(as.character(A1), toupper), A2 = .by_unique(as.character(A2), toupper))]
+  for (b in intersect(c("BP37", "BP38"), names(d))) data.table::set(d, j = b, value = as.integer(d[[b]]))
+  key <- data.table::data.table(rid = seq_len(nrow(d)), CHR = d$CHR, BP = d[[bp]], A1 = d$A1, A2 = d$A2)
+  if ("A1Freq" %in% names(d)) key[, AF := as.numeric(d$A1Freq)]
+  list(table = d, key = key[CHR %in% 1:22 & !is.na(BP)])
 }
 
-# Variants of every genotype file: file, 1-based row, chromosome, position, counted / other allele of its biallelic
+# Variants of every genotype file: file, 1-based row, chromosome code, position, counted / other allele of its biallelic
 # rows on chromosomes 1 to 22. files[[f]] = list(prefix as given, file = its geno_file(), read without IDs), from
 # which every block of the file is opened.
 .ldb_geno_variants <- function(geno) {
@@ -210,7 +206,7 @@ ld_blocks_default <- function(build = 38) {
     files[[f]] <- list(prefix = pre, file = gf)
     v <- gf$variants
     v <- data.table::data.table(file = f, row = v$row, CHR = v$chr, BP = v$pos, cnt = v$a1, oth = v$a2)[v$allele_ct == 2L]
-    vars[[f]] <- v[CHR %in% .ldb_auto]
+    vars[[f]] <- v[CHR %in% 1:22]
   }
   vars <- data.table::rbindlist(vars)
   fc <- unique(vars[, .(file, CHR)])
@@ -222,15 +218,15 @@ ld_blocks_default <- function(build = 38) {
 
 .ldb_match <- function(ref, gv) {
   v <- gv$variants
-  same <- v[ref, on = .(CHR, BP, cnt = ALT, oth = REF), nomatch = NULL]
+  same <- v[ref, on = .(CHR, BP, cnt = A1, oth = A2), nomatch = NULL]
   same[, sgn := 1L]
-  data.table::setnames(same, c("cnt", "oth"), c("ALT", "REF"))
-  swap <- v[ref, on = .(CHR, BP, cnt = REF, oth = ALT), nomatch = NULL]
+  data.table::setnames(same, c("cnt", "oth"), c("A1", "A2"))
+  swap <- v[ref, on = .(CHR, BP, cnt = A2, oth = A1), nomatch = NULL]
   swap[, sgn := -1L]
-  data.table::setnames(swap, c("cnt", "oth"), c("REF", "ALT"))
+  data.table::setnames(swap, c("cnt", "oth"), c("A2", "A1"))
   m <- data.table::rbindlist(list(same, swap), use.names = TRUE)
-  data.table::setorder(m, CHR, BP, REF, ALT, file, row)
-  dup <- duplicated(m, by = c("CHR", "BP", "REF", "ALT"))
+  data.table::setorder(m, CHR, BP, A2, A1, file, row)
+  dup <- duplicated(m, by = c("CHR", "BP", "A2", "A1"))
   if (any(dup)) {
     warning(sum(dup), " ref variants match more than one genotype row; the first is used.", call. = FALSE)
     m <- m[!dup]
@@ -239,24 +235,25 @@ ld_blocks_default <- function(build = 38) {
   m
 }
 
-# Block file: first line is a header (names not checked), then exactly three
-# whitespace-separated columns chr start stop; anything else is an error.
+# Block file: first line is a header (names not checked), then on every line the whitespace-separated columns chr
+# start end first (further columns are not read: the ldminfo.bed of a panel is such a file). The blocks of
+# chromosomes 1 to 22, with the chromosome code.
 .ldb_read_blocks <- function(path) {
   x <- trimws(readLines(path))
   x <- x[nzchar(x)]
   f <- strsplit(x, "[[:space:]]+")
   nf <- lengths(f)
-  if (length(f) < 2L || any(nf != 3L)) {
-    bad <- which(nf != 3L)
-    stop("Block file must be a header line plus three whitespace-separated columns chr start stop",
+  if (length(f) < 2L || any(nf < 3L)) {
+    bad <- which(nf < 3L)
+    stop("Block file must be a header line plus lines that begin with the columns chr start end",
          if (length(bad)) paste0(" (line ", bad[1L], " has ", nf[bad[1L]], ")"), ": ", path, call. = FALSE)
   }
-  body <- do.call(rbind, f[-1L])
-  bl <- data.table::data.table(src = seq_len(nrow(body)), CHR = .ldb_chr(body[, 1L]),
-                               start = suppressWarnings(as.numeric(body[, 2L])),
-                               end = suppressWarnings(as.numeric(body[, 3L])))
-  if (anyNA(bl$start) || anyNA(bl$end)) stop("start and stop must be numbers: ", path, call. = FALSE)
-  bl <- bl[CHR %in% .ldb_auto]
+  body <- vapply(f[-1L], function(a) a[1:3], character(3))
+  bl <- data.table::data.table(src = seq_len(ncol(body)), CHR = .chr_code(body[1L, ]),
+                               start = suppressWarnings(as.numeric(body[2L, ])),
+                               end = suppressWarnings(as.numeric(body[3L, ])))
+  if (anyNA(bl$start) || anyNA(bl$end)) stop("start and end must be numbers: ", path, call. = FALSE)
+  bl <- bl[CHR %in% 1:22]
   data.table::setorder(bl, CHR, start)
   bl
 }
@@ -298,13 +295,13 @@ ld_blocks_default <- function(build = 38) {
       m[src == x$src[hi], src := x$src[lo]]
       x <- x[-hi]
     }
-    res[[ch]] <- x
+    res[[length(res) + 1L]] <- x
   }
   b <- data.table::rbindlist(res)
-  b <- b[order(as.integer(CHR), start)]
+  b <- b[order(CHR, start)]
   b[, Block := seq_len(.N)]
   m <- m[b[, .(src, Block)], on = "src"]
-  m <- m[order(Block, BP, REF, ALT)]
+  m <- m[order(Block, BP, A2, A1)]
   fl <- m[, .(file = file[1L], nfile = data.table::uniqueN(file), n_flip = sum(sgn < 0)), by = Block]
   plan <- b[fl, on = "Block"][, .(Block, Chrom = CHR, StartBP = start, EndBP = end, NumSNP = N,
                                   n_flip, src_blocks = members, file)]

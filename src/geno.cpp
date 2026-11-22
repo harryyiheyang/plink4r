@@ -1032,6 +1032,29 @@ void mx_into(const Geno& g_, const double* b, std::size_t k, double* o, int thre
   }
 }
 
+// M B into o (n x k, overwritten) for a dense p x k matrix b, M the n x p indicator of the cells that were missing
+// in the file: o[i, c] = sum of b[j, c] over the columns j with cell (i, j) missing. All-zero rows of b are skipped.
+void miss_mx_into(const Geno& g_, const double* b, std::size_t k, double* o, int threads) {
+  const Geno* g = &g_;
+  const std::size_t n = g->n, p = g->p;
+  std::fill(o, o + n * k, 0.0);
+  #pragma omp parallel num_threads(threads)
+  {
+    const std::size_t nt = static_cast<std::size_t>(plink4r::thread_team()), t = static_cast<std::size_t>(plink4r::thread_id());
+    const std::uint32_t r0 = static_cast<std::uint32_t>(n * t / nt), r1 = static_cast<std::uint32_t>(n * (t + 1) / nt);
+    std::vector<double> bj(k);
+    for (std::size_t j = 0; j < p; ++j) {
+      const std::vector<std::uint32_t>& rows = g->M[j];
+      if (rows.empty()) continue;
+      bool any = false;
+      for (std::size_t c = 0; c < k; ++c) { bj[c] = b[j + c * p]; any = any || bj[c] != 0.0; }
+      if (!any) continue;
+      for (auto it = std::lower_bound(rows.begin(), rows.end(), r0); it != rows.end() && *it < r1; ++it)
+        for (std::size_t c = 0; c < k; ++c) o[*it + c * n] += bj[c];
+    }
+  }
+}
+
 // Dense block X[rows, cols] of the stored matrix (0-based) into o (nr x nc).
 void dense_into(const Geno& g_, const int* rows, std::size_t nr, const int* cols, std::size_t nc, double* o,
                 int threads) {
@@ -1254,6 +1277,17 @@ Rcpp::NumericMatrix geno_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, bool sca
   if (static_cast<std::size_t>(B.nrow()) != g->p) Rcpp::stop("B must have one row per variant.");
   Rcpp::NumericMatrix out(g->n, B.ncol());
   prod_mx(*g, scale, B.begin(), B.ncol(), out.begin(), threads);
+  return out;
+}
+
+// M B for a dense p x k matrix B, M the n x p indicator of the cells that were missing in the file (whatever they
+// hold now): per sample, the sum of the rows of B over its missing cells.
+// [[Rcpp::export]]
+Rcpp::NumericMatrix geno_miss_mx_cpp(SEXP ptr, const Rcpp::NumericMatrix& B, int threads) {
+  Rcpp::XPtr<Geno> g(ptr);
+  if (static_cast<std::size_t>(B.nrow()) != g->p) Rcpp::stop("B must have one row per variant.");
+  Rcpp::NumericMatrix out(g->n, B.ncol());
+  miss_mx_into(*g, B.begin(), B.ncol(), out.begin(), resolve_threads(threads));
   return out;
 }
 
@@ -1873,6 +1907,10 @@ void plink4r_register_ccallables(DllInfo* dll) {
   R_RegisterCCallable("plink4r", "plink4r_geno_cols", reinterpret_cast<DL_FUNC>(&api_geno_cols));
   R_RegisterCCallable("plink4r", "plink4r_geno_xtwx_bin", reinterpret_cast<DL_FUNC>(&api_geno_xtwx_bin));
 }
+
+// Instruction set of the SIMD kernels picked at run time (avx512, avx2 or generic; PLINK4R_SIMD caps it).
+// [[Rcpp::export]]
+std::string simd_isa_cpp() { return plink4r::la().isa; }
 
 // Read-only: the threads and memory budget a call with threads = 0 / mem_gb = 0 would use.
 // [[Rcpp::export]]

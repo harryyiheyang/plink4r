@@ -54,7 +54,8 @@
 #'   "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
 #'   (whether the PGEN holds dosages) and `dosage_nnz` (nonzero entries of the
 #'   int16 deviation D); per column also `id` (file ID; `chr:pos:a1:a2` when opened from
-#'   `geno_file(id = FALSE)`, built once at open for the opened rows only), `chr`, `pos`, `row` (file row), `flipped` (stored
+#'   `geno_file(id = FALSE)`, built once at open for the opened rows only), `chr` (integer chromosome code, see
+#'   [geno_file()]), `pos`, `row` (file row), `flipped` (stored
 #'   value = 2 - file value), `n_miss` (missing calls) and `af` (observed frequency of `a1`); per row `fid`;
 #'   and `file` = list(type, path). The rows of the missing cells are kept (see [geno_missing()]). It holds an
 #'   external pointer, so it is valid only in the current R session (it cannot
@@ -135,7 +136,7 @@ dimnames.geno <- function(x) list(NULL, x$snp)
 print.geno <- function(x, ...) {
   if (isTRUE(x$dosage)) {
     cat(sprintf("geno matrix: %d samples x %d variants, dosage (%.1f%% of entries off the hard call), scale = %s (%.2f GB in memory)\n",
-                x$n, x$p, 100 * x$dosage_nnz / (x$n * x$p), x$scale,
+                x$n, x$p, 100 * x$dosage_nnz / x$n / x$p, x$scale,
                 sum(unlist(geno_info_cpp(x$ptr)[c("bytes_H", "bytes_D")])) / 1e9))
     if (!is.null(x$n_miss)) cat(sprintf("missing cells: %.0f in %d variants\n", sum(x$n_miss), sum(x$n_miss > 0)))
     return(invisible(x))

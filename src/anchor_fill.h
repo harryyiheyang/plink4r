@@ -1,6 +1,6 @@
 // The anchored fill of a column: the one value f its missing cells take so that the column's allele count is the
 // anchor's, sum of the observed cells + n_miss f = 2 n af, clipped to the range of a dosage [0, 2]. Used by
-// geno_fill_cpp (genotype_fill(af = )), stage 2 of the LD fill (impute_kernel.h) and score_stream_cpp (geno_score).
+// geno_fill_cpp (genotype_fill(af = )) and stage 2 of the LD fill (impute_kernel.h).
 #ifndef PLINK4R_ANCHOR_FILL_H
 #define PLINK4R_ANCHOR_FILL_H
 

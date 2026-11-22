@@ -21,10 +21,10 @@
 #' missing dosages are filled.
 #'
 #' The LD fill works on the panel SNPs that are columns of `x` (panel SNPs absent from `x` are not carried). The
-#' panel need not share the object's allele orientation, IDs or build: SNPs are aligned by ID and alleles, else by
-#' chromosome, position and allele pair, and a swapped pair enters with a negative sign.
+#' panel need not share the object's allele orientation, IDs or build: SNPs are aligned by chromosome, position
+#' and allele pair, and a swapped pair enters with a negative sign.
 #' Stage 1 (OpenMP over people): z_M = R_MO (R_OO + delta I)^{-1} z_O per person on the working set S,
-#' standardized with the anchor AF (`af`, else AF_PanUKB in the object's orientation), from
+#' standardized with the anchor AF (`af`, else the panel's A1Freq in the object's orientation), from
 #' C_S = I - delta (R_SS + delta I)^{-1}, built by Woodbury in the k eigenpairs or directly in |S|, whichever is
 #' smaller; delta must be > 0. S is the panel rows of the columns to fill plus `flank` eigen rows on each side
 #' inside the same LD block (blocks are independent in the panel, so a region spanning blocks is filled block by
@@ -36,8 +36,8 @@
 #'
 #' @param x A `geno` object.
 #' @param af Anchor frequency of the counted allele, one per column (`NA` = not anchored).
-#' @param ld NULL, or list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
-#'   parquet path or data.frame in place of that table).
+#' @param ld NULL, or list(dir = the LD panel folder (`snpinfo.parquet` and block<N>.eigen.bin), ref = optional
+#'   parquet path or data.frame in place of `snpinfo.parquet`).
 #' @param const Fill constant per column (`NA` = not given).
 #' @param snps NULL (every column), or the columns (names, or numbers) to fill and, for `ld`, to condition on.
 #' @param cells data.frame(snp = column name (or j = column number), IID, g) of per-cell fills; cells that
@@ -126,22 +126,22 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
 # The LD fill of genotype_fill(): writes the final fills of the missing cells of the columns `use` into the store ptr
 # (a fresh copy of the object's store; genotype_fill_ld_cpp reads the genotypes from it and writes into it), one LD
 # block after another. al = the panel aligned to the columns of the object (.ld_align: vi = 0-based column, sign = +1
-# when the counted allele is the panel alt), af = NULL or the anchor frequency of the counted allele per column (finite
-# entries replace the panel AF), cond = NULL or the columns of the conditioning set, P = the genotype_fill_para()
+# when the counted allele is the panel's A1), af = NULL or the anchor frequency of the counted allele per column (finite
+# entries replace the panel's A1Freq), cond = NULL or the columns of the conditioning set, P = the genotype_fill_para()
 # values (threads and mem_gb resolved). The working rows of a block are the panel rows of its columns to fill plus
 # P$flank eigen rows on each side, with an AF in (0, 1) and in cond.
 .genotype_fill_ld <- function(ptr, al, ld_dir, use, af, cond, P) {
   if (!is.null(af)) {  # anchors are frequencies of the counted allele; the panel column is in panel orientation
     pa <- as.numeric(af)[al$vi + 1L]
     ok <- is.finite(pa)
-    al$AF_PanUKB[ok] <- ifelse(al$sign[ok] > 0, pa[ok], 1 - pa[ok])
+    al$A1Freq[ok] <- ifelse(al$sign[ok] > 0, pa[ok], 1 - pa[ok])
   }
   rs <- al[(al$vi + 1L) %in% use]
-  for (blk in sort(unique(rs$block))) {
-    li <- rs$ld_index[rs$block == blk]
-    keep <- rs$vi[rs$block == blk]
+  for (blk in sort(unique(rs$Block))) {
+    li <- rs$Index[rs$Block == blk]
+    keep <- rs$vi[rs$Block == blk]
     w <- .ld_rows(al, blk, min(li) - P$flank, max(li) + P$flank)
-    w <- w[AF_PanUKB > 0 & AF_PanUKB < 1]
+    w <- w[A1Freq > 0 & A1Freq < 1]
     if (!is.null(cond)) {
       inc <- (w$vi + 1L) %in% cond
       if (any(lost <- !inc & w$vi %in% keep))
@@ -149,10 +149,10 @@ genotype_fill <- function(x, af = NULL, ld = NULL, const = NULL, cells = NULL, s
       w <- w[inc]
     }
     if (!nrow(w)) stop("no SNP of block ", blk, " found in the geno object", call. = FALSE)
-    genotype_fill_ld_cpp(ptr, as.integer(w$vi), normalizePath(file.path(ld_dir, paste0("block", blk, ".eigen.bin"))),
-                         ifelse(w$sign > 0, w$AF_PanUKB, 1 - w$AF_PanUKB), as.integer(w$sign), P$thresh, P$delta,
+    genotype_fill_ld_cpp(ptr, as.integer(w$vi), .ld_block_file(ld_dir, blk),
+                         ifelse(w$sign > 0, w$A1Freq, 1 - w$A1Freq), as.integer(w$sign), P$thresh, P$delta,
                          P$anchor_min_miss, w$vi %in% keep, as.integer(P$threads), 0L, P$mem_gb,
-                         as.integer(w$ld_index), P$dosage_step)
+                         as.integer(w$Index), P$dosage_step)
   }
   invisible(NULL)
 }

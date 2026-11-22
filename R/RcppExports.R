@@ -33,6 +33,10 @@ geno_mx_cpp <- function(ptr, B, scale, threads) {
     .Call(`_plink4r_geno_mx_cpp`, ptr, B, scale, threads)
 }
 
+geno_miss_mx_cpp <- function(ptr, B, threads) {
+    .Call(`_plink4r_geno_miss_mx_cpp`, ptr, B, threads)
+}
+
 geno_cor_cpp <- function(ptr_a, ptr_b, threads) {
     .Call(`_plink4r_geno_cor_cpp`, ptr_a, ptr_b, threads)
 }
@@ -65,20 +69,12 @@ geno_miss_cpp <- function(ptr) {
     .Call(`_plink4r_geno_miss_cpp`, ptr)
 }
 
-resources_cpp <- function(threads, mem_gb) {
-    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
-}
-
-score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk) {
-    .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk)
-}
-
-score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows, dosage_step) {
-    .Call(`_plink4r_score_ld_block_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows, dosage_step)
-}
-
 simd_isa_cpp <- function() {
     .Call(`_plink4r_simd_isa_cpp`)
+}
+
+resources_cpp <- function(threads, mem_gb) {
+    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
 }
 
 genotype_fill_ld_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
@@ -105,7 +101,7 @@ reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval,
     .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj)
 }
 
-sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
-    .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
+sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, threads) {
+    .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
 }
 
