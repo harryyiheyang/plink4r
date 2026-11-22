@@ -51,8 +51,9 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
 #'
 #' @param X A named list of `geno` objects (or one object), in order of priority.
 #' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns: `CHR` (or chr /
-#'   CHROM), `BP37` or `BP38` (or pos / POS / BP; the build of the objects' positions), `A1`, `A2`, optional
-#'   `A1Freq` (frequency of A1); "chr" prefixes are removed and alleles upper-cased.
+#'   CHROM; read as the chromosome code of [geno_file()], so X, chrX and 23 are the same), `BP37` or `BP38` (or
+#'   pos / POS / BP; the build of the objects' positions), `A1`, `A2`, optional `A1Freq` (frequency of A1);
+#'   alleles are upper-cased. The SNP table of an LD panel (`snpinfo.parquet`) is such a table.
 #' @param build 37 or 38: which of `BP37` / `BP38` to use when `ref` has both.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A list of `geno` objects like `X`, with column names `chr:pos:a1:a2` (a1 = counted allele)
@@ -73,9 +74,9 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   if (anyDuplicated(nm)) stop("The names of X must be unique.", call. = FALSE)
   metas <- lapply(seq_along(X), function(k) {
     G <- X[[k]]
-    if (is.null(G$chr) || anyNA(G$chr) || anyNA(G$pos)) stop(nm[k], " has no chr / pos per column.", call. = FALSE)
-    data.table::data.table(chr = sub("^chr", "", as.character(G$chr), ignore.case = TRUE), pos = as.integer(G$pos),
-                           A1 = toupper(G$a1), A2 = toupper(G$a2))
+    if (is.null(G$chr) || anyNA(G$chr) || anyNA(G$pos))
+      stop(nm[k], " has columns without a chromosome code or a position.", call. = FALSE)
+    data.table::data.table(chr = G$chr, pos = as.integer(G$pos), A1 = toupper(G$a1), A2 = toupper(G$a2))
   })
   r <- if (!is.null(ref)) .harm_ref(ref, build)
   all_m <- c(if (!is.null(r)) list(r), metas)
@@ -128,7 +129,7 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
 }
 
 # The SNP table `ref` of geno_harmonise() (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos, a1, a2),
-# cleaned: "chr" prefix removed, alleles upper-cased, positions integer.
+# cleaned: chromosome code, alleles upper-cased, positions integer.
 .harm_ref <- function(ref, build = NULL) {
   r <- data.table::as.data.table(ref)
   pick <- function(cands, what) {
@@ -141,9 +142,9 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   pcol <- if (!is.null(build)) paste0("BP", build) else if (length(pc)) pc[1L] else if (length(bc) == 1L) bc else
     stop("ref needs exactly one of BP37 / BP38 (or pos), or set build", call. = FALSE)
   if (!pcol %in% names(r)) stop("ref has no column ", pcol, call. = FALSE)
-  data.table::data.table(chr = sub("^chr", "", as.character(pick(c("chr", "CHR", "CHROM", "#CHROM"), "chr")), ignore.case = TRUE),
-                         pos = as.integer(r[[pcol]]),
-                         A1 = toupper(pick(c("A1", "a1"), "A1")), A2 = toupper(pick(c("A2", "a2"), "A2")),
+  up <- function(a) .by_unique(as.character(a), toupper)
+  data.table::data.table(chr = .chr_code(pick(c("chr", "CHR", "CHROM", "#CHROM"), "chr")), pos = as.integer(r[[pcol]]),
+                         A1 = up(pick(c("A1", "a1"), "A1")), A2 = up(pick(c("A2", "a2"), "A2")),
                          A1Freq = if ("A1Freq" %in% names(r)) as.numeric(r$A1Freq) else NA_real_)
 }
 
@@ -169,6 +170,6 @@ geno_missing <- function(X) {
   alt <- toupper(X$a1)
   act <- 2L + lengths(regmatches(alt, gregexpr(",", alt, fixed = TRUE)))
   act[is.na(alt)] <- 0L  # a column without alleles is matched to nothing
-  data.table::data.table(CHROM = sub("^chr", "", as.character(X$chr), ignore.case = TRUE), POS = as.integer(X$pos),
-                         ID = X$snp, REF = toupper(X$a2), ALT = alt, row = seq_len(X$p), allele_ct = act)
+  data.table::data.table(CHROM = X$chr, POS = as.integer(X$pos), ID = X$snp, REF = toupper(X$a2), ALT = alt,
+                         row = seq_len(X$p), allele_ct = act)
 }

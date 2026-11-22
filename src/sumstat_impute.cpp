@@ -55,18 +55,21 @@ const char* method_name(int code) {
 
 }  // namespace
 
+// files: the eigen.bin of each block; blocks: their numbers (for messages and the log);
 // typed_index: list of 0-based strictly increasing eigen-row indices per block; z: matching z-scores.
 // Returns, per block, list(z, r2) of length m by eigen row: typed rows keep their z with r2 = 1; every other row
 // gets the imputed z and r2 = R_jO (R_OO + delta I)^{-1} R_Oj / R_jj, its imputation quality; attr block_log.
 // Blocks run longest first (cost from the eigen.bin headers), OpenMP over blocks; the dense algebra uses the
 // instruction set chosen at run time (la_dispatch.h).
 // [[Rcpp::export]]
-Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z,
-                              double thresh, double delta, int threads) {
+Rcpp::List sumstat_impute_cpp(Rcpp::CharacterVector files, Rcpp::IntegerVector blocks, Rcpp::List typed_index,
+                              Rcpp::List z, double thresh, double delta, int threads) {
   const int T = plink4r::resolve_threads(threads);
   if (!(delta > 0)) Rcpp::stop("delta must be > 0");
   const int nb = blocks.size();
-  if (typed_index.size() != nb || z.size() != nb) Rcpp::stop("blocks, typed_index and z differ in length");
+  if (files.size() != nb || typed_index.size() != nb || z.size() != nb)
+    Rcpp::stop("files, blocks, typed_index and z differ in length");
+  const std::vector<std::string> fv = Rcpp::as<std::vector<std::string>>(files);
   std::vector<int> bv(nb);
   std::vector<std::vector<int>> tv(nb);
   std::vector<std::vector<float>> zv(nb);
@@ -78,7 +81,7 @@ Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blo
   std::vector<double> cost(nb);
   for (int i = 0; i < nb; ++i) {
     int m, k;
-    block_header(plink4r::block_path(ld_dir, bv[i]), m, k);
+    block_header(fv[i], m, k);
     cost[i] = block_cost(m, k, static_cast<int>(tv[i].size()));
   }
   std::vector<int> order(nb);
@@ -96,7 +99,7 @@ Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blo
     const int i = order[o];
     const auto t0 = std::chrono::steady_clock::now();
     try {
-      const EigenBlock ld = plink4r::read_eigen_block(plink4r::block_path(ld_dir, bv[i]), thresh);
+      const EigenBlock ld = plink4r::read_eigen_block(fv[i], thresh);
       mm[i] = ld.m; kk[i] = ld.k;
       for (std::size_t j = 0; j < tv[i].size(); ++j)
         if (tv[i][j] < 0 || tv[i][j] >= ld.m || (j && tv[i][j] <= tv[i][j - 1])) throw std::runtime_error("bad typed_index");

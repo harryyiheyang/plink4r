@@ -1,6 +1,7 @@
 # Reading the .pvar and .psam of a PLINK2 fileset, shared by geno_file, geno_score and the association scans.
 
-# CHROM POS ID REF ALT of a .pvar (or .pvar.zst), with row (1-based) and allele_ct; id = FALSE skips the ID column.
+# CHROM (the chromosome code, R/chr.R) POS ID REF ALT of a .pvar (or .pvar.zst), with row (1-based) and allele_ct;
+# id = FALSE skips the ID column.
 .read_pvar5 <- function(pfile, id = TRUE) {
   pf <- paste0(pfile, ".pvar")
   sel <- if (id) 1:5 else c(1L, 2L, 4L, 5L)
@@ -10,8 +11,8 @@
       stop("no .pvar or .pvar.zst for ", pfile, call. = FALSE)
   data.table::setnames(pvar, c("CHROM", "POS", "ID", "REF", "ALT")[sel])
   # per distinct value: a 22M-row .pvar has few distinct CHROM / REF / ALT strings
-  pvar[, `:=`(row = .I, CHROM = .by_unique(CHROM, function(u) sub("^chr", "", u, ignore.case = TRUE)),
-              POS = as.integer(POS), REF = .by_unique(REF, toupper), ALT = .by_unique(ALT, toupper))]
+  pvar[, `:=`(row = .I, CHROM = .chr_code(CHROM), POS = as.integer(POS), REF = .by_unique(REF, toupper),
+              ALT = .by_unique(ALT, toupper))]
   ac <- rep(2L, nrow(pvar))
   w <- grep(",", pvar$ALT, fixed = TRUE)
   if (length(w)) ac[w] <- 2L + lengths(regmatches(pvar$ALT[w], gregexpr(",", pvar$ALT[w], fixed = TRUE)))

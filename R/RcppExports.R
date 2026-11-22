@@ -105,7 +105,7 @@ reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval,
     .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj)
 }
 
-sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
-    .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
+sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, threads) {
+    .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
 }
 

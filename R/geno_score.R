@@ -16,7 +16,7 @@
 #'   the missing calls of a variant take the constant `c = (2 n p - sum_obs) / n_miss` (clipped to [0, 2]),
 #'   so observed + filled allele count equals `2 n p`; without one, `c` is the observed mean, which is
 #'   exactly plink2's default mean imputation. With `ld`, variants in the eigen.bin panel take the LD fill
-#'   instead (per-cell LD conditional mean, stage 2 anchored to `p` or to `AF_PanUKB`), one LD
+#'   instead (per-cell LD conditional mean, stage 2 anchored to `p` or to the panel's A1Freq), one LD
 #'   block at a time through the same kernel as the LD fill of [genotype_fill()]; variants outside the panel keep
 #'   the anchored constant.
 #' * `"none"`: plink2 `no-mean-imputation`; a missing call adds nothing and lowers `allele_ct` by 2.
@@ -33,9 +33,8 @@
 #' @param freq_col Column of `weights` with the A1 frequency used as anchor (plink2 `--read-freq`); ignored
 #'   when absent; `NA` entries fall back to the observed frequency.
 #' @param impute `"anchor"` or `"none"`.
-#' @param ld `NULL`, or `list(dir = folder of block<N>.eigen.bin and the panel SNP .parquet, ref = optional
-#'   table in place of that parquet)` as for
-#'   [genotype_fill()]: the panel is aligned to the .pvar by ID and alleles, else by chromosome, position and
+#' @param ld `NULL`, or `list(dir = the LD panel folder, ref = optional table in place of its
+#'   snpinfo.parquet)` as for [genotype_fill()]: the panel is aligned to the .pvar by chromosome, position and
 #'   allele pair, in either orientation; only panel SNPs present in the .pvar enter the imputation.
 #' @param transform `"none"`, `"center"` or `"standardize"`.
 #' @param sample IIDs to score (`NULL` = all .psam rows), in the row order wanted.
@@ -95,12 +94,12 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   if (!length(ok)) stop("No weight variant matched the .pvar.", call. = FALSE)
 
   q <- ncol(W)
-  # anchor of the LD path, in PGEN-ALT units: the given A1 frequency, else the panel's AF_PanUKB
+  # anchor of the LD path, in PGEN-ALT units: the given A1 frequency, else the panel's A1Freq
   p_alt_given <- ifelse(flip, 1 - pfreq, pfreq)
   ld_cand <- rep(FALSE, length(ids)); k_all <- rep(NA_integer_, length(ids))
   if (!is.null(ld) && impute == "anchor") {
     al <- .ld_align(.ld_panel(ld$ref, ld$dir), pvar)  # panel rows in the PGEN, with vi and sign
-    al[, `:=`(arow = .I, anchor = ifelse(sign > 0, AF_PanUKB, 1 - AF_PanUKB))]  # anchor: PGEN-ALT frequency
+    al[, `:=`(arow = .I, anchor = ifelse(sign > 0, A1Freq, 1 - A1Freq))]  # anchor: PGEN-ALT frequency
     k_all[ok] <- match(idx[ok] - 1L, al$vi)
     anc <- ifelse(is.finite(p_alt_given), p_alt_given, al$anchor[k_all])
     ld_cand[ok] <- !is.na(k_all[ok]) & is.finite(anc[ok]) & anc[ok] > 0 & anc[ok] < 1
@@ -108,6 +107,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
 
   # ---- one pass over the PGEN per chromosome, in file order: counts, tables and scores (C++)
   chr <- pvar$CHROM[idx[ok]]
+  chr[is.na(chr)] <- 0L  # variants without a chromosome code pass together
   chrs <- unique(chr)
   pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(chrs), style = 3) else NULL
   step <- 0L
@@ -141,7 +141,7 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   p_alt_anchor <- p_alt_given[ok]
   s <- ifelse(fl, -1, 1)
   Wa <- W[ok, , drop = FALSE] * a
-  ld_blocks_todo <- if (any(in_ld)) sort(unique(al$block[k[in_ld]])) else integer(0)
+  ld_blocks_todo <- if (any(in_ld)) sort(unique(al$Block[k[in_ld]])) else integer(0)
   pb <- if (isTRUE(P$progress) && length(ld_blocks_todo)) utils::txtProgressBar(0, length(ld_blocks_todo), style = 3) else NULL
   step <- 0L
   t_stream <- proc.time()[["elapsed"]] - t0
@@ -160,12 +160,12 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
       tb <- proc.time()[["elapsed"]]
       wr <- .ld_rows(al, blocks[b])
       wr <- wr[anchor > 0 & anchor < 1]
-      ef <- file.path(ld$dir, paste0("block", blocks[b], ".eigen.bin"))
       Bb <- Bw[wr$arow, , drop = FALSE]
-      out <- score_ld_block_cpp(pgen, length(iid), act, as.integer(wr$vi), as.integer(si - 1L), normalizePath(ef),
+      out <- score_ld_block_cpp(pgen, length(iid), act, as.integer(wr$vi), as.integer(si - 1L),
+                                .ld_block_file(ld$dir, blocks[b]),
                                 wr$anchor, as.integer(wr$sign), P$thresh, P$delta, P$anchor_min_miss, Bb, threads,
                                 if (is.null(P$nb_people)) 0L else as.integer(P$nb_people), P$mem_gb,
-                                as.integer(wr$ld_index), P$dosage_step)
+                                as.integer(wr$Index), P$dosage_step)
       S <- S + out$score
       tick()
       ld_info[[b]] <- data.table::data.table(block = blocks[b], m = nrow(wr), scored = sum(rowSums(Bb != 0) > 0),

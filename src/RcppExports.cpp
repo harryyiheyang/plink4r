@@ -464,19 +464,19 @@ BEGIN_RCPP
 END_RCPP
 }
 // sumstat_impute_cpp
-Rcpp::List sumstat_impute_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z, double thresh, double delta, int threads);
-RcppExport SEXP _plink4r_sumstat_impute_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP typed_indexSEXP, SEXP zSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP threadsSEXP) {
+Rcpp::List sumstat_impute_cpp(Rcpp::CharacterVector files, Rcpp::IntegerVector blocks, Rcpp::List typed_index, Rcpp::List z, double thresh, double delta, int threads);
+RcppExport SEXP _plink4r_sumstat_impute_cpp(SEXP filesSEXP, SEXP blocksSEXP, SEXP typed_indexSEXP, SEXP zSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< const std::string& >::type ld_dir(ld_dirSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type files(filesSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type blocks(blocksSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type typed_index(typed_indexSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type z(zSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(sumstat_impute_cpp(ld_dir, blocks, typed_index, z, thresh, delta, threads));
+    rcpp_result_gen = Rcpp::wrap(sumstat_impute_cpp(files, blocks, typed_index, z, thresh, delta, threads));
     return rcpp_result_gen;
 END_RCPP
 }
