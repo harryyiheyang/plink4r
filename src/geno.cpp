@@ -37,12 +37,6 @@
 namespace {
 
 using plink4r::PgenFile;
-// PGEN genovec codes as ALT dosage for the geno object: 0 hom REF, 1 het, 2 two non-REF alleles, 3 missing.
-// This matches the BED table of geno (A1 dosage, as BEDMatrix), since plink2 imports BED with A1 as ALT.
-const NibbleTable& pgen_table() {
-  static const NibbleTable t({0, 1, 2, -1});
-  return t;
-}
 
 constexpr std::size_t kGroup = 64;          // variants per read group
 constexpr std::size_t kDBlock = 8;          // mask words per prefix count (512 rows)
@@ -161,15 +155,62 @@ inline int resolve_threads(int threads) {
 #endif
 }
 
-// Packed column of the selected samples, in their requested order.
-inline void gather_packed(const unsigned char* column, const std::vector<int>& rows,
-                          unsigned char* buf) {
-  std::fill(buf, buf + (rows.size() + 3) / 4, 0);
-  for (std::size_t i = 0; i < rows.size(); ++i) {
-    const unsigned int r = static_cast<unsigned int>(rows[i]);
-    const unsigned int code = (column[r >> 2] >> (2 * (r & 3u))) & 3u;
-    buf[i >> 2] |= static_cast<unsigned char>(code << (2 * (i & 3u)));
+// Every input reaches the object as a genovec (codes 0/1/2 = ALT / A1 count, 3 = missing; 32 samples per
+// 64-bit word, first sample in the low bits; BED rows are recoded to it), plus, for a dosage PGEN, the file's
+// sparse dosages. PGEN ALT counts match the BED A1 counts (as BEDMatrix): plink2 imports BED with A1 as ALT.
+
+// The even bits of x (one bit of each 2-bit code) packed into the low 32 bits.
+inline u64 pack_even(u64 x) {
+  x &= 0x5555555555555555ULL;
+  x = (x | (x >> 1)) & 0x3333333333333333ULL;
+  x = (x | (x >> 2)) & 0x0F0F0F0F0F0F0F0FULL;
+  x = (x | (x >> 4)) & 0x00FF00FF00FF00FFULL;
+  x = (x | (x >> 8)) & 0x0000FFFF0000FFFFULL;
+  return (x | (x >> 16)) & 0x00000000FFFFFFFFULL;
+}
+
+// Planes of a genovec of n samples, word by word: lo = [code 1], hi = [code 2], miss = [code 3]; bits past n are 0.
+void genovec_planes(const u64* gv, std::size_t n, std::size_t W, u64* lo, u64* hi, u64* miss) {
+  const std::size_t gw = (n + 31) / 32, used = (n + 63) / 64;
+  for (std::size_t w = 0; w < W; ++w) {
+    if (w >= used) { lo[w] = hi[w] = miss[w] = 0; continue; }
+    const u64 a = gv[2 * w], b = 2 * w + 1 < gw ? gv[2 * w + 1] : 0;
+    const u64 l = pack_even(a) | (pack_even(b) << 32), h = pack_even(a >> 1) | (pack_even(b >> 1) << 32);
+    lo[w] = l & ~h;
+    hi[w] = h & ~l;
+    miss[w] = l & h;
   }
+  if (n % 64) {
+    const u64 mask = (u64(1) << (n % 64)) - 1;
+    lo[n / 64] &= mask;
+    hi[n / 64] &= mask;
+    miss[n / 64] &= mask;
+  }
+}
+
+// The samples rows[0..ns-1] (0-based file rows, any order) of a variant read over all samples: genovec into gv
+// (2 W words) and, when dosage_ct > 0, the dosages into present (W words) and main; returns their count.
+// cum: (W_raw + 1) words of scratch for the rank of a sample among the dosages of the file row.
+PLINK4R_POPCNT std::uint32_t gather_sparse(const PgenFile::Sparse& s, const std::vector<int>& rows, std::size_t W,
+                            u64* gv, u64* present, std::uint16_t* main, std::vector<std::uint32_t>& cum) {
+  std::memset(gv, 0, 2 * W * sizeof(u64));
+  plink4r::compact_genovec(reinterpret_cast<const unsigned char*>(s.genovec), rows.data(), static_cast<int>(rows.size()),
+                           false, reinterpret_cast<unsigned char*>(gv));
+  if (!s.dosage_ct) return 0;
+  std::size_t raw_max = 0;
+  for (int r : rows) raw_max = std::max<std::size_t>(raw_max, static_cast<std::size_t>(r));
+  const std::size_t rw = raw_max / 64 + 1;
+  cum.assign(rw + 1, 0);
+  for (std::size_t w = 0; w < rw; ++w) cum[w + 1] = cum[w] + static_cast<std::uint32_t>(popcount64(s.present[w]));
+  std::memset(present, 0, W * sizeof(u64));
+  std::uint32_t k = 0;
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const std::size_t r = static_cast<std::size_t>(rows[i]), w = r / 64, b = r % 64;
+    if (!((s.present[w] >> b) & 1u)) continue;
+    present[i / 64] |= u64(1) << (i % 64);
+    main[k++] = s.main[cum[w] + popcount64(s.present[w] & ((u64(1) << b) - 1))];
+  }
+  return k;
 }
 
 // Fills the missing entries (mask miss) of variant j with the constant f:
@@ -194,7 +235,7 @@ void fill_missing(Geno& g, std::size_t j, const u64* miss, double f, bool fill, 
 }
 
 // G.s[j] = sum h and G.v[j] = n sum h^2 - (sum h)^2 from the planes.
-void plane_stats(Geno& g, std::size_t j) {
+PLINK4R_POPCNT void plane_stats(Geno& g, std::size_t j) {
   std::int64_t c1 = 0, c2 = 0;
   const u64* lo = g.G.lo(j);
   const u64* hi = g.G.hi(j);
@@ -207,36 +248,83 @@ void plane_stats(Geno& g, std::size_t j) {
   g.G.v[j] = static_cast<std::int64_t>(g.n) * (c1 + 4 * c2) - s * s;
 }
 
-// Hardcall column: planes of the observed calls, then the missing calls filled
-// with the variant's lower median (left 0 when every call is missing); their
-// rows go to M[j]. Other fills: geno_fill_cpp afterwards.
-void encode_column(Geno& g, const NibbleTable& table, const unsigned char* buf,
-                   std::size_t j, u64* miss) {
-  const std::size_t W = g.G.words, n = g.n;
+// Column j from a genovec of the object's n samples (2 W words) and, for a dosage PGEN, its sparse dosages
+// (present: one bit per sample, main: the dosages of the set bits in order, 1/16384 steps, dosage_ct of them).
+// A cell is missing when its code is 3 and it has no dosage; the rows of missing cells go to M[j].
+//   hard calls: H = the code; missing cells take the variant's lower median through H (left 0 when every
+//     call is missing). Other fills: geno_fill_cpp afterwards.
+//   dosage PGEN: a cell's dosage (the explicit one, else its code) taken to the nearest 0.01
+//     (plink4r::dosage_grid), H = that value rounded (halves up), D = the rest as int16 steps of 0.01 in
+//     [-50, 49]; missing cells take the variant's observed mean of those values, through H + D.
+// Only words and the cells with a dosage or a missing call are visited. False when a dosage is above 2.
+PLINK4R_POPCNT bool encode_variant(Geno& g, std::size_t j, const u64* gv, const u64* present, const std::uint16_t* main,
+                    std::uint32_t dosage_ct, u64* miss) {
+  const std::size_t W = g.G.words, n = g.n, used = (n + 63) / 64;
   u64* lo = g.G.bits.data() + 2 * j * W;
-  std::int64_t s, v;
-  encode_packed(table, buf, n, (n + 3) / 4, W, lo, lo + W, s, v, miss);
-  std::int64_t cm = 0;
-  for (std::size_t w = 0; w < W; ++w) cm += popcount64(miss[w]);
-  const std::int64_t obs = static_cast<std::int64_t>(n) - cm;
+  u64* hi = lo + W;
+  genovec_planes(gv, n, W, lo, hi, miss);
+  const u64 tail = n % 64 ? (u64(1) << (n % 64)) - 1 : ~u64(0);
+  auto pres = [&](std::size_t w) -> u64 { return dosage_ct ? present[w] & (w + 1 == used ? tail : ~u64(0)) : 0; };
+  std::int64_t c1 = 0, c2 = 0, cm = 0;
+  for (std::size_t w = 0; w < used; ++w) {
+    const u64 pw = pres(w);
+    lo[w] &= ~pw;
+    hi[w] &= ~pw;
+    miss[w] &= ~pw;
+    c1 += popcount64(lo[w]);
+    c2 += popcount64(hi[w]);
+    cm += popcount64(miss[w]);
+  }
   g.nmiss[j] = static_cast<double>(cm);
-  DBuilder db(g, j);
-  if (cm) {
-    double f = 0.0;
-    if (obs) {
-      std::int64_t c1 = 0, c2 = 0;
-      for (std::size_t w = 0; w < W; ++w) {
-        c1 += popcount64(lo[w]);
-        c2 += popcount64(lo[W + w]);
-      }
+  g.M[j].reserve(static_cast<std::size_t>(cm));
+  if (!g.dosage) {
+    DBuilder db(g, j);
+    if (cm) {
+      const std::int64_t obs = static_cast<std::int64_t>(n) - cm;
       const std::int64_t c0 = obs - c1 - c2;
-      f = 2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0);
+      const double f = obs ? (2 * c0 >= obs ? 0.0 : (2 * (c0 + c1) >= obs ? 1.0 : 2.0)) : 0.0;
+      fill_missing(g, j, miss, f, obs > 0, db);
     }
-    g.M[j].reserve(static_cast<std::size_t>(cm));
-    fill_missing(g, j, miss, f, obs > 0, db);
+    db.finish();
+    plane_stats(g, j);
+    return true;
+  }
+  g.D[j].unit = kDosUnit;
+  std::uint64_t obs_sum = static_cast<std::uint64_t>(kDosSteps) * static_cast<std::uint64_t>(c1 + 2 * c2);
+  for (std::uint32_t k = 0; k < dosage_ct; ++k) {
+    if (main[k] > 32768u) return false;
+    obs_sum += plink4r::dosage_grid(main[k]);
+  }
+  unsigned int hfill = 0;
+  int qfill = 0;
+  if (cm && static_cast<std::size_t>(cm) < n)
+    quantize_fill(static_cast<double>(obs_sum) / kDosSteps / static_cast<double>(n - cm), kDosUnit, hfill, qfill);
+  DBuilder db(g, j);
+  std::uint32_t k = 0;
+  for (std::size_t w = 0; w < used; ++w) {
+    const u64 pw = pres(w), mw = miss[w];
+    for (u64 bits = pw | mw; bits; bits &= bits - 1) {
+      const unsigned int b = static_cast<unsigned int>(__builtin_ctzll(bits));
+      const std::size_t i = 64 * w + b;
+      unsigned int h;
+      int q;
+      if ((pw >> b) & 1u) {
+        const unsigned int c = plink4r::dosage_grid(main[k++]);
+        h = (c + kDosSteps / 2) / kDosSteps;
+        q = static_cast<int>(c) - static_cast<int>(h) * kDosSteps;
+      } else {
+        h = hfill;
+        q = qfill;
+        g.M[j].push_back(static_cast<std::uint32_t>(i));
+      }
+      if (h == 1) lo[w] |= u64(1) << b;
+      else if (h == 2) hi[w] |= u64(1) << b;
+      if (q) db.add(i, h, q);
+    }
   }
   db.finish();
   plane_stats(g, j);
+  return true;
 }
 
 void init_geno(Geno& g, std::size_t n, std::size_t p) {
@@ -273,79 +361,6 @@ void finish_stats(Geno& g) {
 
 std::vector<int> to_rows(const Rcpp::IntegerVector& x) {
   return std::vector<int>(x.begin(), x.end());
-}
-
-// Dosage PGEN: the file's dosage (1/16384 steps) is taken to the nearest 0.01 (plink4r::dosage_grid); H = that
-// value rounded to the nearest integer (halves up) into the planes, D = value - H as int16 in [-50, 49] steps
-// of 0.01. Missing dosages take the variant's observed mean of those values, through D; their rows go to M[j].
-void load_dosage(Geno& g, PgenFile& file, const Rcpp::IntegerVector& variants,
-                 const std::vector<int>& rows, int threads, const std::string& path) {
-  const std::size_t n = g.n, p = g.p, sel_stride = (n + 3) / 4, W = g.G.words;
-  g.dosage = true;
-  const NibbleTable& table = pgen_table();
-  const std::uint16_t kMiss = PgenFile::kMissing;
-  std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
-  for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
-    const std::size_t count = std::min(kGroup, p - g0);
-    int failed = 0, range = 0;
-    #pragma omp parallel for num_threads(threads) schedule(static)
-    for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
-      const int t = plink4r::thread_id();
-      const std::size_t j = g0 + static_cast<std::size_t>(k);
-      const std::uint16_t* x = file.read_dosage(static_cast<std::size_t>(variants[j]), t);
-      if (!x) {
-        #pragma omp atomic write
-        failed = 1;
-        continue;
-      }
-      std::uint64_t obs_sum = 0;
-      std::size_t miss = 0;
-      bool bad_range = false;
-      for (std::size_t i = 0; i < n; ++i) {
-        const std::uint16_t v = x[rows[i]];
-        if (v == kMiss) ++miss;
-        else if (v > 32768u) bad_range = true;
-        else obs_sum += plink4r::dosage_grid(v);
-      }
-      if (bad_range) {
-        #pragma omp atomic write
-        range = 1;
-        continue;
-      }
-      g.nmiss[j] = static_cast<double>(miss);
-      unsigned int hfill = 0;
-      int qfill = 0;
-      const double fmean = miss < n ? static_cast<double>(obs_sum) / kDosSteps / static_cast<double>(n - miss) : 0.0;
-      if (miss) quantize_fill(fmean, kDosUnit, hfill, qfill);
-      g.M[j].reserve(miss);
-      unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
-      std::fill(buf, buf + sel_stride, 0);
-      g.D[j].unit = kDosUnit;
-      DBuilder db(g, j);
-      for (std::size_t i = 0; i < n; ++i) {
-        const std::uint16_t v = x[rows[i]];
-        unsigned int h;
-        int q;
-        if (v == kMiss) {
-          h = hfill;
-          q = qfill;
-          g.M[j].push_back(static_cast<std::uint32_t>(i));
-        } else {
-          const unsigned int c = plink4r::dosage_grid(v);
-          h = (c + kDosSteps / 2) / kDosSteps;
-          q = static_cast<int>(c) - static_cast<int>(h) * kDosSteps;
-        }
-        buf[i >> 2] |= static_cast<unsigned char>(h << (2 * (i & 3u)));
-        if (q) db.add(i, h, q);
-      }
-      db.finish();
-      u64* lo = g.G.bits.data() + 2 * j * W;
-      encode_packed(table, buf, n, sel_stride, W, lo, lo + W, g.G.s[j], g.G.v[j]);
-    }
-    if (failed) Rcpp::stop("Could not read PGEN file: " + path);
-    if (range) Rcpp::stop("Dosage above 2 in PGEN file: " + path);
-    Rcpp::checkUserInterrupt();
-  }
 }
 
 // Bytes held by H (2-bit planes) and by D (masks, int16 values, prefix
@@ -581,16 +596,13 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   threads = resolve_threads(threads);
   plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
   const std::size_t stride = bf.stride();
-
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
   init_geno(*g, rows.size(), variants.size());
-  static const NibbleTable table({2, -1, 1, 0});  // A1 dosage: 00:2, 01:NA, 10:1, 11:0
-  const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
+  const bool identity = plink4r::identity_samples(rows.data(), static_cast<int>(rows.size()), n_total);
+  const std::size_t W = g->G.words, p = g->p;
   std::vector<unsigned char> buffer(kGroup * stride);
-  std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
-  std::vector<u64> missbuf(static_cast<std::size_t>(threads) * W);
-  const std::size_t p = g->p;
+  std::vector<u64> gvbuf(static_cast<std::size_t>(threads) * 2 * W), missbuf(static_cast<std::size_t>(threads) * W);
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
     for (std::size_t k = 0; k < count; ++k) {
@@ -601,9 +613,12 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
       const int t = plink4r::thread_id();
-      unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
-      gather_packed(buffer.data() + k * stride, rows, buf);
-      encode_column(*g, table, buf, g0 + k, missbuf.data() + static_cast<std::size_t>(t) * W);
+      unsigned char* row = buffer.data() + static_cast<std::size_t>(k) * stride;
+      plink4r::BedFile::to_counts(row, stride);
+      u64* gv = gvbuf.data() + static_cast<std::size_t>(t) * 2 * W;
+      std::memset(gv, 0, 2 * W * sizeof(u64));
+      plink4r::compact_genovec(row, rows.data(), static_cast<int>(rows.size()), identity, reinterpret_cast<unsigned char*>(gv));
+      encode_variant(*g, g0 + k, gv, nullptr, nullptr, 0, missbuf.data() + static_cast<std::size_t>(t) * W);
     }
     Rcpp::checkUserInterrupt();
   }
@@ -611,6 +626,8 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   return g;
 }
 
+// Samples in ascending order are subset by pgenlib (word by word, dosages included) and encoded straight from the
+// file's sparse form; any other order reads all samples and gathers the requested ones.
 // [[Rcpp::export]]
 SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct,
                         const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads) {
@@ -618,38 +635,54 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
   PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
-  if (file.dosage()) {
+  if (file.dosage())
     for (int v : variants)
       if (allele_ct[v] > 2)
         Rcpp::stop("Multiallelic variants are not supported in PGEN files with dosages: " + path);
-    init_geno(*g, rows.size(), variants.size());
-    load_dosage(*g, file, variants, rows, threads, path);
-    finish_stats(*g);
-    return g;
-  }
   init_geno(*g, rows.size(), variants.size());
-  const NibbleTable& table = pgen_table();
-  const std::size_t sel_stride = (rows.size() + 3) / 4, W = g->G.words;
-  std::vector<unsigned char> packed(static_cast<std::size_t>(threads) * sel_stride);
-  std::vector<u64> missbuf(static_cast<std::size_t>(threads) * W);
-  const std::size_t p = g->p;
+  g->dosage = file.dosage();
+  bool ascending = true;
+  for (std::size_t i = 1; i < rows.size() && ascending; ++i) ascending = rows[i] > rows[i - 1];
+  if (ascending) file.set_samples(rows);
+  const std::size_t W = g->G.words, p = g->p, n = g->n;
+  std::vector<u64> missbuf(static_cast<std::size_t>(threads) * W), gvbuf, presbuf;
+  std::vector<std::uint16_t> mainbuf;
+  std::vector<std::vector<std::uint32_t>> cum(static_cast<std::size_t>(threads));
+  if (!ascending) {
+    gvbuf.assign(static_cast<std::size_t>(threads) * 2 * W, 0);
+    presbuf.assign(static_cast<std::size_t>(threads) * W, 0);
+    if (g->dosage) mainbuf.assign(static_cast<std::size_t>(threads) * n, 0);
+  }
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
-    int failed = 0;
+    int failed = 0, range = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
       const int t = plink4r::thread_id();
-      const unsigned char* column = file.read(static_cast<std::size_t>(variants[g0 + k]), t);
-      if (!column) {
+      PgenFile::Sparse s;
+      if (!file.read_sparse(static_cast<std::size_t>(variants[g0 + k]), t, s)) {
         #pragma omp atomic write
         failed = 1;
         continue;
       }
-      unsigned char* buf = packed.data() + static_cast<std::size_t>(t) * sel_stride;
-      gather_packed(column, rows, buf);
-      encode_column(*g, table, buf, g0 + k, missbuf.data() + static_cast<std::size_t>(t) * W);
+      u64* miss = missbuf.data() + static_cast<std::size_t>(t) * W;
+      bool ok;
+      if (ascending) {
+        ok = encode_variant(*g, g0 + k, s.genovec, s.present, s.main, s.dosage_ct, miss);
+      } else {
+        u64* gv = gvbuf.data() + static_cast<std::size_t>(t) * 2 * W;
+        u64* pres = presbuf.data() + static_cast<std::size_t>(t) * W;
+        std::uint16_t* mn = g->dosage ? mainbuf.data() + static_cast<std::size_t>(t) * n : nullptr;
+        const std::uint32_t dct = gather_sparse(s, rows, W, gv, pres, mn, cum[static_cast<std::size_t>(t)]);
+        ok = encode_variant(*g, g0 + k, gv, pres, mn, dct, miss);
+      }
+      if (!ok) {
+        #pragma omp atomic write
+        range = 1;
+      }
     }
     if (failed) Rcpp::stop("Could not read PGEN file: " + path);
+    if (range) Rcpp::stop("Dosage above 2 in PGEN file: " + path);
     Rcpp::checkUserInterrupt();
   }
   finish_stats(*g);
@@ -666,12 +699,20 @@ inline std::int64_t step_sum_col(const Geno& g, std::size_t j, int k) {
 }
 
 // Sum of the stored values of column j over its observed (not missing) cells, summed exactly in int16 steps, so
-// the result equals the sum of the file's observed calls (hard calls) or 0.01 dosages.
-double obs_sum_col(const Geno& g, std::size_t j) {
+// the result equals the sum of the file's observed calls (hard calls) or 0.01 dosages. The missing rows (ascending)
+// are walked together with the D mask, so the rank of a D value is counted once per word.
+PLINK4R_POPCNT double obs_sum_col(const Geno& g, std::size_t j) {
   const DCol& c = g.D[j];
   const int k = unit_steps(c.unit);
   std::int64_t tot = step_sum_col(g, j, k);
-  for (std::uint32_t i : g.M[j]) tot -= k * static_cast<std::int64_t>(h_at(g.G, j, i)) + q_at(c, i);
+  std::size_t w_at = 0, rank = 0;  // rank: D values in mask words before w_at
+  for (std::uint32_t i : g.M[j]) {
+    tot -= k * static_cast<std::int64_t>(h_at(g.G, j, i));
+    if (c.mask.empty()) continue;
+    const std::size_t w = i / 64, b = i % 64;
+    for (; w_at < w; ++w_at) rank += popcount64(c.mask[w_at]);
+    if ((c.mask[w] >> b) & 1u) tot -= c.q[rank + popcount64(c.mask[w] & ((u64(1) << b) - 1))];
+  }
   return static_cast<double>(tot) / k;
 }
 
