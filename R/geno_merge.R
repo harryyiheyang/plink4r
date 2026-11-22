@@ -10,8 +10,11 @@
 #'   24 = Y, 26 = MT; variants without a code last), position, `a1`, then `a2`, whatever the order of the
 #'   objects. The same variant in the opposite orientation is another variant: bring the objects to one
 #'   orientation first with [geno_harmonise()].
-#' * samples: `sample = NULL`, the union over the objects of (FID, IID) in the order of first appearance;
-#'   `sample` given, the samples of `sample` that some object holds, in the order of `sample`.
+#' * samples: a sample is its FID and IID when every object has family IDs. An object without them (no FID
+#'   column in its .psam, or FID 0 throughout) says nothing about the family, so when there is one a sample is
+#'   its IID: a person is the same in a file with and a file without family IDs. `sample = NULL`, the union
+#'   over the objects in the order of first appearance; `sample` given, the samples of `sample` that some
+#'   object holds, in the order of `sample`.
 #' * cells: a cell (sample, variant) is copied as stored (a missing cell keeps its fill) from the first
 #'   object, in the order given, that holds both the sample and the variant. A cell no object holds becomes
 #'   a missing cell filled with the observed mean of its column; [genotype_fill()] refills the missing cells.
@@ -21,7 +24,8 @@
 #'
 #' @param ... `geno` objects, or one list of them (e.g. the result of [geno_harmonise()]).
 #' @param sample `NULL`, or the samples to keep and their order: a data.frame whose first two columns are FID
-#'   and IID, or the path of such a file (.fam, .psam, or any table with FID and IID first).
+#'   and IID, or the path of such a file (.fam, .psam, or any table with FID and IID first); its FID is used
+#'   only when a sample is FID and IID.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @return A `geno` object. `scale` is that of the first object, `impute` and `file` those of the objects
 #'   when they agree (else `"mixed"` and `NULL`), the column fields of a variant those of the first object
@@ -32,7 +36,12 @@ geno_merge <- function(..., sample = NULL, threads = 4L) {
   if (length(X) == 1L && !inherits(X[[1L]], "geno") && is.list(X[[1L]])) X <- X[[1L]]
   if (!length(X) || !all(vapply(X, inherits, NA, "geno"))) stop("give geno objects, or a list of them.", call. = FALSE)
   K <- length(X)
-  skey <- lapply(X, function(x) paste(if (is.null(x$fid)) x$sample else x$fid, x$sample, sep = "\r"))
+  # the sample key: IID as soon as one object has no family IDs (fid "0" throughout, see .psam_ids), else FID and IID
+  by_iid <- !all(vapply(X, function(x) !is.null(x$fid) && any(x$fid != "0"), NA))
+  if (by_iid && any(vapply(X, function(x) anyDuplicated(x$sample) > 0L, NA)))
+    stop("an IID is repeated inside an object, and not every object has family IDs to tell its samples apart.",
+         call. = FALSE)
+  skey <- lapply(X, function(x) if (by_iid) x$sample else paste(x$fid, x$sample, sep = "\r"))
   vkey <- lapply(X, function(x) paste(x$chr, x$pos, x$a1, x$a2, sep = "\r"))
   # samples of the result
   s_obj <- rep(seq_len(K), lengths(skey)); s_all <- unlist(skey, use.names = FALSE)
@@ -41,7 +50,7 @@ geno_merge <- function(..., sample = NULL, threads = 4L) {
   } else {
     if (is.character(sample) && length(sample) == 1L) sample <- data.table::fread(sample, colClasses = "character", data.table = FALSE)
     if (!is.data.frame(sample) || ncol(sample) < 2L) stop("sample must be a data.frame (FID, IID) or the path of such a file.", call. = FALSE)
-    s_first <- match(unique(paste(sample[[1L]], sample[[2L]], sep = "\r")), s_all)
+    s_first <- match(unique(if (by_iid) as.character(sample[[2L]]) else paste(sample[[1L]], sample[[2L]], sep = "\r")), s_all)
     s_first <- s_first[!is.na(s_first)]
   }
   if (length(s_first) < 2L) stop("fewer than two samples to merge.", call. = FALSE)
