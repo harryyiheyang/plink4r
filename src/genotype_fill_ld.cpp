@@ -1,6 +1,5 @@
 // The LD fill of genotype_fill(): the missing cells of a geno object (hard calls or dosages) filled from an eigen.bin LD block
-// and written into the object. The algorithm (stage 1 conditional mean, stage 2 anchor) lives in impute_kernel.h, shared with
-// geno_score.
+// and written into the object. The algorithm (stage 1 conditional mean, stage 2 anchor) lives in impute_kernel.h.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>

@@ -1,11 +1,10 @@
-// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types so that two
-// R entry points share it: the LD fill of genotype_fill (genotype_fill_ld.cpp: writes the filled cells into a geno
-// object) and the LD path of geno_score (adds w * filled cell into scores without keeping the cells).
+// Core of the eigen.bin LD imputation of missing cells (hard calls and dosages), free of Rcpp types. Its one entry
+// point is the LD fill of genotype_fill (genotype_fill_ld.cpp: writes the filled cells into a geno object).
 //
-// Working rows S: the panel rows of the block (or window) that are also in the PGEN (the intersection; rows
-// absent from the PGEN are not carried). Each has a PGEN variant, the ALT frequency p in PGEN orientation and a
-// sign s = +1 when PGEN ALT is the panel alt, -1 when REF/ALT are swapped (the panel is not assumed to share the
-// PGEN's orientation).
+// Working rows S: the panel rows of the block (or window) that are also columns of the geno object (the
+// intersection; rows absent from the object are not carried). Each has a column, the frequency p of the column's
+// counted allele and a sign s = +1 when the counted allele is the panel's A1, -1 when the pair is swapped (the
+// panel is not assumed to share the object's orientation).
 // Stage 1 (per person i):
 //   z~ = (g - 2p) / (s sqrt(2p(1-p))) in panel orientation, 0 at missing (g = observed hard call or dosage);  C_S = I - delta (R_SS + delta I)^{-1}
 //   (la_kernel.cpp: Woodbury U_S G U_S' or direct, whichever of k and |S| is smaller)
@@ -27,8 +26,8 @@
 //   streamed from memory once per person block instead of once per (person, missing SNP). C_MM is gathered
 //   from the same hot column.
 //
-// Pipeline: build_impute_ld -> read_block_genotypes (or geno_genovec) -> build_planes -> impute_stage1 -> impute_stage2,
-// then for_each_cell visits every filled cell (i, j, g1, g). Errors are thrown as std::runtime_error.
+// Pipeline: build_impute_ld -> geno_genovec (geno_access.h) -> build_planes -> impute_stage1 -> impute_stage2;
+// final_fill gives the value of a filled cell. Errors are thrown as std::runtime_error.
 #ifndef PLINK4R_IMPUTE_KERNEL_H
 #define PLINK4R_IMPUTE_KERNEL_H
 
@@ -66,13 +65,13 @@ inline int team() { return thread_team(); }
 // ---- LD of one block: C, the scaled columns a_lj and A_j, the anchor mean / sd per row.
 struct ImputeLD {
   int m = 0, k = 0, mp = 0;
-  std::vector<int> vi;                  // 0-based PGEN variant per working row
+  std::vector<int> vi;                  // 0-based column of the geno object per working row
   std::vector<float> mu, sd, isd, Aj;   // 2p, s sqrt(2p(1-p)) (signed), 1/sd, A_j
   Eigen::MatrixXf C, Aw;
 };
 
-// ld: the eigen block; rows: 0-based eigen rows of the working set S (panel rows present in the PGEN,
-// increasing); vi, af, sign: per working row (PGEN variant, PGEN-ALT frequency in (0,1), +1 / -1).
+// ld: the eigen block; rows: 0-based eigen rows of the working set S (panel rows that are columns of the geno
+// object, increasing); vi, af, sign: per working row (column, frequency of its counted allele in (0,1), +1 / -1).
 inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& rows, const std::vector<int>& vi,
                                 const std::vector<double>& af, const std::vector<int>& sign, double delta,
                                 int T) {
@@ -80,7 +79,7 @@ inline ImputeLD build_impute_ld(const EigenBlock& ld, const std::vector<int>& ro
   using Eigen::VectorXf;
   ImputeLD L;
   const int m = static_cast<int>(rows.size()), k = ld.k;
-  if (m == 0) throw std::runtime_error("no working rows (no panel SNP of the block is in the PGEN)");
+  if (m == 0) throw std::runtime_error("no working rows (no panel SNP of the block is a column of the geno object)");
   if (!(delta > 0)) throw std::runtime_error("delta must be > 0");
   L.m = m; L.k = k;
   if (static_cast<int>(vi.size()) != m || static_cast<int>(af.size()) != m || static_cast<int>(sign.size()) != m)
@@ -139,82 +138,6 @@ struct BlockGenotypes {
   std::vector<int> di;
   std::vector<int8_t> dd;
 };
-
-// d of an observed ALT dosage v (1/16384 units, 0..32768) with H = round(v / 16384) (halves up).
-inline int dosage_grid(std::uint16_t v, unsigned h, double step) {
-  const int q = static_cast<int>(v) - static_cast<int>(h << 14);
-  const long d = std::lround(q / (16384.0 * step));
-  return static_cast<int>(std::max(-127L, std::min(127L, d)));
-}
-
-// Gathers per-row (sample, d) lists into the CSR of B.
-inline void set_dosage_lists(BlockGenotypes& B, std::vector<std::vector<int>>& li, std::vector<std::vector<int8_t>>& ld) {
-  const int m = B.m;
-  B.dptr.assign(m + 1, 0);
-  for (int j = 0; j < m; ++j) B.dptr[j + 1] = B.dptr[j] + static_cast<long long>(li[j].size());
-  B.di.resize(B.dptr[m]); B.dd.resize(B.dptr[m]);
-  for (int j = 0; j < m; ++j) {
-    std::copy(li[j].begin(), li[j].end(), B.di.begin() + B.dptr[j]);
-    std::copy(ld[j].begin(), ld[j].end(), B.dd.begin() + B.dptr[j]);
-    std::vector<int>().swap(li[j]); std::vector<int8_t>().swap(ld[j]);
-  }
-}
-
-inline BlockGenotypes read_block_genotypes(PgenFile& pf, const std::vector<int>& vi, const std::vector<int>& sidx,
-                                           double step, int T) {
-  BlockGenotypes B;
-  const int m = static_cast<int>(vi.size()), ns = static_cast<int>(sidx.size()), sb = (ns + 3) / 4;
-  B.m = m; B.ns = ns; B.sb = sb; B.step = step;
-  B.GS.assign(static_cast<std::size_t>(m) * sb, 0);
-  B.sum_obs.assign(m, 0.0);
-  std::vector<int> bad(T, -1);
-  if (pf.dosage()) {  // H = round(dosage) into the codes, the rest on the step grid into the lists
-    std::vector<std::vector<int>> li(m);
-    std::vector<std::vector<int8_t>> ld(m);
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(T)
-#endif
-    for (int j = 0; j < m; ++j) {
-      const std::uint16_t* x = pf.read_dosage(static_cast<std::size_t>(vi[j]), ik::tid());
-      if (!x) { bad[ik::tid()] = j; continue; }
-      uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
-      long long hs = 0, ds = 0;
-      for (int i = 0; i < ns; ++i) {
-        const std::uint16_t v = x[sidx[i]];
-        unsigned code = 3u;
-        if (v != PgenFile::kMissing) {
-          code = (static_cast<unsigned>(v) + 8192u) >> 14;
-          const int d = dosage_grid(v, code, step);
-          if (d) { li[j].push_back(i); ld[j].push_back(static_cast<int8_t>(d)); ds += d; }
-          hs += code;
-        }
-        dst[i >> 2] |= static_cast<uint8_t>(code << (2 * (i & 3)));
-      }
-      B.sum_obs[j] = static_cast<double>(hs) + step * static_cast<double>(ds);
-    }
-    for (int t = 0; t < T; ++t)
-      if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
-    set_dosage_lists(B, li, ld);
-    return B;
-  }
-  B.dptr.assign(m + 1, 0);
-  const bool ident = identity_samples(sidx.data(), ns, static_cast<int>(pf.samples()));
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(T)
-#endif
-  for (int j = 0; j < m; ++j) {
-    const unsigned char* gv = pf.read(static_cast<std::size_t>(vi[j]), ik::tid());
-    if (!gv) { bad[ik::tid()] = j; continue; }
-    uint8_t* dst = &B.GS[static_cast<std::size_t>(j) * sb];
-    compact_genovec(gv, sidx.data(), ns, ident, dst);
-    long long miss = 0, alt = 0;
-    count_genovec(dst, sb, &miss, &alt);
-    B.sum_obs[j] = static_cast<double>(alt);
-  }
-  for (int t = 0; t < T; ++t)
-    if (bad[t] >= 0) throw std::runtime_error("PGEN read failed at eigen row " + std::to_string(bad[t] + 1));
-  return B;
-}
 
 // ---- bit-planes and missing lists of every person (chunks of 256 people = one cache line per SNP row)
 struct PersonPlanes {
@@ -523,18 +446,6 @@ inline Stage2Result impute_stage2(const Stage1Result& R, const std::vector<doubl
 
 // Final fill of a cell from its stage-1 value and the row's shift.
 inline double final_fill(float g1, double shift) { return std::min(2.0, std::max(0.0, g1 + shift)); }
-
-// Visits every filled cell of the kept rows: f(i = person, j = row, g1 = stage 1, g = final), thread-list order.
-template <class F>
-inline void for_each_cell(const Stage1Result& R, const Stage2Result& A, const std::vector<char>& keep, F f) {
-  const int T = static_cast<int>(R.og.size());
-  for (int t = 0; t < T; ++t)
-    for (std::size_t r = 0; r < R.oj[t].size(); ++r) {
-      const int j = R.oj[t][r];
-      if (!keep[j]) continue;
-      f(R.oi[t][r], j, R.og[t][r], final_fill(R.og[t][r], A.shift[j]));
-    }
-}
 
 }  // namespace plink4r
 #endif

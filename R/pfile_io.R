@@ -1,4 +1,4 @@
-# Reading the .pvar and .psam of a PLINK2 fileset, shared by geno_file, geno_score and the association scans.
+# Reading the .pvar and .psam of a PLINK2 fileset, for geno_file().
 
 # CHROM (the chromosome code, R/chr.R) POS ID REF ALT of a .pvar (or .pvar.zst), with row (1-based) and allele_ct;
 # id = FALSE skips the ID column.
@@ -55,11 +55,4 @@
   if (!fid) return(iid)
   fc <- intersect(c("#FID", "FID"), names(psam))
   list(iid = iid, fid = if (length(fc)) psam[[fc[1L]]] else rep("0", length(iid)))
-}
-
-# 1-based .psam rows of `sample` (all rows when NULL), in the order of `sample`.
-.sample_rows <- function(sample, iid) {
-  si <- if (is.null(sample)) seq_along(iid) else match(as.character(sample), iid)
-  if (anyNA(si)) stop(sum(is.na(si)), " samples not in .psam", call. = FALSE)
-  si
 }

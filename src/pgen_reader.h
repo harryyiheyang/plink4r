@@ -1,7 +1,7 @@
 // PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
 // (read) and, for files whose header flags dosages, 1/16384 fixed-point ALT dosages (read_dosage).
-// The one PgenFile of the package (geno objects, imputation, scoring, correlations).
-// compact_genovec / count_genovec: the sample subset of a genovec, and its observed calls and ALT sum.
+// The one PgenFile of the package (geno objects and the association scans).
+// compact_genovec / count_codes: the sample subset of a genovec, and the calls of each code.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
 
@@ -216,13 +216,6 @@ inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]
     const unsigned v = g[y];
     ++cnt[v & 3u]; ++cnt[(v >> 2) & 3u]; ++cnt[(v >> 4) & 3u]; ++cnt[v >> 6];
   }
-}
-
-// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
-inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
-  long long cnt[4];
-  count_codes(g, sb, cnt);
-  *miss = cnt[3]; *alt = cnt[1] + 2 * cnt[2];
 }
 
 // PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
