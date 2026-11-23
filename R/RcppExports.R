@@ -89,6 +89,34 @@ gxe_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx,
     .Call(`_plink4r_gxe_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block)
 }
 
+ld_score_cpp <- function(files, offset, A, thresh, chunk, threads) {
+    .Call(`_plink4r_ld_score_cpp`, files, offset, A, thresh, chunk, threads)
+}
+
+ld_score_cross_cpp <- function(files1, files2, offset, i1, i2, sign, thresh1, thresh2, chunk, threads) {
+    .Call(`_plink4r_ld_score_cross_cpp`, files1, files2, offset, i1, i2, sign, thresh1, thresh2, chunk, threads)
+}
+
+ldsc_bicov_cpp <- function(z1, z2, N1, N2, L2, h21, h22, nblock, counts, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_bicov_cpp`, z1, z2, N1, N2, L2, h21, h22, nblock, counts, n_reweight, tol)
+}
+
+ldsc_groups_cpp <- function(M, nblock) {
+    .Call(`_plink4r_ldsc_groups_cpp`, M, nblock)
+}
+
+ldsc_strat_cpp <- function(z, N, L, A, block, intercept, lo, hi, z_max, w_init, n_reweight, ridge, lambda, lambda_grid, tol) {
+    .Call(`_plink4r_ldsc_strat_cpp`, z, N, L, A, block, intercept, lo, hi, z_max, w_init, n_reweight, ridge, lambda, lambda_grid, tol)
+}
+
+ldsc_trans_cpp <- function(z1, z2, N1, N2, L1, L2, L12, h21, h22, nblock, counts, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_trans_cpp`, z1, z2, N1, N2, L1, L2, L12, h21, h22, nblock, counts, n_reweight, tol)
+}
+
+ldsc_univ_cpp <- function(z, N, L2, nblock, counts, w_init, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_univ_cpp`, z, N, L2, nblock, counts, w_init, n_reweight, tol)
+}
+
 reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }
