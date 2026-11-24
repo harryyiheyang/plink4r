@@ -12,7 +12,7 @@
 #' @return A list of class `geno_file`: `type` ("bed" / "pgen"), `path` (the .bed / .pgen), `prefix`,
 #'   `variants` = data.table(row, chr, pos, id, a1, a2, allele_ct) with `a1` the counted allele (bim
 #'   column 5 / ALT) and `a2` the other (bim column 6 / REF), both in upper case, and `chr` the integer chromosome
-#'   code: 1..22, 23 = X (X or 23), 24 = Y, 25 = the pseudo-autosomal parts (XY, PAR1, PAR2 or 25), 26 = MT, `NA` for any other
+#'   code: 1..22, 23 = X (a file's X, 23, PAR1, PAR2, XY and 25 are all 23), 24 = Y, 26 = MT, `NA` for any other
 #'   label; and `samples` = data.table(row, fid, iid). Select windows by row, e.g.
 #'   `gf$variants[chr == 16 & pos >= lo & pos <= hi, row]`, and pass them as `snp_vec`.
 #' @export
