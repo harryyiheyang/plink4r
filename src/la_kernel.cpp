@@ -238,9 +238,11 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
 // and t = U_M' B_M (k x q), Delta_O = U_O c for a k x q matrix c:
 //   1 missing-SNP space (nm <= no, nm <= k): S = I - U_M W U_M' = d (A^{-1})_MM, s = S^{-1} B_M,
 //     c = W U_M' s, lost = d (B_M' s - B_M' B_M)   (A_MM - A_MO A_OO^{-1} A_OM = d S^{-1});
-//   2 eigen space (k < no): H = U_O' U_O, K = d I + L^{1/2} H L^{1/2} (k x k), z = K^{-1} L^{1/2} H L t,
-//     c = (L t - L^{1/2} z) / d, lost = t' L t - t' L H c;
+//   2 eigen space (k < no): H = U_O' U_O, K = d I + L^{1/2} H L^{1/2} (k x k), c = L^{1/2} K^{-1} L^{1/2} t,
+//     lost = t' L t - t' L H c;
 //   3 typed space: A_OO = U_O L U_O' + d I (no x no), x = U_O L t, Delta_O = A_OO^{-1} x, lost = t' L t - x' Delta_O.
+// Route 1 uses (R + d I)^{-1} = (I - U W U') / d, exact for orthonormal U: on the int16 plink4r layout it is accurate
+// to the quantisation (relative error ~1e-3 at d = 0.01, growing as d falls); routes 2 and 3 use U as stored.
 // The small systems are double (a small d makes S and K ill-conditioned in float). U stays float; rows of U_O are
 // taken in slices of `slice` rows, so no no x k double copy is made.
 // obs, miss: increasing 0-based eigen rows (no, nm; together every row of the block); B, Bk: nm x q (column-major);
@@ -304,9 +306,8 @@ int cond_weight_block(const float* U, int m, int k, const float* lambda, const i
     K.diagonal().array() += d;
     Eigen::LLT<MatD> llt(K);
     if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (eigen-space system)"); return -1; }
+    const MatD c = sl.asDiagonal() * llt.solve(sl.asDiagonal() * t);
     const MatD Htl = H * tl;
-    const MatD z = llt.solve(sl.asDiagonal() * Htl);
-    const MatD c = (tl - sl.asDiagonal() * z) / d;
     uo(c);
     for (int j = 0; j < q; ++j) lost[j] -= Htl.col(j).dot(c.col(j));
   } else {

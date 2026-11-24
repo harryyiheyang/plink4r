@@ -444,8 +444,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // weight_condition_cpp
-Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p_bp37, Rcpp::IntegerVector p_bp38, Rcpp::CharacterVector p_a1, Rcpp::CharacterVector p_a2, Rcpp::NumericVector p_freq, Rcpp::IntegerVector p_block, Rcpp::IntegerVector p_index, Rcpp::IntegerVector blocks, Rcpp::CharacterVector files, Rcpp::IntegerVector t_chr, Rcpp::IntegerVector t_bp, Rcpp::CharacterVector t_a1, Rcpp::CharacterVector t_a2, Rcpp::IntegerVector w_chr, Rcpp::IntegerVector w_bp, Rcpp::CharacterVector w_a1, Rcpp::CharacterVector w_a2, Rcpp::NumericMatrix W, double thresh, double delta, int slice, int threads);
-RcppExport SEXP _plink4r_weight_condition_cpp(SEXP p_chrSEXP, SEXP p_bp37SEXP, SEXP p_bp38SEXP, SEXP p_a1SEXP, SEXP p_a2SEXP, SEXP p_freqSEXP, SEXP p_blockSEXP, SEXP p_indexSEXP, SEXP blocksSEXP, SEXP filesSEXP, SEXP t_chrSEXP, SEXP t_bpSEXP, SEXP t_a1SEXP, SEXP t_a2SEXP, SEXP w_chrSEXP, SEXP w_bpSEXP, SEXP w_a1SEXP, SEXP w_a2SEXP, SEXP WSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP sliceSEXP, SEXP threadsSEXP) {
+Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p_bp37, Rcpp::IntegerVector p_bp38, Rcpp::CharacterVector p_a1, Rcpp::CharacterVector p_a2, Rcpp::NumericVector p_freq, Rcpp::IntegerVector p_block, Rcpp::IntegerVector p_index, Rcpp::IntegerVector blocks, Rcpp::CharacterVector files, Rcpp::IntegerVector t_chr, Rcpp::IntegerVector t_bp, Rcpp::CharacterVector t_a1, Rcpp::CharacterVector t_a2, Rcpp::IntegerVector w_chr, Rcpp::IntegerVector w_bp, Rcpp::CharacterVector w_a1, Rcpp::CharacterVector w_a2, Rcpp::NumericMatrix W, double thresh, double delta, int slice, int dup, int threads);
+RcppExport SEXP _plink4r_weight_condition_cpp(SEXP p_chrSEXP, SEXP p_bp37SEXP, SEXP p_bp38SEXP, SEXP p_a1SEXP, SEXP p_a2SEXP, SEXP p_freqSEXP, SEXP p_blockSEXP, SEXP p_indexSEXP, SEXP blocksSEXP, SEXP filesSEXP, SEXP t_chrSEXP, SEXP t_bpSEXP, SEXP t_a1SEXP, SEXP t_a2SEXP, SEXP w_chrSEXP, SEXP w_bpSEXP, SEXP w_a1SEXP, SEXP w_a2SEXP, SEXP WSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP sliceSEXP, SEXP dupSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -471,8 +471,9 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
     Rcpp::traits::input_parameter< int >::type slice(sliceSEXP);
+    Rcpp::traits::input_parameter< int >::type dup(dupSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(weight_condition_cpp(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, threads));
+    rcpp_result_gen = Rcpp::wrap(weight_condition_cpp(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -504,7 +505,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
-    {"_plink4r_weight_condition_cpp", (DL_FUNC) &_plink4r_weight_condition_cpp, 23},
+    {"_plink4r_weight_condition_cpp", (DL_FUNC) &_plink4r_weight_condition_cpp, 24},
     {NULL, NULL, 0}
 };
 

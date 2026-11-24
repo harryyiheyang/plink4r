@@ -2,7 +2,8 @@
 // that have no weight; weights on SNPs in both are kept as they are.
 // The whole computation is this one entry (R only reads the tables and writes the result):
 //   1. quad_match (quad_match.h): target -> panel and weights -> panel (each on the panel build that places more
-//      rows), and the weights outside the panel -> target directly;
+//      rows), and, when both are on the same build, the weights outside the panel -> target directly; a variant
+//      repeated within the target or the weights is an error (dup = 0) or left out with every copy (dup = 1);
 //   2. per LD block with weights to move (a weighted panel row absent from the target): O = the block rows in the
 //      target without a weight (the receivers), M = every other row of the block; B_M = the weights of the rows
 //      absent from the target, Bk = the kept weights (rows in both), each in panel orientation on the standardized
@@ -55,10 +56,13 @@ struct BlockJob {
 
 // Panel columns p_* (CHR code, BP37, BP38 with NA where absent, A1, A2, A1Freq, Block, Index); blocks/files: the
 // panel's blocks and their eigen.bin; target t_* (CHR code, BP, A1, A2); weights w_* and W (one column per score).
+// No target or no weight row in the panel is an error (wrong build or chromosome coding).
 // Returns list(w = beta + delta, beta = the weights on the target rows in target orientation (n_target x q; 0 where none),
 // delta = the moved part (n_target x q; 0 on rows with a weight), target_panel / target_weight (logical), weight_status (per weight row:
 // "target" = on a target row, "moved" = moved through the LD, "no_target_in_block" = in a block without target
-// rows that lack a weight, "lost" = neither in the panel nor in the target), build_target, build_weight (0 = BP37, 1 = BP38),
+// rows that lack a weight, "no_freq" = to move but the panel A1Freq is not in (0, 1), "duplicate" = left out as a
+// repeated variant, "lost" = neither in the panel nor in the target), target_dup (logical), build_target,
+// build_weight (0 = BP37, 1 = BP38), n_target_panel, n_weight_panel,
 // block_log (block, m, k, n_obs, n_miss, n_miss_weighted, method, seconds), kept, kept_drop (blocks x q:
 // 1 - lost / total with and without the move, NA when total = 0), isa).
 // [[Rcpp::export]]
@@ -68,7 +72,7 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
                                 Rcpp::CharacterVector files, Rcpp::IntegerVector t_chr, Rcpp::IntegerVector t_bp,
                                 Rcpp::CharacterVector t_a1, Rcpp::CharacterVector t_a2, Rcpp::IntegerVector w_chr,
                                 Rcpp::IntegerVector w_bp, Rcpp::CharacterVector w_a1, Rcpp::CharacterVector w_a2,
-                                Rcpp::NumericMatrix W, double thresh, double delta, int slice, int threads) {
+                                Rcpp::NumericMatrix W, double thresh, double delta, int slice, int dup, int threads) {
   const int T = plink4r::resolve_threads(threads);
   if (!(delta > 0)) Rcpp::stop("delta must be > 0");
   const int np = p_chr.size(), nt = t_chr.size(), nw = w_chr.size(), q = W.ncol();
@@ -79,29 +83,40 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
   const std::vector<int> pidx = iv(p_index);
   auto w_at = [&](int row, int c) { return Wv[static_cast<std::size_t>(c) * nw + row]; };
   // 1. matching
-  const std::vector<int> pc = iv(p_chr), p37 = iv(p_bp37), p38 = iv(p_bp38), tc = iv(t_chr), tb = iv(t_bp), wc = iv(w_chr),
-                         wb = iv(w_bp);
-  const std::vector<std::string> pa1 = sv(p_a1), pa2 = sv(p_a2), ta1 = sv(t_a1), ta2 = sv(t_a2), wa1 = sv(w_a1),
-                                 wa2 = sv(w_a2);
+  std::vector<int> pc = iv(p_chr), p37 = iv(p_bp37), p38 = iv(p_bp38), tc = iv(t_chr), tb = iv(t_bp), wc = iv(w_chr),
+                   wb = iv(w_bp);
+  const std::vector<std::string> pa1 = plink4r::upper_all(sv(p_a1)), pa2 = plink4r::upper_all(sv(p_a2)),
+                                 ta1 = plink4r::upper_all(sv(t_a1)), ta2 = plink4r::upper_all(sv(t_a2)),
+                                 wa1 = plink4r::upper_all(sv(w_a1)), wa2 = plink4r::upper_all(sv(w_a2));
   const plink4r::Quad P0{&pc, &p37, &pa1, &pa2}, P1{&pc, &p38, &pa1, &pa2}, Tq{&tc, &tb, &ta1, &ta2},
       Wq{&wc, &wb, &wa1, &wa2};
+  // repeated variants within the target or the weights: an error, or every copy left out (chromosome code 0)
+  const std::vector<char> tdup = plink4r::quad_dup(Tq, na), wdup = plink4r::quad_dup(Wq, na);
+  for (const auto* d : {&tdup, &wdup}) {
+    const bool is_t = d == &tdup;
+    int nd = 0, first = -1;
+    for (std::size_t j = 0; j < d->size(); ++j) if ((*d)[j]) { ++nd; if (first < 0) first = static_cast<int>(j); }
+    if (nd && dup == 0)
+      Rcpp::stop("%d %s rows repeat a variant (CHR, BP, allele pair), the first at row %d: give dup = \"drop\" to leave them out",
+                 nd, is_t ? "target" : "weight", first + 1);
+    std::vector<int>& chr = is_t ? tc : wc;
+    for (std::size_t j = 0; j < d->size(); ++j) if ((*d)[j]) chr[j] = 0;
+  }
   int bt = 0, bw = 0;
   const plink4r::QuadHit th = plink4r::quad_match_best(P0, P1, Tq, na, bt);
   const plink4r::QuadHit wh = plink4r::quad_match_best(P0, P1, Wq, na, bw);
-  for (int j = 0; j < nt; ++j)
-    if (th.row[j] == -2) Rcpp::stop("target row %d repeats a variant (CHR, BP, A1, A2) of an earlier row", j + 1);
-  for (int j = 0; j < nw; ++j)
-    if (wh.row[j] == -2) Rcpp::stop("weight row %d repeats a variant (CHR, BP, A1, A2) of an earlier row", j + 1);
-  // weights outside the panel -> target directly (same build as the weights)
+  if (th.n == 0) Rcpp::stop("no target SNP found in the panel (by CHR, BP37 or BP38 and alleles): check the build and chromosome coding");
+  if (wh.n == 0) Rcpp::stop("no weight SNP found in the panel (by CHR, BP37 or BP38 and alleles): check the build and chromosome coding");
+  // weights outside the panel -> target directly, only when both tables are on the same build
   std::vector<int> wc_out, wb_out;
   std::vector<std::string> wa1_out, wa2_out;
   std::vector<int> out_idx;
-  for (int j = 0; j < nw; ++j)
-    if (wh.row[j] < 0) { out_idx.push_back(j); wc_out.push_back(wc[j]); wb_out.push_back(wb[j]); wa1_out.push_back(wa1[j]); wa2_out.push_back(wa2[j]); }
+  if (bt == bw)
+    for (int j = 0; j < nw; ++j)
+      if (wh.row[j] < 0 && wc[j] > 0) { out_idx.push_back(j); wc_out.push_back(wc[j]); wb_out.push_back(wb[j]); wa1_out.push_back(wa1[j]); wa2_out.push_back(wa2[j]); }
   const plink4r::Quad Wo{&wc_out, &wb_out, &wa1_out, &wa2_out};
-  const plink4r::QuadHit dh = plink4r::quad_match(Tq, Wo, na);
-  for (std::size_t j = 0; j < out_idx.size(); ++j)
-    if (dh.row[j] == -2) Rcpp::stop("weight row %d repeats a variant (CHR, BP, A1, A2) of an earlier row", out_idx[j] + 1);
+  plink4r::QuadHit dh;
+  if (!out_idx.empty()) dh = plink4r::quad_match(Tq, Wo, na);
   // panel row -> target row (and sign), panel row -> weight row (and sign)
   std::vector<int> p2t(np, -1), p2w(np, -1), p2ts(np, 0), p2ws(np, 0);
   for (int j = 0; j < nt; ++j) if (th.row[j] >= 0) { p2t[th.row[j]] = j; p2ts[th.row[j]] = th.sign[j]; }
@@ -109,6 +124,8 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
   Rcpp::NumericMatrix beta(nt, q), dlt(nt, q);
   Rcpp::LogicalVector t_in_panel(nt), t_in_w(nt);
   std::vector<std::string> wstat(nw, "lost");
+  for (int j = 0; j < nw; ++j) if (wdup[j]) wstat[j] = "duplicate";
+  auto sd_of = [&](int r) { const double p = pf[r]; return (std::isfinite(p) && p > 0 && p < 1) ? std::sqrt(2 * p * (1 - p)) : 0.0; };
   for (int j = 0; j < nt; ++j) t_in_panel[j] = th.row[j] >= 0;
   for (int r = 0; r < np; ++r)
     if (p2t[r] >= 0 && p2w[r] >= 0) {
@@ -176,7 +193,6 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
       std::vector<int> obs, miss;
       for (int x = 0; x < ld.m; ++x) (row_at[x] >= 0 && p2t[row_at[x]] >= 0 && p2w[row_at[x]] < 0 ? obs : miss).push_back(x);
       const int no = static_cast<int>(obs.size()), nm = static_cast<int>(miss.size());
-      auto sd_of = [&](int r) { const double p = pf[r]; return (std::isfinite(p) && p > 0 && p < 1) ? std::sqrt(2 * p * (1 - p)) : 0.0; };
       std::vector<double> B(static_cast<std::size_t>(nm) * q, 0.0), Bk(static_cast<std::size_t>(nm) * q, 0.0);
       int nw_m = 0;
       for (int a = 0; a < nm; ++a) {
@@ -216,7 +232,8 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
     for (const auto& tv : add[i])
       for (int c = 0; c < q; ++c) dlt(tv.first, c) += tv.second[c];
     for (int r : jobs[i].prow)
-      if (p2w[r] >= 0 && p2t[r] < 0) wstat[p2w[r]] = has_obs[i] ? "moved" : "no_target_in_block";
+      if (p2w[r] >= 0 && p2t[r] < 0)
+        wstat[p2w[r]] = sd_of(r) <= 0 ? "no_freq" : (has_obs[i] ? "moved" : "no_target_in_block");
   }
   Rcpp::NumericMatrix wout(nt, q);
   for (int c = 0; c < q; ++c)
@@ -235,6 +252,8 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
       Rcpp::_["n_miss_weighted"] = nmw, Rcpp::_["method"] = meth, Rcpp::_["seconds"] = sec);
   return Rcpp::List::create(Rcpp::_["w"] = wout, Rcpp::_["beta"] = beta, Rcpp::_["delta"] = dlt, Rcpp::_["target_panel"] = t_in_panel,
                             Rcpp::_["target_weight"] = t_in_w, Rcpp::_["weight_status"] = Rcpp::wrap(wstat),
-                            Rcpp::_["build_target"] = bt, Rcpp::_["build_weight"] = bw, Rcpp::_["block_log"] = log,
+                            Rcpp::_["target_dup"] = Rcpp::wrap(std::vector<bool>(tdup.begin(), tdup.end())),
+                            Rcpp::_["build_target"] = bt, Rcpp::_["build_weight"] = bw, Rcpp::_["n_target_panel"] = th.n,
+                            Rcpp::_["n_weight_panel"] = wh.n, Rcpp::_["block_log"] = log,
                             Rcpp::_["kept"] = KP, Rcpp::_["kept_drop"] = KD, Rcpp::_["isa"] = LA.isa);
 }

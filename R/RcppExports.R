@@ -105,7 +105,7 @@ sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, thr
     .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
 }
 
-weight_condition_cpp <- function(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, threads) {
-    .Call(`_plink4r_weight_condition_cpp`, p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, threads)
+weight_condition_cpp <- function(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads) {
+    .Call(`_plink4r_weight_condition_cpp`, p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads)
 }
 
