@@ -27,7 +27,7 @@
 #' @param ld_dir the LD panel folder (block<N>.eigen.bin and `snpinfo.parquet`).
 #' @param ref panel SNP table in place of `snpinfo.parquet` (data.frame or parquet path); NULL reads the folder's.
 #' @param score_cols weight columns; NULL takes every numeric column of `weights` other than CHR and BP.
-#' @param thresh eigenvalue variance kept (SBayesRC default 0.995); <= 0 keeps every stored pair.
+#' @param thresh eigenvalue variance kept (the plink4r panels are cut at 0.999); <= 0 keeps every stored pair.
 #' @param delta diagonal added to R; must be > 0.
 #' @param slice rows of U_O converted to double at a time in the eigen-space and missing-space solves.
 #' @param threads OpenMP threads over blocks (0 = all detected).
@@ -37,7 +37,7 @@
 #'   with weights to move: m, k, n_obs, n_miss, n_miss_weighted, method, seconds, and per score `kept_<col>` =
 #'   1 - lost / total), `weight_status` (per weight row: target, moved, no_target_in_block, lost).
 #' @export
-weight_condition <- function(target, weights, ld_dir, ref = NULL, score_cols = NULL, thresh = 0.995, delta = 0.01,
+weight_condition <- function(target, weights, ld_dir, ref = NULL, score_cols = NULL, thresh = 0.999, delta = 0.01,
                              slice = 1024L, threads = 4L, output = NULL) {
   threads <- .threads(threads)
   .check_delta(delta)
