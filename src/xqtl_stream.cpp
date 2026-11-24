@@ -74,7 +74,7 @@ void build_pre(Pre& pre, const Rcpp::NumericMatrix& X, const Rcpp::NumericMatrix
   Eigen::BDCSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeThinU);
   const Eigen::VectorXd& sig = svd.singularValues();
   int k = 0;
-  while (k < kX && sig[k] > 0 && sig[k] >= kRankTol * sig[0]) ++k;
+  while (k < sig.size() && sig[k] > 0 && sig[k] >= kRankTol * sig[0]) ++k;  // min(n, kX) singular values
   if (k == 0) Rcpp::stop("The covariate matrix is zero.");
   pre.k = k;
   pre.V.assign(svd.matrixU().data(), svd.matrixU().data() + N * k);
@@ -257,6 +257,7 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::I
   build_pre(pre, X, Y, T);
   const int k = pre.k;
   const double df = static_cast<double>(ns) - k - 1;
+  if (df < 1) Rcpp::stop("No residual degree of freedom: %d samples, covariate rank %d.", ns, k);
 
   // block size from the memory budget
   const std::size_t N = ns;
