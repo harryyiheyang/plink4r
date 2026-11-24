@@ -34,11 +34,11 @@
 #'   of the whole genome). An outcome whose row has no chromosome that the package reads (1 to 22, X, Y, MT), no
 #'   `Start` or `End`, or no variant in its window (e.g. on a chromosome that the genotype file does not hold) is
 #'   not tested (`outcomes_not_tested` in the value).
-#' @param out Path of the Parquet file to write (replaced when it exists).
 #' @param covariate `NULL` (no covariate: the intercept alone), or a data.frame with one row per sample: the sample
 #'   IDs in its first column, whatever its name, then the covariates, every column of which is used for every
 #'   outcome. Numeric columns enter as they are, factors and characters expanded by base R with the current
 #'   contrasts; the intercept is always added. Samples with a missing covariate are left out.
+#' @param out Path of the Parquet file to write (replaced when it exists).
 #' @param window Base pairs added on both sides of an outcome's position: it is tested with the variants at
 #'   `Start - window` to `End + window` of its chromosome, both ends included. With 0, `Start` to `End` is the
 #'   tested region itself.
@@ -52,7 +52,7 @@
 #'   products computed; at least `pairs`), `waiting_most` (the most pairs held in memory at once), monomorphic and
 #'   singular variants, outcomes not tested, skipped multiallelic variants.
 #' @export
-xqtl <- function(outcome, position, out, covariate = NULL, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
+xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
                  threads = 0L, mem_gb = 0, block = 256L) {
   some <- function(x) paste0(paste(utils::head(x, 5L), collapse = ", "),
                              if (length(x) > 5L) sprintf(", ... (%d in all)", length(x)))
