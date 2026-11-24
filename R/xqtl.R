@@ -119,44 +119,18 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   X <- stats::model.matrix(eval(call("~", rhs)), d)
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
 
-  # ---- windows as ranges of the scan variants, which are taken in position order
-  vrow <- vrow[!is.na(var$CHR[vrow]) & !is.na(var$POS[vrow])]
-  vrow <- vrow[order(var$CHR[vrow], var$POS[vrow])]
-  span <- 2^31  # a position is a 32-bit integer in the files: chromosome code x span + position orders the genome
-  key <- var$CHR[vrow] * span + var$POS[vrow]
-  within <- function(x) pmin(pmax(x, 0), span - 1)
-  lo <- findInterval(a$CHR * span + within(a$Start - window), key, left.open = TRUE)
-  hi <- findInterval(a$CHR * span + within(a$End + window), key)
-  keep <- hi > lo
-  not_tested <- setdiff(oname, a$Outcome[keep])
-  a <- a[keep, , drop = FALSE]; lo <- lo[keep]; hi <- hi[keep]
-  if (!nrow(a)) stop("No outcome has a variant in its window.", call. = FALSE)
-  o <- order(lo, hi)
-  a <- a[o, , drop = FALSE]; lo <- lo[o]; hi <- hi[o]
-  # variants in no window are left out, and the ranges renumbered
-  p <- length(vrow)
-  covered <- cumsum(tabulate(lo + 1L, p + 1L) - tabulate(hi + 1L, p + 1L))[seq_len(p)] > 0L
-  before <- c(0L, cumsum(covered))
-  lo <- before[lo + 1L]; hi <- before[hi + 1L]
-  vrow <- vrow[covered]
-
-  # the tested outcomes of the analysed samples, column by column: the table itself is not copied
-  orow <- match(d[[id_col]], oid); ocol <- match(a$Outcome, oname) + 1L
-  Y <- vapply(ocol, function(j) as.numeric(.subset2(outcome, j)[orow]), numeric(length(orow)))
-  dim(Y) <- c(length(orow), length(ocol))
-
-  # the alleles as codes into their distinct strings: REF = the other allele, ALT = the counted one
-  alleles <- unique(c(var$A1[vrow], var$A2[vrow]))
+  # ---- the tables go to C++ as they are: it puts the variants in position order, places the windows among them and
+  # reads the outcomes of the analysed samples from the columns of outcome
   res <- xqtl_stream_cpp(gv$path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
-                         as.integer(srow - 1L), X, Y, as.integer(lo), as.integer(hi), path.expand(out),
-                         a$Outcome, as.integer(var$CHR[vrow]), as.integer(var$POS[vrow]),
-                         match(var$A2[vrow], alleles) - 1L, match(var$A1[vrow], alleles) - 1L, alleles,
+                         as.integer(var$CHR), as.integer(var$POS), var$A2, var$A1, as.integer(srow - 1L), X,
+                         outcome, match(d[[id_col]], oid) - 1L, match(a$Outcome, oname), a$Outcome, a$CHR,
+                         as.numeric(a$Start), as.numeric(a$End), window, path.expand(out),
                          paste("plink4r version", utils::packageVersion("plink4r")), threads, mem_gb,
                          as.integer(block))
-  invisible(list(out = out, rows = res$rows, bytes = res$bytes, df = res$df, samples = nrow(d), outcomes = nrow(a),
-                 variants = length(vrow), pairs = res$pairs, covariate_rank = res$rank, block = res$block,
+  invisible(list(out = out, rows = res$rows, bytes = res$bytes, df = res$df, samples = nrow(d),
+                 outcomes = res$outcomes, variants = res$variants, pairs = res$pairs, covariate_rank = res$rank, block = res$block,
                  threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
                  active = res$active, products = res$products, waiting_most = res$waiting_most,
                  explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
-                 outcomes_not_tested = not_tested, skipped_multiallelic = gv$skipped))
+                 outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]), skipped_multiallelic = gv$skipped))
 }

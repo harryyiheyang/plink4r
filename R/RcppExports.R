@@ -105,7 +105,7 @@ sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, thr
     .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
 }
 
-xqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, out, outcome, chr, bp, ref, alt, alleles, created_by, threads, mem_gb, block) {
-    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, out, outcome, chr, bp, ref, alt, alleles, created_by, threads, mem_gb, block)
+xqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block) {
+    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block)
 }
 
