@@ -179,10 +179,11 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 }
 
 # The genotype file of an association run, from geno_file(): its variants (var), sample IDs (iid), path, the file
-# rows of the biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
-.geno_variants <- function(pfile, bfile, snp_vec) {
+# rows of the biallelic variants to test (vrow), and the multiallelic ones left out: their file rows (multi) and their
+# IDs (skipped). With id = FALSE the ID column is not read: var has none, skipped is NULL, snp_vec must be NULL.
+.geno_variants <- function(pfile, bfile, snp_vec, id = TRUE) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  gf <- geno_file(bedfile = bfile, pgenfile = pfile)
+  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = id)
   v <- gf$variants
   var <- data.table::data.table(CHR = v$chr, POS = v$pos, ID = v$id, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
   iid <- gf$samples$iid
@@ -192,10 +193,10 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
     if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)
     sort(unique(i[!is.na(i)]))
   }
-  skipped <- var$ID[vrow[var$allele_ct[vrow] > 2L]]
+  multi <- vrow[var$allele_ct[vrow] > 2L]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
-  list(var = var, iid = iid, path = path, vrow = vrow, skipped = skipped)
+  list(var = var, iid = iid, path = path, vrow = vrow, skipped = var$ID[multi], multi = multi)
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing

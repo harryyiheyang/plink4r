@@ -50,7 +50,8 @@
 #'   run: samples, outcomes tested, variants read, pairs asked for, covariate rank, block size, threads, memory
 #'   budget, SIMD set, `active` (per block of variants the number of outcomes it met), `products` (outcome-variant
 #'   products computed; at least `pairs`), `waiting_most` (the most pairs held in memory at once), monomorphic and
-#'   singular variants, outcomes not tested, skipped multiallelic variants.
+#'   singular variants, outcomes not tested, and `skipped_multiallelic`: the `CHR` and `BP` of the variants left out
+#'   for having more than two alleles.
 #' @export
 xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
                  threads = 0L, mem_gb = 0, block = 256L) {
@@ -95,7 +96,8 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
 
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
+  # the variant IDs are read only to find snp_vec: the file that is written has none
+  gv <- .geno_variants(pfile, bfile, snp_vec, id = !is.null(snp_vec))
   var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
 
   # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.
@@ -132,5 +134,6 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
                  threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
                  active = res$active, products = res$products, waiting_most = res$waiting_most,
                  explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
-                 outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]), skipped_multiallelic = gv$skipped))
+                 outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]),
+                 skipped_multiallelic = data.table::data.table(CHR = var$CHR[gv$multi], BP = var$POS[gv$multi])))
 }
