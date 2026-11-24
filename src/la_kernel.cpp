@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include "la_dispatch.h"
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -227,6 +228,109 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
   return method;
 }
 
+// Conditional weights of one block: the effects B_M of the rows M that the target lacks, moved onto the rows O
+// it has, as the best linear predictor of the score from O alone (R = U diag(lam) U', A = R + d I):
+//   Delta_O = (R_OO + d I)^{-1} R_OM B_M,   lost_c = B_M' (R_MM - R_MO (R_OO + d I)^{-1} R_OM) B_M (column c),
+//   total_c = b' R b with b = (B_O on O, B_M on M), the score variance of the block before the move.
+// Everything is on the standardized scale. Solved in the smallest exact space; with W = diag(lam / (lam + d))
+// and t = U_M' B_M (k x q), Delta_O = U_O c for a k x q matrix c:
+//   1 missing-SNP space (nm <= no, nm <= k): S = I - U_M W U_M' = d (A^{-1})_MM, s = S^{-1} B_M,
+//     c = W U_M' s, lost = d (B_M' s - B_M' B_M)   (A_MM - A_MO A_OO^{-1} A_OM = d S^{-1});
+//   2 eigen space (k < no): H = U_O' U_O, K = d I + L^{1/2} H L^{1/2} (k x k), z = K^{-1} L^{1/2} H L t,
+//     c = (L t - L^{1/2} z) / d, lost = t' L t - t' L H c;
+//   3 typed space: A_OO = U_O L U_O' + d I (no x no), x = U_O L t, Delta_O = A_OO^{-1} x, lost = t' L t - x' Delta_O.
+// The small systems are double (a small d makes S and K ill-conditioned in float). U stays float; rows of U_O are
+// taken in slices of `slice` rows, so no no x k double copy is made.
+// obs, miss: increasing 0-based eigen rows (no, nm; together every row of the block); B: nm x q, Bo: no x q
+// (column-major); slice: rows of U_O per double slice. Writes dout (no x q), lost (q), total (q). Returns the method, 0 when nm == 0 or no == 0
+// (dout = 0, lost = B_M' R_MM B_M when no == 0), -1 on error.
+int cond_weight_block(const float* U, int m, int k, const float* lambda, const int* obs, int no, const int* miss,
+                      int nm, const double* B, const double* Bo, int q, double d, int slice, double* dout,
+                      double* lost, double* total, char* err) {
+  using MatD = Eigen::MatrixXd;
+  using VecD = Eigen::VectorXd;
+  using MapCMD = Eigen::Map<const MatD>;
+  if (slice < 1) slice = 1;
+  if (!(d > 0)) { set_err(err, "delta must be > 0"); return -1; }
+  MapCM Uf(U, m, k);
+  const VecD lam = MapCV(lambda, k).cast<double>();
+  Eigen::Map<MatD> D(dout, no, q);
+  D.setZero();
+  MapCMD Bm(B, nm, q), Bob(Bo, no, q);
+  // U_O' X (k x q) and U_O c (no x q), by row slices of U_O
+  auto uot = [&](const MatD& X) {
+    MatD r = MatD::Zero(k, q);
+    for (int r0 = 0; r0 < no; r0 += slice) {
+      const int nr = std::min(slice, no - r0);
+      MatD Us(nr, k);
+      for (int i = 0; i < nr; ++i) Us.row(i) = Uf.row(obs[r0 + i]).cast<double>();
+      r.noalias() += Us.transpose() * X.middleRows(r0, nr);
+    }
+    return r;
+  };
+  auto uo = [&](const MatD& c) {
+    for (int r0 = 0; r0 < no; r0 += slice) {
+      const int nr = std::min(slice, no - r0);
+      MatD Us(nr, k);
+      for (int i = 0; i < nr; ++i) Us.row(i) = Uf.row(obs[r0 + i]).cast<double>();
+      D.middleRows(r0, nr).noalias() = Us * c;
+    }
+  };
+  MatD UM(nm, k);
+  for (int i = 0; i < nm; ++i) UM.row(i) = Uf.row(miss[i]).cast<double>();
+  const MatD t = UM.transpose() * Bm;  // k x q
+  const MatD tl = lam.asDiagonal() * t;
+  MatD tf = t;
+  if (no > 0) tf += uot(MatD(Bob));
+  for (int c = 0; c < q; ++c) {
+    total[c] = (tf.col(c).array().square() * lam.array()).sum();
+    lost[c] = t.col(c).dot(tl.col(c));  // B_M' R_MM B_M
+  }
+  if (nm == 0 || no == 0) return 0;
+  const int method = (nm <= no && nm <= k) ? 1 : (k < no ? 2 : 3);
+  if (method == 1) {
+    const VecD w = lam.array() / (lam.array() + d);
+    MatD S = MatD::Identity(nm, nm);
+    S.noalias() -= UM * w.asDiagonal() * UM.transpose();
+    Eigen::LLT<MatD> llt(S);
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (missing-SNP system)"); return -1; }
+    const MatD s = llt.solve(MatD(Bm));
+    const MatD c = w.asDiagonal() * (UM.transpose() * s);
+    uo(c);
+    for (int j = 0; j < q; ++j) lost[j] = d * (Bm.col(j).dot(s.col(j)) - Bm.col(j).squaredNorm());
+  } else if (method == 2) {
+    MatD H = MatD::Zero(k, k);
+    for (int r0 = 0; r0 < no; r0 += slice) {
+      const int nr = std::min(slice, no - r0);
+      MatD Us(nr, k);
+      for (int i = 0; i < nr; ++i) Us.row(i) = Uf.row(obs[r0 + i]).cast<double>();
+      H.selfadjointView<Eigen::Lower>().rankUpdate(Us.transpose());
+    }
+    H.triangularView<Eigen::StrictlyUpper>() = H.transpose();
+    const VecD sl = lam.array().sqrt();
+    MatD K = sl.asDiagonal() * H * sl.asDiagonal();
+    K.diagonal().array() += d;
+    Eigen::LLT<MatD> llt(K);
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (eigen-space system)"); return -1; }
+    const MatD Htl = H * tl;
+    const MatD z = llt.solve(sl.asDiagonal() * Htl);
+    const MatD c = (tl - sl.asDiagonal() * z) / d;
+    uo(c);
+    for (int j = 0; j < q; ++j) lost[j] -= Htl.col(j).dot(c.col(j));
+  } else {
+    MatD UO(no, k);
+    for (int i = 0; i < no; ++i) UO.row(i) = Uf.row(obs[i]).cast<double>();
+    MatD A = UO * lam.asDiagonal() * UO.transpose();
+    A.diagonal().array() += d;
+    Eigen::LLT<MatD> llt(A);
+    if (llt.info() != Eigen::Success) { set_err(err, "Cholesky failed (typed system)"); return -1; }
+    const MatD x = UO * tl;
+    D = llt.solve(x);
+    for (int j = 0; j < q; ++j) lost[j] -= x.col(j).dot(D.col(j));
+  }
+  return method;
+}
+
 // sum_l col[l] * (het_l + 2 hom_l): bit b of byte q of het / hom is row 8q + b. Per ISA copy: 16 lanes under
 // AVX-512 (two bytes as a lane mask), 8 under AVX2 (one byte expanded to lane masks), else scalar. Several
 // independent accumulators (het and hom apart) so the loop is not bound by the latency of one add chain.
@@ -299,4 +403,4 @@ float plane_dot(const float* col, const unsigned char* het, const unsigned char*
 #define PLINK4R_STR2(x) #x
 #define PLINK4R_STR(x) PLINK4R_STR2(x)
 extern const plink4r::LaFns PLINK4R_LA_TABLE;
-const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, plane_dot, dgemm_tn, PLINK4R_STR(PLINK4R_LA_ISA)};
+const plink4r::LaFns PLINK4R_LA_TABLE = {build_C, sgemm_nn, sumstat_block, cond_weight_block, plane_dot, dgemm_tn, PLINK4R_STR(PLINK4R_LA_ISA)};
