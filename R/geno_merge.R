@@ -7,7 +7,7 @@
 #'
 #' The result holds the variants of all objects and, by default, the samples of all objects:
 #' * variants: the union over the objects of (chr, pos, a1, a2), ordered by chromosome code (1..22, 23 = X,
-#'   24 = Y, 26 = MT; variants without a code last), position, `a1`, then `a2`, whatever the order of the
+#'   24 = Y, 25 = XY (pseudo-autosomal), 26 = MT; variants without a code last), position, `a1`, then `a2`, whatever the order of the
 #'   objects. The same variant in the opposite orientation is another variant: bring the objects to one
 #'   orientation first with [geno_harmonise()].
 #' * samples: `sample = NULL`, the union over the objects of (FID, IID) in the order of first appearance;
