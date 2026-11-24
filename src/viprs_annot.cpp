@@ -86,7 +86,8 @@ struct State {
 // ---- kernels on the panel
 
 template <typename T>
-void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, const float* tau, const char* sup,
+void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, const float* tau, const float* ltau,
+           const char* sup,
            float sigma, State& st, bool active_only, float act_tol, std::vector<float>& bmax, std::vector<int64_t>& nvis, int threads) {
   const float eps = std::max(std::numeric_limits<float>::epsilon(), 1e-8f);
   const float lp = std::log(pi) - std::log1p(-pi);
@@ -114,7 +115,7 @@ void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, co
       }
       const float m_ = mm * r[j];
       const float u = std::sqrt(.5f * vt) * m_;
-      const float x = u * u + lp + .5f * (std::log(tau[j]) - std::log(vt));
+      const float x = u * u + lp + .5f * (ltau[j] - std::log(vt));
       const float g = x < 0 ? std::exp(x) / (1.f + std::exp(x)) : 1.f / (1.f + std::exp(-x));
       const float de = g * m_ - eta[j];
       const float ad = std::fabs(de);
@@ -208,83 +209,109 @@ struct VarModel {
   const std::vector<double>& A;
   const std::vector<char>& sup;  // suppressed SNPs: left out of Q
   std::vector<double> par;    // alpha
-  std::vector<float> tau;     // 1 / v_j
+  std::vector<double> x, w;   // x_j = a_j' alpha, w_j = exp(-x_j)
+  std::vector<float> tau, ltau;  // tau_j = 1 / v_j = w_j and log tau_j = -x_j, as used by the sweep
   int threads;
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
-      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), tau(M_, 1.f), threads(threads_) {}
+      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), x(M_, 0.), w(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f),
+        threads(threads_) {}
 
-  double lin(int64_t j, const double* a) const {
-    double x = a[0];
-    const double* r = A.data() + j * (K - 1);
-    for (int k = 1; k < K; ++k) x += r[k - 1] * a[k];
-    return x;
-  }
-  void set_tau() {
-    for (int64_t j = 0; j < M; ++j) tau[j] = (float)std::exp(-lin(j, par.data()));
+  // x, w, tau from par
+  void set_all() {
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads)
+#endif
+    for (int64_t j = 0; j < M; ++j) {
+      double v = par[0];
+      const double* r = A.data() + j * (K - 1);
+      for (int k = 1; k < K; ++k) v += r[k - 1] * par[k];
+      x[j] = v; w[j] = std::exp(-v); tau[j] = (float)w[j]; ltau[j] = (float)-v;
+    }
   }
   // start: v_j = h2 / (pi M) for all SNPs (M over all SNPs, as the sigma2 start of sbayesrc())
   void start(double h2, double pi) {
     std::fill(par.begin(), par.end(), 0.);
     par[0] = std::log(h2 / (pi * M));
-    set_tau();
+    set_all();
   }
   // pi moves from prev to pi: v_j * prev / pi (keeps the implied h2)
-  void pi_move(double prev, double pi) { par[0] += std::log(prev / pi); set_tau(); }
+  void pi_move(double prev, double pi) { par[0] += std::log(prev / pi); set_all(); }
 
-  double q(const double* a, const double* zeta, double pi) const {
-    double s = 0;
-#ifdef _OPENMP
-#pragma omp parallel for reduction(+ : s) num_threads(threads)
-#endif
-    for (int64_t j = 0; j < M; ++j) {
-      if (sup[j]) continue;
-      const double x = lin(j, a); s += -.5 * pi * x - .5 * zeta[j] * std::exp(-x); }
-    return s;
-  }
-  // Newton on the concave Q with step halving; returns the Newton steps taken
+  // Newton on the concave Q(alpha) = sum_j [-pi/2 x_j - zeta_j/2 exp(-x_j)] with step halving; x and w are kept with
+  // alpha, so a Newton step costs one pass for the gradient and Hessian (no exp) and one pass per trial point
   int mstep(const double* zeta, double pi, int max_iter, double tol, int max_halving) {
+    const int K1 = K - 1, KK = K * K;
+    double q0 = 0;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+ : q0) num_threads(threads)
+#endif
+    for (int64_t j = 0; j < M; ++j) if (!sup[j]) q0 += -.5 * pi * x[j] - .5 * zeta[j] * w[j];
+    std::vector<double> xn(M), wn(M);
     int it = 0;
-    double q0 = q(par.data(), zeta, pi);
     for (; it < max_iter; ++it) {
-      Eigen::MatrixXd H = Eigen::MatrixXd::Zero(K, K);
-      Eigen::VectorXd g = Eigen::VectorXd::Zero(K);
+      std::vector<double> HG(KK + K, 0.);  // Hessian (lower) then gradient
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
 #endif
       {
-        Eigen::MatrixXd Hl = Eigen::MatrixXd::Zero(K, K);
-        Eigen::VectorXd gl = Eigen::VectorXd::Zero(K), a(K);
+        std::vector<double> loc(KK + K, 0.), a(K);
+        double* Hl = loc.data(); double* gl = loc.data() + KK;
 #ifdef _OPENMP
 #pragma omp for nowait
 #endif
         for (int64_t j = 0; j < M; ++j) {
           if (sup[j]) continue;
-          const double e = zeta[j] * std::exp(-lin(j, par.data()));
+          const double e = .5 * zeta[j] * w[j], gj = e - .5 * pi;
           a[0] = 1.;
-          const double* r = A.data() + j * (K - 1);
+          const double* r = A.data() + j * K1;
           for (int k = 1; k < K; ++k) a[k] = r[k - 1];
-          gl.noalias() += (.5 * (e - pi)) * a;
-          Hl.selfadjointView<Eigen::Lower>().rankUpdate(a, .5 * e);
+          for (int k = 0; k < K; ++k) {
+            const double ek = e * a[k];
+            gl[k] += gj * a[k];
+            for (int l = 0; l <= k; ++l) Hl[k * K + l] += ek * a[l];
+          }
         }
 #ifdef _OPENMP
 #pragma omp critical
 #endif
-        { H += Hl; g += gl; }
+        for (int i = 0; i < KK + K; ++i) HG[i] += loc[i];
       }
-      const Eigen::VectorXd step = H.selfadjointView<Eigen::Lower>().ldlt().solve(g);
+      Eigen::MatrixXd H(K, K);
+      Eigen::VectorXd g(K);
+      for (int k = 0; k < K; ++k) {
+        g[k] = HG[KK + k];
+        for (int l = 0; l <= k; ++l) H(k, l) = H(l, k) = HG[k * K + l];
+      }
+      const Eigen::VectorXd step = H.ldlt().solve(g);
       if (!step.allFinite()) break;
       double t = 1.;
-      std::vector<double> nw(K);
       bool moved = false;
       for (int h = 0; h < max_halving; ++h, t *= .5) {
-        for (int k = 0; k < K; ++k) nw[k] = par[k] + t * step[k];
-        const double q1 = q(nw.data(), zeta, pi);
-        if (std::isfinite(q1) && q1 >= q0) { par = nw; q0 = q1; moved = true; break; }
+        double q1 = 0;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+ : q1) num_threads(threads)
+#endif
+        for (int64_t j = 0; j < M; ++j) {
+          double dj = step[0];
+          const double* r = A.data() + j * K1;
+          for (int k = 1; k < K; ++k) dj += r[k - 1] * step[k];
+          xn[j] = x[j] + t * dj;
+          wn[j] = std::exp(-xn[j]);
+          if (!sup[j]) q1 += -.5 * pi * xn[j] - .5 * zeta[j] * wn[j];
+        }
+        if (std::isfinite(q1) && q1 >= q0) {
+          for (int k = 0; k < K; ++k) par[k] += t * step[k];
+          x.swap(xn); w.swap(wn); q0 = q1; moved = true;
+          break;
+        }
       }
       if (!moved || t * step.cwiseAbs().maxCoeff() < tol) { ++it; break; }
     }
-    set_tau();
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(threads)
+#endif
+    for (int64_t j = 0; j < M; ++j) { tau[j] = (float)w[j]; ltau[j] = (float)-x[j]; }
     return it;
   }
 };
@@ -364,7 +391,7 @@ struct Fitter {
     std::string msg = "max_iter reached";
     for (it = 1; it <= max_iter; ++it) {
       const bool full = !c.use_active || force_full || (it % c.full_every == 0);
-      sweep(P, nv, bt, (float)pi, vm.tau.data(), vm.sup.data(), (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
+      sweep(P, nv, bt, (float)pi, vm.tau.data(), vm.ltau.data(), vm.sup.data(), (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
       for (int b = 0; b < P.nb; ++b) snp_visits += nvis[b];
       if (full) ++sweeps_full; else ++sweeps_part;
       force_full = false;
@@ -379,7 +406,7 @@ struct Fitter {
 #pragma omp parallel for reduction(+ : glt, tz) num_threads(threads)
 #endif
       for (int64_t j = 0; j < M; ++j) {
-        glt += st.gamma[j] * std::log((double)vm.tau[j]);
+        glt += st.gamma[j] * (double)vm.ltau[j];
         tz += (double)vm.tau[j] * zeta[j];
       }
       const double prior = .5 * (sg_sum - glvt + glt) - .5 * tz;
@@ -556,7 +583,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
     if (r.converged && rb > 0 && r2 > best_r2) {
       best_r2 = r2; best = st; have_best = true;
-      bpi = pi; bsig = sigma; bvm.par = vm.par; bvm.tau = vm.tau;
+      bpi = pi; bsig = sigma; bvm.par = vm.par; bvm.set_all();
     }
     if (r2 > best_here) { best_here = r2; drops = 0; }
     else if (c.stop_after && ++drops >= c.stop_after) break;
