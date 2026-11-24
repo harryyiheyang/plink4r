@@ -9,6 +9,10 @@ cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, pro
     .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
 }
 
+eqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, threads, mem_gb, block) {
+    .Call(`_plink4r_eqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, threads, mem_gb, block)
+}
+
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, threads)
 }

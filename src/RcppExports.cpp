@@ -54,6 +54,29 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// eqtl_stream_cpp
+Rcpp::List eqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::NumericMatrix Y, Rcpp::IntegerVector lo, Rcpp::IntegerVector hi, int threads, double mem_gb, int block);
+RcppExport SEXP _plink4r_eqtl_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP YSEXP, SEXP loSEXP, SEXP hiSEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const std::string& >::type path(pathSEXP);
+    Rcpp::traits::input_parameter< bool >::type bed(bedSEXP);
+    Rcpp::traits::input_parameter< int >::type n_raw(n_rawSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type X(XSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type Y(YSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type lo(loSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type hi(hiSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
+    Rcpp::traits::input_parameter< int >::type block(blockSEXP);
+    rcpp_result_gen = Rcpp::wrap(eqtl_stream_cpp(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, threads, mem_gb, block));
+    return rcpp_result_gen;
+END_RCPP
+}
 // geno_open_bed_cpp
 SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads);
 RcppExport SEXP _plink4r_geno_open_bed_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP m_totalSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP threadsSEXP) {
@@ -447,6 +470,7 @@ END_RCPP
 static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 15},
     {"_plink4r_cox_null_cpp", (DL_FUNC) &_plink4r_cox_null_cpp, 8},
+    {"_plink4r_eqtl_stream_cpp", (DL_FUNC) &_plink4r_eqtl_stream_cpp, 13},
     {"_plink4r_geno_open_bed_cpp", (DL_FUNC) &_plink4r_geno_open_bed_cpp, 6},
     {"_plink4r_geno_open_pgen_cpp", (DL_FUNC) &_plink4r_geno_open_pgen_cpp, 6},
     {"_plink4r_geno_info_cpp", (DL_FUNC) &_plink4r_geno_info_cpp, 1},
