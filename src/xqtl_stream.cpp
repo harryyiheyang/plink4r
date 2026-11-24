@@ -113,8 +113,8 @@ struct Windows {
       : q(lo_.size()), lo(lo_.begin(), lo_.end()), hi(hi_.begin(), hi_.end()), top(lo_.size()), off(lo_.size() + 1, 0) {
     int running = 0;
     for (int t = 0; t < q; ++t) {
-      if (lo[t] < 0 || hi[t] < lo[t] || hi[t] > p) Rcpp::stop("Range of trait %d is not within the variants.", t + 1);
-      if (t > 0 && lo[t] < lo[t - 1]) Rcpp::stop("The traits are not ordered by the start of their ranges.");
+      if (lo[t] < 0 || hi[t] < lo[t] || hi[t] > p) Rcpp::stop("Range of outcome %d is not within the variants.", t + 1);
+      if (t > 0 && lo[t] < lo[t - 1]) Rcpp::stop("The outcomes are not ordered by the start of their ranges.");
       running = std::max(running, hi[t]);
       top[t] = running;
       off[t + 1] = off[t] + static_cast<std::size_t>(hi[t] - lo[t]);
@@ -247,8 +247,19 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::I
   if (lo.size() != q || hi.size() != q || outcome.size() != q) Rcpp::stop("lo / hi / outcome do not match the traits");
   if (chr.size() != p || bp.size() != p || ref.size() != p || alt.size() != p)
     Rcpp::stop("chr / bp / ref / alt do not match the variants");
-  for (R_xlen_t i = 0; i < Y.size(); ++i)
-    if (!std::isfinite(Y[i])) Rcpp::stop("Y has a missing or non-finite value.");
+  {  // no missing outcome: the outcomes that have one are named, up to kNamed of them
+    const int kNamed = 5;
+    std::string names;
+    int bad = 0;
+    for (int t = 0; t < q; ++t) {
+      const double* y = &Y[static_cast<R_xlen_t>(t) * ns];
+      int i = 0;
+      while (i < ns && std::isfinite(y[i])) ++i;
+      if (i < ns && bad++ < kNamed) names += (names.empty() ? "" : ", ") + Rcpp::as<std::string>(outcome[t]);
+    }
+    if (bad > kNamed) names += ", ... (" + std::to_string(bad) + " in all)";
+    if (bad) Rcpp::stop("Missing or not finite among the analysed samples, in outcome: " + names);
+  }
   const Windows win(lo, hi, p);
   plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
   const bool dos = F.dosage;
@@ -262,7 +273,8 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::I
   // block size from the memory budget
   const std::size_t N = ns;
   const int b_most = block > 0 ? block : plink4r::kScanBlockMax;
-  const double shared = 8.0 * N * (k + q) + 8.0 * p * 2 + 8.0 * N * X.ncol() * 2;
+  // shared: V, R and the Y that R was copied from, the variant tables, X and its copy in the SVD
+  const double shared = 8.0 * N * (k + 2.0 * q) + 8.0 * p * 2 + 8.0 * N * X.ncol() * 2;
   const double per_var = plink4r::ScanBlock::var_bytes(ns, dos) + 8.0 * std::min<int>(kScanRowChunk, ns) +
                          8.0 * (k + win.most_active(b_most, p) + 1);
   const double per_thread = 8.0 * N * 2 + F.thread_bytes();

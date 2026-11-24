@@ -25,17 +25,20 @@
 #' groups carry the minimum and maximum of `Outcome`, `CHR` and `BP`, so only that outcome is read.
 #'
 #' @param outcome data.frame (data.table) with one row per sample: the sample IDs (.psam / .fam IID) in its first
-#'   column, then one numeric column per outcome, named by the outcome. No missing value among the analysed samples.
-#' @param position data.frame with one row per outcome: `Outcome` (a column name of `outcome`), `CHR`, `Start` and
-#'   `End`, positions on `CHR` in the coordinates of the genotype file with `Start <= End`: the two ends of a gene
-#'   or region, or `Start = End` for a single anchor (e.g. the transcription start site). Rows naming no column of
-#'   `outcome` are ignored. Outcomes without a row here, without a position, or with no variant in their window are
+#'   column, whatever its name, then one numeric column per outcome, named by the outcome. Every column is an
+#'   outcome to test: give the columns wanted. No missing value among the analysed samples.
+#' @param position data.frame with the position of every outcome: `Outcome` (the column name in `outcome`), `CHR`,
+#'   `Start` and `End`, positions on `CHR` in the coordinates of the genotype file with `Start <= End`: the two ends
+#'   of a gene or region, or `Start = End` for a single anchor (e.g. the transcription start site). A column of
+#'   `outcome` without a row here is an error; rows naming no column of `outcome` are ignored (the table may be that
+#'   of the whole genome). An outcome whose row has no chromosome that the package reads (1 to 22, X, Y, MT), no
+#'   `Start` or `End`, or no variant in its window (e.g. on a chromosome that the genotype file does not hold) is
 #'   not tested (`outcomes_not_tested` in the value).
 #' @param out Path of the Parquet file to write (replaced when it exists).
 #' @param covariate `NULL` (no covariate: the intercept alone), or a data.frame with one row per sample: the sample
-#'   IDs in its first column, then the covariates, every column of which is used for every outcome. Numeric columns
-#'   enter as they are, factors and characters expanded by base R with the current contrasts; the intercept is
-#'   always added. Samples with a missing covariate are left out.
+#'   IDs in its first column, whatever its name, then the covariates, every column of which is used for every
+#'   outcome. Numeric columns enter as they are, factors and characters expanded by base R with the current
+#'   contrasts; the intercept is always added. Samples with a missing covariate are left out.
 #' @param window Base pairs added on both sides of an outcome's position: it is tested with the variants at
 #'   `Start - window` to `End + window` of its chromosome, both ends included. With 0, `Start` to `End` is the
 #'   tested region itself.
@@ -51,20 +54,18 @@
 #' @export
 xqtl <- function(outcome, position, out, covariate = NULL, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
                  threads = 0L, mem_gb = 0, block = 256L) {
-  some <- function(x) paste0(paste(utils::head(x, 5L), collapse = ", "), if (length(x) > 5L) ", ...")
+  some <- function(x) paste0(paste(utils::head(x, 5L), collapse = ", "),
+                             if (length(x) > 5L) sprintf(", ... (%d in all)", length(x)))
   if (!is.data.frame(outcome) || ncol(outcome) < 2L)
     stop("outcome must be a data.frame: the sample IDs in its first column, then one column per outcome.",
          call. = FALSE)
   oname <- names(outcome)[-1L]
   if (anyNA(oname) || anyDuplicated(oname)) stop("Column names of outcome missing or repeated.", call. = FALSE)
-  oid <- as.character(.subset2(outcome, 1L))
+  oid <- .id_text(.subset2(outcome, 1L))
   if (anyNA(oid) || anyDuplicated(oid))
     stop("Sample IDs (the first column of outcome) missing or repeated.", call. = FALSE)
   num <- vapply(seq_along(oname) + 1L, function(j) is.numeric(.subset2(outcome, j)), NA)
   if (!all(num)) stop("Not numeric in outcome: ", some(oname[!num]), call. = FALSE)
-  if (!is.data.frame(position)) stop("position must be a data.frame: Outcome, CHR, Start, End.", call. = FALSE)
-  miss <- setdiff(c("Outcome", "CHR", "Start", "End"), names(position))
-  if (length(miss)) stop("position lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   if (!is.null(covariate) && (!is.data.frame(covariate) || ncol(covariate) < 2L))
     stop("covariate must be a data.frame: the sample IDs in its first column, then one column per covariate ",
          "(NULL without covariates).", call. = FALSE)
@@ -73,46 +74,59 @@ xqtl <- function(outcome, position, out, covariate = NULL, pfile = NULL, bfile =
   if (!dir.exists(dirname(out))) stop("No such directory: ", dirname(out), call. = FALSE)
   if (!is.numeric(window) || length(window) != 1L || !is.finite(window) || window < 0)
     stop("window must be a non-negative number of base pairs.", call. = FALSE)
-  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
-  var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
 
-  # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model
-  if (is.null(covariate)) {
-    d <- data.frame(IID = oid, stringsAsFactors = FALSE); term <- "1"
-  } else {
-    d <- as.data.frame(covariate)
-    if (anyNA(names(d)) || anyDuplicated(names(d)) || any(grepl("`", names(d), fixed = TRUE)))
-      stop("Column names of covariate missing, repeated or with a backtick.", call. = FALSE)
-    term <- sprintf("`%s`", names(d)[-1L])
-    cid <- as.character(d[[1L]])
-    if (anyDuplicated(cid[!is.na(cid)])) stop("Sample IDs (the first column of covariate) repeated.", call. = FALSE)
-    d <- d[cid %in% oid, , drop = FALSE]
-    if (!nrow(d)) stop("No sample of covariate is in outcome.", call. = FALSE)
-  }
-  id_col <- names(d)[1L]
-  d[[".plink4r_y"]] <- rep(0, nrow(d))
-  sm <- .pheno_samples(d, stats::reformulate(term, response = ".plink4r_y"), "gaussian", id_col, iid)
-  d <- sm$d; srow <- sm$srow
-  X <- stats::model.matrix(stats::reformulate(term), d)
-  attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
-
-  # ---- windows as ranges of the scan variants, which are taken in position order
-  vrow <- vrow[!is.na(var$CHR[vrow]) & !is.na(var$POS[vrow])]
-  vrow <- vrow[order(var$CHR[vrow], var$POS[vrow])]
-  span <- 1e10  # above any position: chromosome code x span + position orders the genome
-  key <- var$CHR[vrow] * span + var$POS[vrow]
+  # ---- position: its rows for the columns of outcome, every one of which must have its row
+  if (!is.data.frame(position)) stop("position must be a data.frame: Outcome, CHR, Start, End.", call. = FALSE)
+  miss <- setdiff(c("Outcome", "CHR", "Start", "End"), names(position))
+  if (length(miss)) stop("position lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   a <- as.data.frame(position)[, c("Outcome", "CHR", "Start", "End")]
   a$Outcome <- as.character(a$Outcome)
   a <- a[a$Outcome %in% oname, , drop = FALSE]
   if (anyDuplicated(a$Outcome))
     stop("Repeated in position: ", some(unique(a$Outcome[duplicated(a$Outcome)])), call. = FALSE)
+  lack <- setdiff(oname, a$Outcome)
+  if (length(lack)) stop("No row of position for outcome column(s): ", some(lack), call. = FALSE)
   if (!is.numeric(a$Start) || !is.numeric(a$End)) stop("Start and End of position must be numeric.", call. = FALSE)
   a$CHR <- .chr_code(a$CHR)
   a <- a[!is.na(a$CHR) & is.finite(a$Start) & is.finite(a$End), , drop = FALSE]
+  if (!nrow(a))
+    stop("No outcome has a chromosome (1 to 22, X, Y, MT; with or without chr), a Start and an End in position.",
+         call. = FALSE)
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
-  lo <- findInterval(a$CHR * span + pmax(a$Start - window, 0), key, left.open = TRUE)
-  hi <- findInterval(a$CHR * span + pmin(a$End + window, span - 1), key)
+
+  threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
+  gv <- .geno_variants(pfile, bfile, snp_vec)
+  var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
+
+  # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.
+  # .pheno_samples takes its samples with a phenotype: here a column of zeros under a name that covariate does not have
+  if (is.null(covariate)) {
+    d <- data.frame(IID = oid, stringsAsFactors = FALSE)
+  } else {
+    d <- as.data.frame(covariate)
+    if (anyNA(names(d)) || !all(nzchar(names(d))) || anyDuplicated(names(d)))
+      stop("Column names of covariate missing or repeated.", call. = FALSE)
+    d[[1L]] <- .id_text(d[[1L]])
+    d <- d[d[[1L]] %in% oid, , drop = FALSE]
+    if (!nrow(d)) stop("No sample of covariate is in outcome.", call. = FALSE)
+  }
+  id_col <- names(d)[1L]
+  rhs <- Reduce(function(x, y) call("+", x, y), lapply(names(d)[-1L], as.name), 1)
+  y0 <- make.unique(c(names(d), "y"))[ncol(d) + 1L]
+  d[[y0]] <- rep(0, nrow(d))
+  sm <- .pheno_samples(d, eval(call("~", as.name(y0), rhs)), "gaussian", id_col, iid)
+  d <- sm$d; srow <- sm$srow
+  X <- stats::model.matrix(eval(call("~", rhs)), d)
+  attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
+
+  # ---- windows as ranges of the scan variants, which are taken in position order
+  vrow <- vrow[!is.na(var$CHR[vrow]) & !is.na(var$POS[vrow])]
+  vrow <- vrow[order(var$CHR[vrow], var$POS[vrow])]
+  span <- 2^31  # a position is a 32-bit integer in the files: chromosome code x span + position orders the genome
+  key <- var$CHR[vrow] * span + var$POS[vrow]
+  within <- function(x) pmin(pmax(x, 0), span - 1)
+  lo <- findInterval(a$CHR * span + within(a$Start - window), key, left.open = TRUE)
+  hi <- findInterval(a$CHR * span + within(a$End + window), key)
   keep <- hi > lo
   not_tested <- setdiff(oname, a$Outcome[keep])
   a <- a[keep, , drop = FALSE]; lo <- lo[keep]; hi <- hi[keep]
@@ -127,12 +141,9 @@ xqtl <- function(outcome, position, out, covariate = NULL, pfile = NULL, bfile =
   vrow <- vrow[covered]
 
   # the tested outcomes of the analysed samples, column by column: the table itself is not copied
-  orow <- match(as.character(d[[id_col]]), oid); ocol <- match(a$Outcome, oname) + 1L
+  orow <- match(d[[id_col]], oid); ocol <- match(a$Outcome, oname) + 1L
   Y <- vapply(ocol, function(j) as.numeric(.subset2(outcome, j)[orow]), numeric(length(orow)))
   dim(Y) <- c(length(orow), length(ocol))
-  bad <- which(colSums(!is.finite(Y)) > 0)
-  if (length(bad))
-    stop("Missing or not finite among the analysed samples, in outcome: ", some(a$Outcome[bad]), call. = FALSE)
 
   # the alleles as codes into their distinct strings: REF = the other allele, ALT = the counted one
   alleles <- unique(c(var$A1[vrow], var$A2[vrow]))
