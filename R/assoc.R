@@ -59,7 +59,10 @@
 #' @param para With `kinship`: named list overriding [reml_tau_para()].
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param mem_gb Memory budget in GB that sets the block size; 0 takes it from [plink4r_resources()].
-#' @param block Variants per thread and block; 0 = the largest that fits `mem_gb` (at most 4096).
+#' @param block Variants per thread and block; 0 = the largest that fits `mem_gb` (at most 4096). A thread expands
+#'   its block of genotypes to doubles 2048 samples at a time, and a few hundred variants keep that within the
+#'   cache: 256 took 0.4 to 0.6 of the time of 4096 for 1,000 and 20,000 samples (linear, logistic, kinship, Cox;
+#'   0.5 to 0.65 for [gxe()]).
 #' @return data.table with one row per variant: `CHR`, `POS`, `ID`, `A1` (counted allele: ALT of a PGEN, .bim
 #'   column 5 of a BED), `A2`, `N` (non-missing calls), `A1_FREQ`, `BETA`, `SE`, `T` (linear) or `Z`
 #'   (logistic), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. Variants with no variation among the analysed
@@ -68,7 +71,7 @@
 #'   projection, monomorphic and singular counts, skipped multiallelic variants.
 #' @export
 gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
-                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 0L,
+                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
                  kinship = NULL, para = list()) {
   family <- match.arg(family)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
@@ -136,7 +139,7 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
 #' @export
 gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile = NULL,
                 family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 0L, kinship = NULL, para = list()) {
+                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
   family <- match.arg(family)
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
@@ -176,10 +179,11 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 }
 
 # The genotype file of an association run, from geno_file(): its variants (var), sample IDs (iid), path, the file
-# rows of the biallelic variants to test (vrow) and the IDs of the multiallelic ones left out (skipped).
-.geno_variants <- function(pfile, bfile, snp_vec) {
+# rows of the biallelic variants to test (vrow), and the multiallelic ones left out: their file rows (multi) and their
+# IDs (skipped). With id = FALSE the ID column is not read: var has none, skipped is NULL, snp_vec must be NULL.
+.geno_variants <- function(pfile, bfile, snp_vec, id = TRUE) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  gf <- geno_file(bedfile = bfile, pgenfile = pfile)
+  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = id)
   v <- gf$variants
   var <- data.table::data.table(CHR = v$chr, POS = v$pos, ID = v$id, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
   iid <- gf$samples$iid
@@ -189,10 +193,10 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
     if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)
     sort(unique(i[!is.na(i)]))
   }
-  skipped <- var$ID[vrow[var$allele_ct[vrow] > 2L]]
+  multi <- vrow[var$allele_ct[vrow] > 2L]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
-  list(var = var, iid = iid, path = path, vrow = vrow, skipped = skipped)
+  list(var = var, iid = iid, path = path, vrow = vrow, skipped = var$ID[multi], multi = multi)
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing

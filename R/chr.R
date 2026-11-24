@@ -5,6 +5,9 @@
 # PAR1, PAR2, XY or 25, with their positions on X); 24 for Y; 26 for the mitochondrion (MT, M). A leading "chr"
 # (any case) is ignored. Any other label has no code (NA) and is matched to nothing.
 
+# The chromosomes an LD panel holds: the autosomes and X (23, its PAR1 / PAR2 parts included).
+.panel_chr <- 1:23
+
 # The code of chromosome labels or numbers.
 .chr_code <- function(chr) {
   u <- unique(chr)

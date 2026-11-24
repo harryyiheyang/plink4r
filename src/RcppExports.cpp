@@ -354,6 +354,141 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// ld_score_cpp
+Rcpp::NumericMatrix ld_score_cpp(Rcpp::CharacterVector files, Rcpp::IntegerVector offset, const Rcpp::NumericMatrix& A, double thresh, int chunk, int threads);
+RcppExport SEXP _plink4r_ld_score_cpp(SEXP filesSEXP, SEXP offsetSEXP, SEXP ASEXP, SEXP threshSEXP, SEXP chunkSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type files(filesSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type offset(offsetSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type A(ASEXP);
+    Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
+    Rcpp::traits::input_parameter< int >::type chunk(chunkSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(ld_score_cpp(files, offset, A, thresh, chunk, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ld_score_cross_cpp
+Rcpp::NumericVector ld_score_cross_cpp(Rcpp::CharacterVector files1, Rcpp::CharacterVector files2, Rcpp::IntegerVector offset, Rcpp::IntegerVector i1, Rcpp::IntegerVector i2, Rcpp::NumericVector sign, double thresh1, double thresh2, int chunk, int threads);
+RcppExport SEXP _plink4r_ld_score_cross_cpp(SEXP files1SEXP, SEXP files2SEXP, SEXP offsetSEXP, SEXP i1SEXP, SEXP i2SEXP, SEXP signSEXP, SEXP thresh1SEXP, SEXP thresh2SEXP, SEXP chunkSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type files1(files1SEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type files2(files2SEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type offset(offsetSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type i1(i1SEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type i2(i2SEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type sign(signSEXP);
+    Rcpp::traits::input_parameter< double >::type thresh1(thresh1SEXP);
+    Rcpp::traits::input_parameter< double >::type thresh2(thresh2SEXP);
+    Rcpp::traits::input_parameter< int >::type chunk(chunkSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(ld_score_cross_cpp(files1, files2, offset, i1, i2, sign, thresh1, thresh2, chunk, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ldsc_bicov_cpp
+Rcpp::List ldsc_bicov_cpp(const Eigen::Map<Eigen::VectorXd> z1, const Eigen::Map<Eigen::VectorXd> z2, const Eigen::Map<Eigen::VectorXd> N1, const Eigen::Map<Eigen::VectorXd> N2, const Eigen::Map<Eigen::VectorXd> L2, double h21, double h22, int nblock, const Rcpp::NumericMatrix& counts, int n_reweight, double tol);
+RcppExport SEXP _plink4r_ldsc_bicov_cpp(SEXP z1SEXP, SEXP z2SEXP, SEXP N1SEXP, SEXP N2SEXP, SEXP L2SEXP, SEXP h21SEXP, SEXP h22SEXP, SEXP nblockSEXP, SEXP countsSEXP, SEXP n_reweightSEXP, SEXP tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z1(z1SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z2(z2SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N1(N1SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N2(N2SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type L2(L2SEXP);
+    Rcpp::traits::input_parameter< double >::type h21(h21SEXP);
+    Rcpp::traits::input_parameter< double >::type h22(h22SEXP);
+    Rcpp::traits::input_parameter< int >::type nblock(nblockSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type counts(countsSEXP);
+    Rcpp::traits::input_parameter< int >::type n_reweight(n_reweightSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(ldsc_bicov_cpp(z1, z2, N1, N2, L2, h21, h22, nblock, counts, n_reweight, tol));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ldsc_groups_cpp
+int ldsc_groups_cpp(int M, int nblock);
+RcppExport SEXP _plink4r_ldsc_groups_cpp(SEXP MSEXP, SEXP nblockSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< int >::type M(MSEXP);
+    Rcpp::traits::input_parameter< int >::type nblock(nblockSEXP);
+    rcpp_result_gen = Rcpp::wrap(ldsc_groups_cpp(M, nblock));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ldsc_strat_cpp
+Rcpp::List ldsc_strat_cpp(const Eigen::Map<Eigen::VectorXd> z, const Eigen::Map<Eigen::VectorXd> N, const Eigen::Map<Eigen::MatrixXd> L, const Eigen::Map<Eigen::MatrixXd> A, const Rcpp::IntegerVector& block, bool intercept, double lo, double hi, double z_max, double w_init, int n_reweight, bool ridge, double lambda, const Rcpp::NumericVector& lambda_grid, double tol);
+RcppExport SEXP _plink4r_ldsc_strat_cpp(SEXP zSEXP, SEXP NSEXP, SEXP LSEXP, SEXP ASEXP, SEXP blockSEXP, SEXP interceptSEXP, SEXP loSEXP, SEXP hiSEXP, SEXP z_maxSEXP, SEXP w_initSEXP, SEXP n_reweightSEXP, SEXP ridgeSEXP, SEXP lambdaSEXP, SEXP lambda_gridSEXP, SEXP tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z(zSEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N(NSEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::MatrixXd> >::type L(LSEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::MatrixXd> >::type A(ASEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type block(blockSEXP);
+    Rcpp::traits::input_parameter< bool >::type intercept(interceptSEXP);
+    Rcpp::traits::input_parameter< double >::type lo(loSEXP);
+    Rcpp::traits::input_parameter< double >::type hi(hiSEXP);
+    Rcpp::traits::input_parameter< double >::type z_max(z_maxSEXP);
+    Rcpp::traits::input_parameter< double >::type w_init(w_initSEXP);
+    Rcpp::traits::input_parameter< int >::type n_reweight(n_reweightSEXP);
+    Rcpp::traits::input_parameter< bool >::type ridge(ridgeSEXP);
+    Rcpp::traits::input_parameter< double >::type lambda(lambdaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type lambda_grid(lambda_gridSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(ldsc_strat_cpp(z, N, L, A, block, intercept, lo, hi, z_max, w_init, n_reweight, ridge, lambda, lambda_grid, tol));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ldsc_trans_cpp
+Rcpp::List ldsc_trans_cpp(const Eigen::Map<Eigen::VectorXd> z1, const Eigen::Map<Eigen::VectorXd> z2, const Eigen::Map<Eigen::VectorXd> N1, const Eigen::Map<Eigen::VectorXd> N2, const Eigen::Map<Eigen::VectorXd> L1, const Eigen::Map<Eigen::VectorXd> L2, const Eigen::Map<Eigen::VectorXd> L12, double h21, double h22, int nblock, const Rcpp::NumericMatrix& counts, int n_reweight, double tol);
+RcppExport SEXP _plink4r_ldsc_trans_cpp(SEXP z1SEXP, SEXP z2SEXP, SEXP N1SEXP, SEXP N2SEXP, SEXP L1SEXP, SEXP L2SEXP, SEXP L12SEXP, SEXP h21SEXP, SEXP h22SEXP, SEXP nblockSEXP, SEXP countsSEXP, SEXP n_reweightSEXP, SEXP tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z1(z1SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z2(z2SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N1(N1SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N2(N2SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type L1(L1SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type L2(L2SEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type L12(L12SEXP);
+    Rcpp::traits::input_parameter< double >::type h21(h21SEXP);
+    Rcpp::traits::input_parameter< double >::type h22(h22SEXP);
+    Rcpp::traits::input_parameter< int >::type nblock(nblockSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type counts(countsSEXP);
+    Rcpp::traits::input_parameter< int >::type n_reweight(n_reweightSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(ldsc_trans_cpp(z1, z2, N1, N2, L1, L2, L12, h21, h22, nblock, counts, n_reweight, tol));
+    return rcpp_result_gen;
+END_RCPP
+}
+// ldsc_univ_cpp
+Rcpp::List ldsc_univ_cpp(const Eigen::Map<Eigen::VectorXd> z, const Eigen::Map<Eigen::VectorXd> N, const Eigen::Map<Eigen::VectorXd> L2, int nblock, const Rcpp::NumericMatrix& counts, double w_init, int n_reweight, double tol);
+RcppExport SEXP _plink4r_ldsc_univ_cpp(SEXP zSEXP, SEXP NSEXP, SEXP L2SEXP, SEXP nblockSEXP, SEXP countsSEXP, SEXP w_initSEXP, SEXP n_reweightSEXP, SEXP tolSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type z(zSEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type N(NSEXP);
+    Rcpp::traits::input_parameter< const Eigen::Map<Eigen::VectorXd> >::type L2(L2SEXP);
+    Rcpp::traits::input_parameter< int >::type nblock(nblockSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type counts(countsSEXP);
+    Rcpp::traits::input_parameter< double >::type w_init(w_initSEXP);
+    Rcpp::traits::input_parameter< int >::type n_reweight(n_reweightSEXP);
+    Rcpp::traits::input_parameter< double >::type tol(tolSEXP);
+    rcpp_result_gen = Rcpp::wrap(ldsc_univ_cpp(z, N, L2, nblock, counts, w_init, n_reweight, tol));
+    return rcpp_result_gen;
+END_RCPP
+}
 // reml_tau_binomial_cpp
 Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_iter, int max_eval, double mu_eps, int start_iter, double h_window, double f_tol, double rank_tol, bool proj);
 RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP start_iterSEXP, SEXP h_windowSEXP, SEXP f_tolSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
@@ -443,6 +578,74 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// weight_condition_cpp
+Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p_bp37, Rcpp::IntegerVector p_bp38, Rcpp::CharacterVector p_a1, Rcpp::CharacterVector p_a2, Rcpp::NumericVector p_freq, Rcpp::IntegerVector p_block, Rcpp::IntegerVector p_index, Rcpp::IntegerVector blocks, Rcpp::CharacterVector files, Rcpp::IntegerVector t_chr, Rcpp::IntegerVector t_bp, Rcpp::CharacterVector t_a1, Rcpp::CharacterVector t_a2, Rcpp::IntegerVector w_chr, Rcpp::IntegerVector w_bp, Rcpp::CharacterVector w_a1, Rcpp::CharacterVector w_a2, Rcpp::NumericMatrix W, double thresh, double delta, int slice, int dup, int threads);
+RcppExport SEXP _plink4r_weight_condition_cpp(SEXP p_chrSEXP, SEXP p_bp37SEXP, SEXP p_bp38SEXP, SEXP p_a1SEXP, SEXP p_a2SEXP, SEXP p_freqSEXP, SEXP p_blockSEXP, SEXP p_indexSEXP, SEXP blocksSEXP, SEXP filesSEXP, SEXP t_chrSEXP, SEXP t_bpSEXP, SEXP t_a1SEXP, SEXP t_a2SEXP, SEXP w_chrSEXP, SEXP w_bpSEXP, SEXP w_a1SEXP, SEXP w_a2SEXP, SEXP WSEXP, SEXP threshSEXP, SEXP deltaSEXP, SEXP sliceSEXP, SEXP dupSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type p_chr(p_chrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type p_bp37(p_bp37SEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type p_bp38(p_bp38SEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type p_a1(p_a1SEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type p_a2(p_a2SEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type p_freq(p_freqSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type p_block(p_blockSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type p_index(p_indexSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type blocks(blocksSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type files(filesSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type t_chr(t_chrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type t_bp(t_bpSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type t_a1(t_a1SEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type t_a2(t_a2SEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type w_chr(w_chrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type w_bp(w_bpSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type w_a1(w_a1SEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type w_a2(w_a2SEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type W(WSEXP);
+    Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
+    Rcpp::traits::input_parameter< double >::type delta(deltaSEXP);
+    Rcpp::traits::input_parameter< int >::type slice(sliceSEXP);
+    Rcpp::traits::input_parameter< int >::type dup(dupSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(weight_condition_cpp(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// xqtl_stream_cpp
+Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector v_chr, Rcpp::IntegerVector v_bp, Rcpp::CharacterVector v_ref, Rcpp::CharacterVector v_alt, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::List table, Rcpp::IntegerVector row, Rcpp::IntegerVector col, Rcpp::CharacterVector outcome, Rcpp::IntegerVector o_chr, Rcpp::NumericVector o_start, Rcpp::NumericVector o_end, double window, const std::string& out, const std::string& created_by, int threads, double mem_gb, int block);
+RcppExport SEXP _plink4r_xqtl_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP v_chrSEXP, SEXP v_bpSEXP, SEXP v_refSEXP, SEXP v_altSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP tableSEXP, SEXP rowSEXP, SEXP colSEXP, SEXP outcomeSEXP, SEXP o_chrSEXP, SEXP o_startSEXP, SEXP o_endSEXP, SEXP windowSEXP, SEXP outSEXP, SEXP created_bySEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const std::string& >::type path(pathSEXP);
+    Rcpp::traits::input_parameter< bool >::type bed(bedSEXP);
+    Rcpp::traits::input_parameter< int >::type n_raw(n_rawSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type v_chr(v_chrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type v_bp(v_bpSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type v_ref(v_refSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type v_alt(v_altSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type X(XSEXP);
+    Rcpp::traits::input_parameter< Rcpp::List >::type table(tableSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type row(rowSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type col(colSEXP);
+    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type outcome(outcomeSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type o_chr(o_chrSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type o_start(o_startSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type o_end(o_endSEXP);
+    Rcpp::traits::input_parameter< double >::type window(windowSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type out(outSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type created_by(created_bySEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
+    Rcpp::traits::input_parameter< int >::type block(blockSEXP);
+    rcpp_result_gen = Rcpp::wrap(xqtl_stream_cpp(path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_assoc_stream_cpp", (DL_FUNC) &_plink4r_assoc_stream_cpp, 15},
@@ -467,10 +670,19 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_fill_ld_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_cpp, 14},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 10},
     {"_plink4r_gxe_kin_stream_cpp", (DL_FUNC) &_plink4r_gxe_kin_stream_cpp, 12},
+    {"_plink4r_ld_score_cpp", (DL_FUNC) &_plink4r_ld_score_cpp, 6},
+    {"_plink4r_ld_score_cross_cpp", (DL_FUNC) &_plink4r_ld_score_cross_cpp, 10},
+    {"_plink4r_ldsc_bicov_cpp", (DL_FUNC) &_plink4r_ldsc_bicov_cpp, 11},
+    {"_plink4r_ldsc_groups_cpp", (DL_FUNC) &_plink4r_ldsc_groups_cpp, 2},
+    {"_plink4r_ldsc_strat_cpp", (DL_FUNC) &_plink4r_ldsc_strat_cpp, 15},
+    {"_plink4r_ldsc_trans_cpp", (DL_FUNC) &_plink4r_ldsc_trans_cpp, 13},
+    {"_plink4r_ldsc_univ_cpp", (DL_FUNC) &_plink4r_ldsc_univ_cpp, 8},
     {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 16},
     {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
+    {"_plink4r_weight_condition_cpp", (DL_FUNC) &_plink4r_weight_condition_cpp, 24},
+    {"_plink4r_xqtl_stream_cpp", (DL_FUNC) &_plink4r_xqtl_stream_cpp, 24},
     {NULL, NULL, 0}
 };
 
