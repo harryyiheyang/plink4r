@@ -6,6 +6,9 @@
 // M-step of alpha (pi fixed on the grid): maximize Q(alpha) = sum_j [-.5 pi a_j' alpha - .5 zeta_j exp(-a_j' alpha)],
 // zeta_j = gamma_j (mu_j^2 + 1 / vt_j), weight pi per SNP as the VIPRS 0.1.5 tau update (tau = pi M / sum zeta), so
 // the intercept-only model is viprs(). Q is concave in alpha: Newton steps with step halving, to mstep_tol.
+// LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (any nonzero
+// binary 0/1 annotation column), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
+// no residual update) and left out of the M-step of alpha.
 // Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted);
 // a move of pi shifts the intercept by log(prev_pi / pi) (keeps the implied h2).
 // [[Rcpp::depends(RcppEigen)]]
@@ -22,6 +25,7 @@
 #include <omp.h>
 #endif
 #include "resources.h"
+#include "ld_bins.h"
 #include "vi_panel.h"
 
 using plink4r::EigenPanel;
@@ -82,8 +86,8 @@ struct State {
 // ---- kernels on the panel
 
 template <typename T>
-void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, const float* tau, float sigma, State& st,
-           bool active_only, float act_tol, std::vector<float>& bmax, std::vector<int64_t>& nvis, int threads) {
+void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, const float* tau, const char* sup,
+           float sigma, State& st, bool active_only, float act_tol, std::vector<float>& bmax, std::vector<int64_t>& nvis, int threads) {
   const float eps = std::max(std::numeric_limits<float>::epsilon(), 1e-8f);
   const float lp = std::log(pi) - std::log1p(-pi);
   float* gamma = st.gamma.data(); float* mu = st.mu.data(); float* eta = st.eta.data();
@@ -99,6 +103,7 @@ void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, co
     float mx = 0.f;
     int64_t cnt = 0;
     for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j) {
+      if (sup[j]) continue;  // suppressed: gamma = eta = 0 throughout
       const T* vj = P.row(b, j);
       const float vt = n[j] * d[j] / sigma + tau[j];
       const float mm = n[j] / (vt * sigma);
@@ -201,12 +206,13 @@ struct VarModel {
   int64_t M;
   int K;                      // coefficients, intercept first
   const std::vector<double>& A;
+  const std::vector<char>& sup;  // suppressed SNPs: left out of Q
   std::vector<double> par;    // alpha
   std::vector<float> tau;     // 1 / v_j
   int threads;
 
-  VarModel(int64_t M_, int K_, const std::vector<double>& A_, int threads_)
-      : M(M_), K(K_), A(A_), par(K_, 0.), tau(M_, 1.f), threads(threads_) {}
+  VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
+      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), tau(M_, 1.f), threads(threads_) {}
 
   double lin(int64_t j, const double* a) const {
     double x = a[0];
@@ -217,7 +223,7 @@ struct VarModel {
   void set_tau() {
     for (int64_t j = 0; j < M; ++j) tau[j] = (float)std::exp(-lin(j, par.data()));
   }
-  // start: v_j = h2 / (pi M) for all SNPs
+  // start: v_j = h2 / (pi M) for all SNPs (M over all SNPs, as the sigma2 start of sbayesrc())
   void start(double h2, double pi) {
     std::fill(par.begin(), par.end(), 0.);
     par[0] = std::log(h2 / (pi * M));
@@ -231,7 +237,9 @@ struct VarModel {
 #ifdef _OPENMP
 #pragma omp parallel for reduction(+ : s) num_threads(threads)
 #endif
-    for (int64_t j = 0; j < M; ++j) { const double x = lin(j, a); s += -.5 * pi * x - .5 * zeta[j] * std::exp(-x); }
+    for (int64_t j = 0; j < M; ++j) {
+      if (sup[j]) continue;
+      const double x = lin(j, a); s += -.5 * pi * x - .5 * zeta[j] * std::exp(-x); }
     return s;
   }
   // Newton on the concave Q with step halving; returns the Newton steps taken
@@ -251,6 +259,7 @@ struct VarModel {
 #pragma omp for nowait
 #endif
         for (int64_t j = 0; j < M; ++j) {
+          if (sup[j]) continue;
           const double e = zeta[j] * std::exp(-lin(j, par.data()));
           a[0] = 1.;
           const double* r = A.data() + j * (K - 1);
@@ -355,7 +364,7 @@ struct Fitter {
     std::string msg = "max_iter reached";
     for (it = 1; it <= max_iter; ++it) {
       const bool full = !c.use_active || force_full || (it % c.full_every == 0);
-      sweep(P, nv, bt, (float)pi, vm.tau.data(), (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
+      sweep(P, nv, bt, (float)pi, vm.tau.data(), vm.sup.data(), (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
       for (int b = 0; b < P.nb; ++b) snp_visits += nvis[b];
       if (full) ++sweeps_full; else ++sweeps_part;
       force_full = false;
@@ -436,18 +445,22 @@ struct Fitter {
 // ---- output
 
 // per annotation column: mean slab variance of its SNPs (weighted by the annotation) over the mean of all SNPs
+// (suppressed SNPs left out)
 Rcpp::NumericVector enrichment(const VarModel& vm) {
   const int K1 = vm.K - 1;
   std::vector<double> num(K1, 0.), den(K1, 0.);
   double all = 0;
+  int64_t nfree = 0;
   for (int64_t j = 0; j < vm.M; ++j) {
+    if (vm.sup[j]) continue;
+    ++nfree;
     const double v = 1. / vm.tau[j];
     all += v;
     const double* r = vm.A.data() + j * K1;
     for (int k = 0; k < K1; ++k) { num[k] += r[k] * v; den[k] += r[k]; }
   }
   Rcpp::NumericVector e(K1);
-  for (int k = 0; k < K1; ++k) e[k] = den[k] != 0 ? (num[k] / den[k]) / (all / vm.M) : NA_REAL;
+  for (int k = 0; k < K1; ++k) e[k] = den[k] != 0 ? (num[k] / den[k]) / (all / nfree) : NA_REAL;
   return e;
 }
 
@@ -510,8 +523,8 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // stop_after consecutive drops of pseudo R2, refit of the best converged point on all data (points that did not
 // converge are never chosen)
 template <typename T>
-Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::string& ld_dir, double thresh,
-                    const ViprsControl& c, int threads) {
+Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
+                    const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
   const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
@@ -524,7 +537,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   Rcpp::NumericMatrix gcoef(grid.size(), K);
   double best_r2 = -INFINITY, bpi = 0, bsig = 0, best_here = -INFINITY;
   State st(P.M, P.S, grid[0]), best(0, 0, 0.);
-  VarModel vm(P.M, K, A, threads), bvm(P.M, K, A, threads);
+  for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
+  VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
   bool have_best = false;
   vm.start(h2_0, grid[0]);
   double sigma = 1. - h2_0, prev_pi = grid[0];
@@ -556,7 +570,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       Rcpp::_["seconds"] = gsec);
   return pack(F, best, res, bvm, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_coef"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
-                                 Rcpp::_["best_pseudo_r2"] = best_r2,
+                                 Rcpp::_["best_pseudo_r2"] = best_r2, Rcpp::_["n_bins"] = n_bins,
+                                 Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
                                  Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi.begin(), xi.end())));
 }
 
@@ -564,13 +579,15 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 
 // Entry: blocks (ids), keep (0-based eigen rows with data per block, increasing), z / n / af per kept SNP (blocks
 // concatenated in that order; af = frequency of the effect allele, for BETA = BETA_STD / sqrt(2 af (1 - af))),
-// A (kept SNPs x annotations, same order; the intercept is added here), thresh (eigen truncation, <= 0 = every stored
-// pair), fp16 (store V as float16), control (viprs_annot_control()).
+// A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no suppression),
+// bin_start (first panel row of each kept block), n_panel (SNPs of the panel), thresh (eigen truncation, <= 0 = every
+// stored pair), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]
 Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
-                           double thresh, bool fp16, Rcpp::List control, int threads) {
+                           const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, double thresh,
+                           bool fp16, Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
   const Inputs in = read_inputs(blocks, keep, z, n, af);
@@ -584,8 +601,35 @@ Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks
       if (!std::isfinite(x)) Rcpp::stop("A must be finite");
       Ar[j * (K - 1) + k] = x;
     }
+  // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column
+  std::vector<char> sup(M, 0);
+  double n_bins = 0;
+  std::vector<int> bincol;
+  for (int a = 0; a < A.ncol(); ++a) {
+    bool bin01 = true;
+    for (int64_t j = 0; j < M && bin01; ++j) bin01 = A(j, a) == 0 || A(j, a) == 1;
+    if (bin01) bincol.push_back(a);
+  }
   try {
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, ld_dir, thresh, c, T) : fit_path<float>(in, Ar, K, ld_dir, thresh, c, T);
+    if (!bin_file.empty() && !bincol.empty()) {
+      if ((std::size_t)bin_start.size() != in.keep.size()) Rcpp::stop("bin_start needs one entry per block");
+      const std::vector<int> bid = plink4r::read_bins16(
+          bin_file, (int64_t)n_panel, std::vector<int64_t>(bin_start.begin(), bin_start.end()), in.keep);
+      std::vector<char> ann(M, 0);
+      for (int64_t j = 0; j < M; ++j)
+        for (int a : bincol) if (A(j, a) != 0) { ann[j] = 1; break; }
+      int64_t off = 0;
+      for (const auto& kb : in.keep) {
+        const int m = (int)kb.size();
+        plink4r::bin_suppress(m, bid.data() + off, ann.data() + off, sup.data() + off);
+        int mx = 0;
+        for (int j = 0; j < m; ++j) mx = std::max(mx, bid[off + j] + 1);
+        n_bins += mx;
+        off += m;
+      }
+    }
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, ld_dir, thresh, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, ld_dir, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }

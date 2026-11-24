@@ -109,7 +109,7 @@ viprs_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, thr
     .Call(`_plink4r_viprs_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
 }
 
-viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, thresh, fp16, control, threads) {
-    .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, thresh, fp16, control, threads)
+viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, thresh, fp16, control, threads)
 }
 
