@@ -9,7 +9,8 @@ Description: A toolkit for PLINK BED / PGEN genotypes. geno_open() reads a file 
     its products (X'X, X'M, X B, weighted cross products, correlations) are computed on the store, from R or
     from other packages' compiled code through inst/include/plink4r_api.h. Basic analyses read the files in
     blocks: association (gwas) and gene-environment interaction (gxe), with an optional sparse kinship, the
-    association of many traits each with the variants of its own window (eqtl), and scores (geno_score).
+    association of many traits each with the variants of its own window, written to Parquet (xqtl), and scores
+    (geno_score).
     Missing genotype cells and missing GWAS summary statistics are imputed from blockwise eigen LD (SBayesRC or
     plink4r eigen.bin layout), with OpenMP parallelism. Summary-statistics imputation is ported from
     SBayesRC.QC2.

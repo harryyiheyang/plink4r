@@ -9,10 +9,6 @@ cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, pro
     .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
 }
 
-eqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, threads, mem_gb, block) {
-    .Call(`_plink4r_eqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, threads, mem_gb, block)
-}
-
 geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, threads) {
     .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, threads)
 }
@@ -107,5 +103,9 @@ reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval,
 
 sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, threads) {
     .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
+}
+
+xqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, out, outcome, chr, bp, ref, alt, alleles, created_by, threads, mem_gb, block) {
+    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, Y, lo, hi, out, outcome, chr, bp, ref, alt, alleles, created_by, threads, mem_gb, block)
 }
 

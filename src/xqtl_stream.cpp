@@ -1,5 +1,6 @@
-// eqtl_stream_cpp: linear association of many continuous traits, each with the variants of its own window (cis-eQTL),
-// streamed in blocks; neither the genotype matrix nor a variants x traits table of products is formed.
+// xqtl_stream_cpp: linear association of many continuous traits, each with the variants of its own window (cis-xQTL:
+// expression, protein, methylation ...), streamed in blocks and written to a Parquet file as the scan goes; neither
+// the genotype matrix nor a table of the pairs is formed in memory.
 //
 // The linear test of assoc_stream.cpp (S = 1) for q traits that share their samples and covariates. With V a basis of
 // span(X), V'V = I (thin SVD of the covariates, singular values below sqrt(eps) x largest dropped), R = Y - V V'Y the
@@ -14,17 +15,22 @@
 // the variants are in position order; this file knows ranges only). The traits come ordered by lo. A thread's block of
 // variants j0 .. j1 - 1 can only meet the traits first .. last - 1, last = #{t: lo_t < j1}, first = the first t whose
 // running maximum of hi exceeds j0: a run of consecutive columns of R, used in place. The block computes G'R over
-// that run and writes the pairs with lo_t <= j < hi_t. The pairs of trait t are stored together, at off_t + (j - lo_t)
-// with off_t = sum_{s < t} (hi_s - lo_s), so every pair has its place before the scan starts and threads write to
-// disjoint places. A block that meets no trait is not read.
+// that run and keeps the pairs with lo_t <= j < hi_t. A block that meets no trait is not read.
+//
+// Output. The pairs of a trait wait in memory (Pending: float beta and se at off_t + (j - lo_t), so threads write to
+// disjoint places) until the scan has passed its last variant; the trait is then written as one row group of the
+// Parquet file (parquet_write.h) and its pairs leave memory. Traits are written in their order, so what waits is the
+// pairs of the traits whose windows the scan is inside. A row is one pair: Outcome (the trait), CHR, BP, REF, ALT
+// (the counted allele, which BETA is per copy of), BETA, SE (float), N (non-missing calls of the variant). A variant
+// without statistics (monomorphic or all missing; or in the span of the covariates) has no row. The file's key /
+// value metadata hold what a P value needs besides BETA / SE (df = n - k - 1) and the samples and covariate rank.
 //
 // G is expanded to doubles kScanRowChunk rows at a time from the 2-bit codes (hard calls) or 0.01 dosages, so a
 // thread holds b variants as n/4 (or 2n) bytes each plus kScanRowChunk x b doubles, and (k + active traits) x b
 // products. A variant whose A lost more than 1 - 1/kKappaMax of g'g to the subtraction (strong collinearity with the
-// covariates) is recomputed by explicit projection, and is in the span of the covariates (status 2, no statistics)
-// when what the projection leaves of g is below kRankTol of its length, the tolerance that sets the rank of the
-// covariates. The block size b follows from mem_gb (shared V, R and the output; then per thread). Products:
-// la().dgemm_tn (SIMD dispatch of la_kernel.cpp).
+// covariates) is recomputed by explicit projection, and is in the span of the covariates when what the projection
+// leaves of g is below kRankTol of its length, the tolerance that sets the rank of the covariates. The block size b
+// follows from mem_gb (shared V, R; then per thread). Products: la().dgemm_tn (SIMD dispatch of la_kernel.cpp).
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -35,7 +41,9 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <limits>
 #include "la_dispatch.h"
+#include "parquet_write.h"
 #include "scan_block.h"
 #include "resources.h"
 
@@ -96,7 +104,7 @@ void build_pre(Pre& pre, const Rcpp::NumericMatrix& X, const Rcpp::NumericMatrix
   }
 }
 
-// The variant ranges of the traits (ordered by lo) and the place of every pair in the output.
+// The variant ranges of the traits (ordered by lo) and the place of every pair among the pairs of all traits.
 struct Windows {
   int q = 0;
   std::vector<int> lo, hi, top;    // top[t] = max(hi[0..t])
@@ -177,65 +185,128 @@ double explicit_projection(const Pre& pre, Worker& wk, int s) {
   return dot(wk.zt.data(), wk.zt.data(), n);
 }
 
+// The pairs of the traits not yet written: beta and se of traits first .., trait by trait.
+struct Pending {
+  int first = 0;
+  std::vector<float> beta, se;
+};
+
+// The variants of the scan as the output names them, and the columns of one row group.
+struct Rows {
+  const int* chr; const int* bp; const int* ref; const int* alt; const double* n_obs;
+  std::vector<std::string> alleles, outcome;
+  std::vector<std::int32_t> c_chr, c_bp, c_ref, c_alt, c_n;
+  std::vector<float> c_beta, c_se;
+  // Writes trait t (its pairs start at b / s) as one row group: the pairs with statistics. Returns their number.
+  std::size_t write(plink4r::ParquetWriter& W, const Windows& win, int t, const float* b, const float* s) {
+    c_chr.clear(); c_bp.clear(); c_ref.clear(); c_alt.clear(); c_n.clear(); c_beta.clear(); c_se.clear();
+    for (int j = win.lo[t]; j < win.hi[t]; ++j) {
+      const int i = j - win.lo[t];
+      if (std::isnan(b[i])) continue;
+      c_chr.push_back(chr[j]); c_bp.push_back(bp[j]); c_ref.push_back(ref[j]); c_alt.push_back(alt[j]);
+      c_n.push_back(static_cast<std::int32_t>(n_obs[j])); c_beta.push_back(b[i]); c_se.push_back(s[i]);
+    }
+    if (c_bp.empty()) return 0;
+    W.begin_group(c_bp.size());
+    W.string_const(outcome[t]);
+    W.int32_dict(c_chr.data());
+    W.int32_delta(c_bp.data());
+    W.string_dict(c_ref.data(), alleles);
+    W.string_dict(c_alt.data(), alleles);
+    W.float_plain(c_beta.data());
+    W.float_plain(c_se.data());
+    W.int32_dict(c_n.data());
+    W.end_group();
+    return c_bp.size();
+  }
+};
+
 }  // namespace
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
 // var_idx, sample_idx: 0-based file rows; the scan variants are var_idx in the order given. X: n x kX covariates with
 // the intercept. Y: n x q traits, no missing value, rows as sample_idx. lo, hi: per trait the 0-based range
-// lo .. hi - 1 of scan variants it is tested with; lo not decreasing over the traits. block: variants per thread
-// (0 = from mem_gb). Returns beta and se of every pair, trait by trait (trait t: hi_t - lo_t entries, variants
-// lo_t .. hi_t - 1), NA for a variant with status 1 (monomorphic / all missing) or 2 (in the span of the covariates);
-// per variant n_obs, a1_sum, status (NA when its block met no trait and was not read); per block of the scan the
-// number of traits it met (active).
+// lo .. hi - 1 of scan variants it is tested with; lo not decreasing over the traits. out: the Parquet file to write.
+// outcome: the names of the traits. chr, bp: chromosome code and position of the scan variants; ref, alt: their other
+// and counted allele as 0-based codes into alleles. created_by: "<application> version <x.y.z>" for the file.
+// block: variants per thread (0 = from mem_gb). Returns the rows written, the pairs asked for, the variants without
+// statistics (monomorphic: no variation or all missing; singular: in the span of the covariates) and, per block of the
+// scan, the number of traits it met (active).
 // [[Rcpp::export]]
-Rcpp::List eqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
+Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
                            Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X,
-                           Rcpp::NumericMatrix Y, Rcpp::IntegerVector lo, Rcpp::IntegerVector hi, int threads,
-                           double mem_gb, int block) {
+                           Rcpp::NumericMatrix Y, Rcpp::IntegerVector lo, Rcpp::IntegerVector hi,
+                           const std::string& out, Rcpp::CharacterVector outcome, Rcpp::IntegerVector chr,
+                           Rcpp::IntegerVector bp, Rcpp::IntegerVector ref, Rcpp::IntegerVector alt,
+                           Rcpp::CharacterVector alleles, const std::string& created_by, int threads, double mem_gb,
+                           int block) {
   const int T = plink4r::resolve_threads(threads);
   mem_gb = plink4r::resolve_mem_gb(mem_gb, T);
   const int p = var_idx.size(), ns = sample_idx.size(), q = Y.ncol();
   if (X.nrow() != ns || Y.nrow() != ns) Rcpp::stop("X / Y do not match the samples");
-  if (lo.size() != q || hi.size() != q) Rcpp::stop("lo / hi do not match the traits");
+  if (lo.size() != q || hi.size() != q || outcome.size() != q) Rcpp::stop("lo / hi / outcome do not match the traits");
+  if (chr.size() != p || bp.size() != p || ref.size() != p || alt.size() != p)
+    Rcpp::stop("chr / bp / ref / alt do not match the variants");
   for (R_xlen_t i = 0; i < Y.size(); ++i)
     if (!std::isfinite(Y[i])) Rcpp::stop("Y has a missing or non-finite value.");
   const Windows win(lo, hi, p);
-  const std::size_t pairs = win.off[q];
   plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
   const bool dos = F.dosage;
 
   Pre pre;
   build_pre(pre, X, Y, T);
   const int k = pre.k;
+  const double df = static_cast<double>(ns) - k - 1;
 
   // block size from the memory budget
   const std::size_t N = ns;
   const int b_most = block > 0 ? block : plink4r::kScanBlockMax;
-  const double shared = 8.0 * N * (k + q) + 16.0 * pairs + 8.0 * p * 3 + 8.0 * N * X.ncol() * 2;
+  const double shared = 8.0 * N * (k + q) + 8.0 * p * 2 + 8.0 * N * X.ncol() * 2;
   const double per_var = plink4r::ScanBlock::var_bytes(ns, dos) + 8.0 * std::min<int>(kScanRowChunk, ns) +
                          8.0 * (k + win.most_active(b_most, p) + 1);
   const double per_thread = 8.0 * N * 2 + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
   const int most = win.most_active(b, p);
 
-  // outputs
-  Rcpp::NumericVector nobs(p, NA_REAL), asum(p, NA_REAL), beta(pairs, NA_REAL), se(pairs, NA_REAL);
-  Rcpp::IntegerVector status(p, NA_INTEGER), active((p + b - 1) / b);
-  const double df = static_cast<double>(ns) - k - 1;
+  // the output file
+  Rows rows;
+  rows.chr = chr.begin(); rows.bp = bp.begin(); rows.ref = ref.begin(); rows.alt = alt.begin();
+  rows.alleles = Rcpp::as<std::vector<std::string>>(alleles);
+  rows.outcome = Rcpp::as<std::vector<std::string>>(outcome);
+  using PW = plink4r::ParquetWriter;
+  PW writer(out,
+            {{"Outcome", PW::kString}, {"CHR", PW::kInt32}, {"BP", PW::kInt32}, {"REF", PW::kString},
+             {"ALT", PW::kString}, {"BETA", PW::kFloat}, {"SE", PW::kFloat}, {"N", PW::kInt32}},
+            {{"df", std::to_string(static_cast<long long>(df))}, {"samples", std::to_string(ns)},
+             {"covariate_rank", std::to_string(k)}},
+            created_by);
 
+  std::vector<double> nobs(p, 0.0), asum(p, 0.0);
+  rows.n_obs = nobs.data();
+  Rcpp::IntegerVector active((p + b - 1) / b);
   std::vector<Worker> wk(T);
   for (int t = 0; t < T; ++t) wk[t].init(pre, b, dos, most);
   std::vector<int> bad(T, -1);
-  double* n_obs = nobs.begin();
-  double* a1_sum = asum.begin();
-  double* bt = beta.begin();
-  double* st = se.begin();
-  int nexp = 0;
+  Pending pend;
+  const float kNone = std::numeric_limits<float>::quiet_NaN();
+  int nexp = 0, n_mono = 0, n_sing = 0;
   double products = 0.0;
+  std::size_t written = 0, waiting_most = 0;
 
   for (long long c0 = 0; c0 < p; c0 += static_cast<long long>(b) * T) {
+    const long long c1 = std::min<long long>(p, c0 + static_cast<long long>(b) * T);
+    // room for the pairs of every trait this round of blocks can meet
+    const int reach = static_cast<int>(std::lower_bound(win.lo.begin(), win.lo.end(), c1) - win.lo.begin());
+    const std::size_t base = win.off[pend.first];
+    if (reach > pend.first && pend.beta.size() < win.off[reach] - base) {
+      pend.beta.resize(win.off[reach] - base, kNone);
+      pend.se.resize(win.off[reach] - base, kNone);
+    }
+    waiting_most = std::max(waiting_most, pend.beta.size());
+    float* bt = pend.beta.data();
+    float* st = pend.se.data();
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp, products)
+#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp, n_mono, n_sing, products)
 #endif
     for (int t = 0; t < T; ++t) {
       const int th = plink4r::thread_id();
@@ -247,39 +318,53 @@ Rcpp::List eqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::I
       win.active(j0, j0 + nb, first, last);
       active[j0 / b] = last - first;
       if (first == last) continue;
-      const long long failed = W.read(F, j0, nb, th, n_obs, a1_sum);
+      const long long failed = W.read(F, j0, nb, th, nobs.data(), asum.data());
       if (failed >= 0) bad[th] = static_cast<int>(failed);
       block_products(pre, W, nb, first, last);
       const int qa = last - first;
       products += static_cast<double>(qa) * nb;
       for (int s = 0; s < nb; ++s) {
         const int j = static_cast<int>(j0 + s);
-        if (W.mono[s]) { status[j] = 1; continue; }
+        if (W.mono[s]) { ++n_mono; continue; }
         const double* m = &W.M[static_cast<std::size_t>(s) * k];
         const double* c = &W.C[static_cast<std::size_t>(s) * qa];
         double A = W.gg[s] - dot(m, m, k);
         const bool ill = !(A > W.gg[s] / kKappaMax);
         if (ill) { A = explicit_projection(pre, W, s); ++nexp; }
-        if (!(A > kRankTol * kRankTol * W.gg[s])) { status[j] = 2; continue; }  // g is in the span of the covariates
-        status[j] = 0;
+        if (!(A > kRankTol * kRankTol * W.gg[s])) { ++n_sing; continue; }  // g is in the span of the covariates
         for (int u = first; u < last; ++u) {
           if (j < win.lo[u] || j >= win.hi[u]) continue;
           const double cu = ill ? dot(W.zt.data(), &pre.R[u * N], ns) : c[u - first];
-          const std::size_t o = win.off[u] + static_cast<std::size_t>(j - win.lo[u]);
-          bt[o] = cu / A;
-          st[o] = std::sqrt(std::max(0.0, pre.rr[u] - cu * cu / A) / df / A);
+          const std::size_t o = win.off[u] - base + static_cast<std::size_t>(j - win.lo[u]);
+          bt[o] = static_cast<float>(cu / A);
+          st[o] = static_cast<float>(std::sqrt(std::max(0.0, pre.rr[u] - cu * cu / A) / df / A));
         }
       }
     }
     for (int t = 0; t < T; ++t)
       if (bad[t] >= 0) Rcpp::stop("Genotype read failed at variant %d of %s", bad[t] + 1, path.c_str());
+    // the traits whose last variant the scan has passed are written and leave memory
+    const int done = std::min(q, static_cast<int>(std::upper_bound(win.top.begin(), win.top.end(),
+                                                                   static_cast<int>(c1)) - win.top.begin()));
+    if (done > pend.first) {
+      for (int t = pend.first; t < done; ++t)
+        written += rows.write(writer, win, t, bt + (win.off[t] - base), st + (win.off[t] - base));
+      const std::size_t gone = std::min(pend.beta.size(), win.off[done] - base);
+      pend.beta.erase(pend.beta.begin(), pend.beta.begin() + gone);
+      pend.se.erase(pend.se.begin(), pend.se.begin() + gone);
+      pend.first = done;
+    }
     Rcpp::checkUserInterrupt();
   }
+  writer.close();
 
-  Rcpp::List out;
-  out["beta"] = beta; out["se"] = se; out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status;
-  out["df"] = df; out["rank"] = k; out["explicit"] = nexp; out["block"] = b; out["active"] = active;
-  out["products"] = products; out["pairs"] = static_cast<double>(pairs); out["threads"] = T; out["mem_gb"] = mem_gb;
-  out["dosage"] = dos; out["simd"] = std::string(plink4r::la().isa);
-  return out;
+  Rcpp::List res;
+  res["rows"] = static_cast<double>(written); res["pairs"] = static_cast<double>(win.off[q]);
+  res["bytes"] = static_cast<double>(writer.bytes()); res["row_groups"] = static_cast<double>(writer.groups());
+  res["monomorphic"] = n_mono; res["singular"] = n_sing;
+  res["waiting_most"] = static_cast<double>(waiting_most);
+  res["df"] = df; res["rank"] = k; res["explicit"] = nexp; res["block"] = b; res["active"] = active;
+  res["products"] = products; res["threads"] = T; res["mem_gb"] = mem_gb;
+  res["dosage"] = dos; res["simd"] = std::string(plink4r::la().isa);
+  return res;
 }
