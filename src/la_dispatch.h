@@ -17,8 +17,8 @@ struct LaFns {
                        const int* miss, int nm, float delta, float* zout, float* r2out, char* err);
   // conditional weights of one block (la_kernel.cpp: cond_weight_block); doubles, column-major; returns the method
   int (*cond_weight_block)(const float* U, int m, int k, const float* lambda, const int* obs, int no, const int* miss,
-                           int nm, const double* B, const double* Bo, int q, double delta, int slice, double* dout,
-                           double* lost, double* total, char* err);
+                           int nm, const double* B, const double* Bk, int q, double delta, int slice, double* dout,
+                           double* lost, double* lost0, double* total, char* err);
   // sum_l col[l] * (het_l + 2 hom_l) over one person's bit-planes (nbyte even: rows padded to 16 with zeros)
   float (*plane_dot)(const float* col, const unsigned char* het, const unsigned char* hom, int nbyte);
   // Out (M x N, ldo) = A' B (beta = 0) or Out += A' B (beta = 1); A is K x M (lda), B is K x N (ldb), column-major

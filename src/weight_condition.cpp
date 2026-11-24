@@ -1,11 +1,13 @@
-// Conditional weights: score weights on a panel's SNPs moved onto a target SNP set through the panel LD.
+// Conditional weights: the score weights of panel SNPs that the target lacks are predicted onto the target SNPs
+// that have no weight; weights on SNPs in both are kept as they are.
 // The whole computation is this one entry (R only reads the tables and writes the result):
 //   1. quad_match (quad_match.h): target -> panel and weights -> panel (each on the panel build that places more
 //      rows), and the weights outside the panel -> target directly;
 //   2. per LD block with weights to move (a weighted panel row absent from the target): O = the block rows in the
-//      target, M = every other row of the block; B_M, B_O = the weights in panel orientation on the standardized
+//      target without a weight (the receivers), M = every other row of the block; B_M = the weights of the rows
+//      absent from the target, Bk = the kept weights (rows in both), each in panel orientation on the standardized
 //      scale (times sd = sqrt(2 p (1 - p)), p = panel A1Freq); cond_weight_block (la_kernel.cpp) gives
-//      Delta_O = (R_OO + delta I)^{-1} R_OM B_M and the score variance lost and total of the block;
+//      Delta_O = (R_OO + delta I)^{-1} R_OM B_M and the score variance lost (with and without the move) and total;
 //   3. Delta back to the allele scale of the target (/ sd, times the target's sign).
 // Blocks run longest first, OpenMP over blocks; the dense algebra uses the instruction set chosen at run time.
 // [[Rcpp::depends(RcppEigen)]]
@@ -54,11 +56,11 @@ struct BlockJob {
 // Panel columns p_* (CHR code, BP37, BP38 with NA where absent, A1, A2, A1Freq, Block, Index); blocks/files: the
 // panel's blocks and their eigen.bin; target t_* (CHR code, BP, A1, A2); weights w_* and W (one column per score).
 // Returns list(w = beta + delta, beta = the weights on the target rows in target orientation (n_target x q; 0 where none),
-// delta = the moved part (n_target x q), target_panel / target_weight (logical), weight_status (per weight row:
+// delta = the moved part (n_target x q; 0 on rows with a weight), target_panel / target_weight (logical), weight_status (per weight row:
 // "target" = on a target row, "moved" = moved through the LD, "no_target_in_block" = in a block without target
-// rows, "lost" = neither in the panel nor in the target), build_target, build_weight (0 = BP37, 1 = BP38),
-// block_log (block, m, k, n_obs, n_miss, n_miss_weighted, method, seconds), kept (blocks x q: 1 - lost / total,
-// NA when total = 0), isa).
+// rows that lack a weight, "lost" = neither in the panel nor in the target), build_target, build_weight (0 = BP37, 1 = BP38),
+// block_log (block, m, k, n_obs, n_miss, n_miss_weighted, method, seconds), kept, kept_drop (blocks x q:
+// 1 - lost / total with and without the move, NA when total = 0), isa).
 // [[Rcpp::export]]
 Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p_bp37, Rcpp::IntegerVector p_bp38,
                                 Rcpp::CharacterVector p_a1, Rcpp::CharacterVector p_a2, Rcpp::NumericVector p_freq,
@@ -151,7 +153,8 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
   std::vector<std::string> err(nb), meth(nb);
   std::vector<int> mm(nb), kk(nb), nobs(nb), nmiss(nb), nmw(nb);
   std::vector<double> sec(nb);
-  std::vector<std::vector<double>> lost(nb, std::vector<double>(q)), total(nb, std::vector<double>(q));
+  std::vector<std::vector<double>> lost(nb, std::vector<double>(q)), lost0(nb, std::vector<double>(q)),
+      total(nb, std::vector<double>(q));
   std::vector<std::vector<std::pair<int, std::vector<double>>>> add(nb);  // (target row, delta on its allele scale)
   std::vector<char> has_obs(nb, 0);
 #ifdef _OPENMP
@@ -171,29 +174,26 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
         row_at[x] = r;
       }
       std::vector<int> obs, miss;
-      for (int x = 0; x < ld.m; ++x) (row_at[x] >= 0 && p2t[row_at[x]] >= 0 ? obs : miss).push_back(x);
+      for (int x = 0; x < ld.m; ++x) (row_at[x] >= 0 && p2t[row_at[x]] >= 0 && p2w[row_at[x]] < 0 ? obs : miss).push_back(x);
       const int no = static_cast<int>(obs.size()), nm = static_cast<int>(miss.size());
       auto sd_of = [&](int r) { const double p = pf[r]; return (std::isfinite(p) && p > 0 && p < 1) ? std::sqrt(2 * p * (1 - p)) : 0.0; };
-      std::vector<double> B(static_cast<std::size_t>(nm) * q, 0.0), Bo(static_cast<std::size_t>(no) * q, 0.0);
+      std::vector<double> B(static_cast<std::size_t>(nm) * q, 0.0), Bk(static_cast<std::size_t>(nm) * q, 0.0);
       int nw_m = 0;
       for (int a = 0; a < nm; ++a) {
         const int r = row_at[miss[a]];
         if (r < 0 || p2w[r] < 0) continue;
-        ++nw_m;
+        const bool kept = p2t[r] >= 0;
+        if (!kept) ++nw_m;
+        std::vector<double>& dst = kept ? Bk : B;
         const double f = p2ws[r] * sd_of(r);
-        for (int c = 0; c < q; ++c) B[static_cast<std::size_t>(c) * nm + a] = f * w_at(p2w[r], c);
-      }
-      for (int a = 0; a < no; ++a) {
-        const int r = row_at[obs[a]];
-        if (p2w[r] < 0) continue;
-        const double f = p2ws[r] * sd_of(r);
-        for (int c = 0; c < q; ++c) Bo[static_cast<std::size_t>(c) * no + a] = f * w_at(p2w[r], c);
+        for (int c = 0; c < q; ++c) dst[static_cast<std::size_t>(c) * nm + a] = f * w_at(p2w[r], c);
       }
       nobs[i] = no; nmiss[i] = nm; nmw[i] = nw_m; has_obs[i] = no > 0;
       std::vector<double> D(static_cast<std::size_t>(no) * q, 0.0);
       char e[256] = {0};
       const int code = LA.cond_weight_block(ld.U.data(), ld.m, ld.k, ld.lambda.data(), obs.data(), no, miss.data(), nm,
-                                            B.data(), Bo.data(), q, delta, slice, D.data(), lost[i].data(), total[i].data(), e);
+                                            B.data(), Bk.data(), q, delta, slice, D.data(), lost[i].data(), lost0[i].data(),
+                                            total[i].data(), e);
       if (code < 0) throw std::runtime_error(e);
       meth[i] = cw_method_name(code);
       for (int a = 0; a < no; ++a) {
@@ -222,10 +222,13 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
   for (int c = 0; c < q; ++c)
     for (int j = 0; j < nt; ++j) wout(j, c) = beta(j, c) + dlt(j, c);
   Rcpp::IntegerVector lb(nb);
-  Rcpp::NumericMatrix KP(nb, q);
+  Rcpp::NumericMatrix KP(nb, q), KD(nb, q);
   for (int i = 0; i < nb; ++i) {
     lb[i] = jobs[i].block;
-    for (int c = 0; c < q; ++c) KP(i, c) = total[i][c] > 0 ? 1 - lost[i][c] / total[i][c] : NA_REAL;
+    for (int c = 0; c < q; ++c) {
+      KP(i, c) = total[i][c] > 0 ? 1 - lost[i][c] / total[i][c] : NA_REAL;
+      KD(i, c) = total[i][c] > 0 ? 1 - lost0[i][c] / total[i][c] : NA_REAL;
+    }
   }
   Rcpp::DataFrame log = Rcpp::DataFrame::create(
       Rcpp::_["block"] = lb, Rcpp::_["m"] = mm, Rcpp::_["k"] = kk, Rcpp::_["n_obs"] = nobs, Rcpp::_["n_miss"] = nmiss,
@@ -233,5 +236,5 @@ Rcpp::List weight_condition_cpp(Rcpp::IntegerVector p_chr, Rcpp::IntegerVector p
   return Rcpp::List::create(Rcpp::_["w"] = wout, Rcpp::_["beta"] = beta, Rcpp::_["delta"] = dlt, Rcpp::_["target_panel"] = t_in_panel,
                             Rcpp::_["target_weight"] = t_in_w, Rcpp::_["weight_status"] = Rcpp::wrap(wstat),
                             Rcpp::_["build_target"] = bt, Rcpp::_["build_weight"] = bw, Rcpp::_["block_log"] = log,
-                            Rcpp::_["kept"] = KP, Rcpp::_["isa"] = LA.isa);
+                            Rcpp::_["kept"] = KP, Rcpp::_["kept_drop"] = KD, Rcpp::_["isa"] = LA.isa);
 }

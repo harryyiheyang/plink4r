@@ -228,10 +228,12 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
   return method;
 }
 
-// Conditional weights of one block: the effects B_M of the rows M that the target lacks, moved onto the rows O
-// it has, as the best linear predictor of the score from O alone (R = U diag(lam) U', A = R + d I):
+// Conditional weights of one block: the effects B_M of the panel rows the target lacks, predicted from the rows O
+// that receive weight (target rows without a weight of their own; R = U diag(lam) U', A = R + d I):
 //   Delta_O = (R_OO + d I)^{-1} R_OM B_M,   lost_c = B_M' (R_MM - R_MO (R_OO + d I)^{-1} R_OM) B_M (column c),
-//   total_c = b' R b with b = (B_O on O, B_M on M), the score variance of the block before the move.
+//   lost0_c = B_M' R_MM B_M (the variance lost without the move), total_c = b' R b with b = B_M + Bk on the rows
+//   outside O (Bk: the weights kept as they are, on target rows that have one; they enter only total).
+// M is every row outside O: Bk and B are zero on rows that carry no such weight.
 // Everything is on the standardized scale. Solved in the smallest exact space; with W = diag(lam / (lam + d))
 // and t = U_M' B_M (k x q), Delta_O = U_O c for a k x q matrix c:
 //   1 missing-SNP space (nm <= no, nm <= k): S = I - U_M W U_M' = d (A^{-1})_MM, s = S^{-1} B_M,
@@ -241,12 +243,12 @@ int sumstat_block(const float* U, int m, int k, const float* lambda, const int* 
 //   3 typed space: A_OO = U_O L U_O' + d I (no x no), x = U_O L t, Delta_O = A_OO^{-1} x, lost = t' L t - x' Delta_O.
 // The small systems are double (a small d makes S and K ill-conditioned in float). U stays float; rows of U_O are
 // taken in slices of `slice` rows, so no no x k double copy is made.
-// obs, miss: increasing 0-based eigen rows (no, nm; together every row of the block); B: nm x q, Bo: no x q
-// (column-major); slice: rows of U_O per double slice. Writes dout (no x q), lost (q), total (q). Returns the method, 0 when nm == 0 or no == 0
-// (dout = 0, lost = B_M' R_MM B_M when no == 0), -1 on error.
+// obs, miss: increasing 0-based eigen rows (no, nm; together every row of the block); B, Bk: nm x q (column-major);
+// slice: rows of U_O per double slice. Writes dout (no x q), lost, lost0, total (q each). Returns the method, 0 when
+// nm == 0 or no == 0 (dout = 0, lost = lost0), -1 on error.
 int cond_weight_block(const float* U, int m, int k, const float* lambda, const int* obs, int no, const int* miss,
-                      int nm, const double* B, const double* Bo, int q, double d, int slice, double* dout,
-                      double* lost, double* total, char* err) {
+                      int nm, const double* B, const double* Bk, int q, double d, int slice, double* dout,
+                      double* lost, double* lost0, double* total, char* err) {
   using MatD = Eigen::MatrixXd;
   using VecD = Eigen::VectorXd;
   using MapCMD = Eigen::Map<const MatD>;
@@ -256,18 +258,8 @@ int cond_weight_block(const float* U, int m, int k, const float* lambda, const i
   const VecD lam = MapCV(lambda, k).cast<double>();
   Eigen::Map<MatD> D(dout, no, q);
   D.setZero();
-  MapCMD Bm(B, nm, q), Bob(Bo, no, q);
-  // U_O' X (k x q) and U_O c (no x q), by row slices of U_O
-  auto uot = [&](const MatD& X) {
-    MatD r = MatD::Zero(k, q);
-    for (int r0 = 0; r0 < no; r0 += slice) {
-      const int nr = std::min(slice, no - r0);
-      MatD Us(nr, k);
-      for (int i = 0; i < nr; ++i) Us.row(i) = Uf.row(obs[r0 + i]).cast<double>();
-      r.noalias() += Us.transpose() * X.middleRows(r0, nr);
-    }
-    return r;
-  };
+  MapCMD Bm(B, nm, q), Bkm(Bk, nm, q);
+  // U_O c (no x q), by row slices of U_O
   auto uo = [&](const MatD& c) {
     for (int r0 = 0; r0 < no; r0 += slice) {
       const int nr = std::min(slice, no - r0);
@@ -280,11 +272,11 @@ int cond_weight_block(const float* U, int m, int k, const float* lambda, const i
   for (int i = 0; i < nm; ++i) UM.row(i) = Uf.row(miss[i]).cast<double>();
   const MatD t = UM.transpose() * Bm;  // k x q
   const MatD tl = lam.asDiagonal() * t;
-  MatD tf = t;
-  if (no > 0) tf += uot(MatD(Bob));
+  const MatD tf = t + UM.transpose() * Bkm;
   for (int c = 0; c < q; ++c) {
     total[c] = (tf.col(c).array().square() * lam.array()).sum();
-    lost[c] = t.col(c).dot(tl.col(c));  // B_M' R_MM B_M
+    lost0[c] = t.col(c).dot(tl.col(c));  // B_M' R_MM B_M
+    lost[c] = lost0[c];
   }
   if (nm == 0 || no == 0) return 0;
   const int method = (nm <= no && nm <= k) ? 1 : (k < no ? 2 : 3);
