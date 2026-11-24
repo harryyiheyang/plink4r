@@ -8,8 +8,8 @@
 #'
 #' The output folder is a panel as read by the package (`ld_dir`):
 #' `snpinfo.parquet` (CHR, BP37, BP38, A1, A2, A1Freq, Block, Index),
-#' `ldminfo.bed` (a header line, then row N = block N: chr, start, end,
-#' NumSNP) and `block<N>.eigen.bin`.
+#' `ldminfo.bed` (a header line, then row N = block N: chr (chr1..chr22,
+#' chrX), start, end, NumSNP) and `block<N>.eigen.bin`.
 #'
 #' 1. Rows of `ref` (CHR, BP37 and/or BP38, A1, A2; optional A1Freq =
 #'    frequency of A1) on chromosomes 1 to 22 and X are matched to the `.pvar` /
@@ -132,7 +132,7 @@ ld_panel_build <- function(geno, ref, out_dir, blocks = NULL, build = 38, sample
   if (!"A1Freq" %in% names(panel)) panel[, A1Freq := rows$af_sample]
   data.table::setcolorder(panel, .panel_cols)
   arrow::write_parquet(panel, file.path(out_dir, .panel_snpinfo))
-  data.table::fwrite(plan[, .(chr = paste0("chr", Chrom), start = StartBP, end = EndBP, NumSNP)],
+  data.table::fwrite(plan[, .(chr = paste0("chr", ifelse(Chrom == 23L, "X", Chrom)), start = StartBP, end = EndBP, NumSNP)],
                      file.path(out_dir, .panel_ldminfo), sep = "\t")
   invisible(list(plan = plan, log = if (file.exists(logf)) data.table::fread(logf) else NULL, panel = panel))
 }
@@ -163,15 +163,18 @@ write_eigen_bin <- function(R, path, thresh = 0.999) {
 
 #' Bundled LD block files
 #'
-#' GRCh38: pyrho EUR blocks (1,336 blocks, chr1-22). GRCh37: LDetect EUR
-#' blocks (Berisa and Pickrell 2016; 1,702 blocks, chr1-22). Both are a header
-#' line plus chr, start, end.
+#' GRCh38: the blocks of the Pan-UKB EUR panel, its `ldminfo.bed` as is
+#' (1,341 blocks on chr1-22, contiguous from 0, from pyrho with gnomAD / deCODE
+#' gap filling; 30 blocks on chrX, with gaps between them: X variants in a gap
+#' are in no block). Columns chr, start, end, source, n_gnomAD_snv.
+#' GRCh37: LDetect EUR blocks (Berisa and Pickrell 2016; 1,702 blocks,
+#' chr1-22), columns chr, start, end.
 #' @param build 38 or 37.
 #' @return Path to the block file.
 #' @export
 ld_blocks_default <- function(build = 38) {
   f <- switch(as.character(build),
-              "38" = "blocks_GRCh38_pyrho_EUR.txt",
+              "38" = "ldminfo_GRCh38_PanUKB_EUR.bed",
               "37" = "blocks_GRCh37_LDetect_EUR.txt",
               stop("build must be 37 or 38.", call. = FALSE))
   system.file("extdata", f, package = "plink4r", mustWork = TRUE)
