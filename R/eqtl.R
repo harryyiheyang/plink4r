@@ -23,12 +23,17 @@
 #' @param block Variants per thread and block. A block computes the products of its variants with every trait it
 #'   meets, so a block much longer than a window computes products that no pair uses (`products` against `pairs` in
 #'   `info`); 0 = the largest that fits `mem_gb` (at most 4096), as [gwas()].
-#' @return data.table with one row per trait-variant pair, traits in the order of their windows along the genome and
-#'   variants in position order: `PHENO`, `CHR`, `POS`, `ID`, `A1` (counted allele), `A2`, `N`, `A1_FREQ`, `BETA`,
-#'   `SE`, `T`, `P` (t distribution, `n - k - 1` degrees of freedom). Attribute `info`: samples, traits tested,
-#'   variants read, pairs, covariate rank, block size, threads, memory budget, SIMD set, `active` (per block of
-#'   variants the number of traits it met), `products` (trait-variant products computed; at least `pairs`),
-#'   monomorphic and singular variants, traits not tested, skipped multiallelic variants.
+#' @return A list of class `eqtl`, which holds every pair once and in compact form: `beta` and `se`, one entry per
+#'   trait-variant pair, trait by trait; `traits`, a data.table with one row per trait tested in the order of their
+#'   windows along the genome: `PHENO`, `CHR`, `POS` (the anchor), `FIRST` (the row of `variants` of its first
+#'   variant) and `N_VAR` (its variants, which are consecutive rows of `variants`; its pairs are the next `N_VAR`
+#'   entries of `beta` and `se` after those of the traits before it); `variants`, a data.table with one row per
+#'   variant read, in position order: `CHR`, `POS`, `ID`, `A1` (counted allele), `A2`, `N`, `A1_FREQ`; `df`, the
+#'   `n - k - 1` degrees of freedom of the t statistics; and `info`: samples, traits tested, variants read, pairs,
+#'   covariate rank, block size, threads, memory budget, SIMD set, `active` (per block of variants the number of
+#'   traits it met), `products` (trait-variant products computed; at least `pairs`), monomorphic and singular
+#'   variants, traits not tested, skipped multiallelic variants. Variants with no variation among the analysed
+#'   samples or in the span of the covariates have `NA` statistics. [eqtl_pairs()] gives the pairs as a table.
 #' @export
 eqtl <- function(pheno, anchor, formula = ~ 1, data = NULL, pfile = NULL, bfile = NULL, window = 1e6,
                  id_col = "IID", snp_vec = NULL, threads = 0L, mem_gb = 0, block = 256L) {
@@ -89,19 +94,56 @@ eqtl <- function(pheno, anchor, formula = ~ 1, data = NULL, pfile = NULL, bfile 
   res <- eqtl_stream_cpp(gv$path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
                          as.integer(srow - 1L), X, Y, as.integer(lo), as.integer(hi), threads, mem_gb,
                          as.integer(block))
-  len <- hi - lo
-  vi <- sequence(len, from = lo + 1L)
-  out <- var[vrow[vi], list(CHR, POS, ID, A1, A2)]
-  out[, `:=`(PHENO = rep(a$ID, len), N = as.integer(res$n_obs[vi]), A1_FREQ = res$a1_sum[vi] / (2 * res$n_obs[vi]),
-             BETA = res$beta, SE = res$se)]
-  out[, T := BETA / SE]
-  out[, P := 2 * stats::pt(-abs(T), res$df)]
-  data.table::setcolorder(out, "PHENO")
+  variants <- var[vrow, list(CHR, POS, ID, A1, A2)]
+  variants[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
+  traits <- data.table::data.table(PHENO = a$ID, CHR = a$CHR, POS = a$POS, FIRST = lo + 1L, N_VAR = hi - lo)
   info <- list(samples = nrow(d), traits = nrow(a), variants = length(vrow), pairs = res$pairs,
                covariate_rank = res$rank, block = res$block, threads = res$threads, mem_gb = res$mem_gb,
                simd = res$simd, dosage = res$dosage, active = res$active, products = res$products,
                explicit_projection = res$explicit, monomorphic = sum(res$status == 1L),
                singular = sum(res$status == 2L), traits_not_tested = not_tested, skipped_multiallelic = gv$skipped)
-  data.table::setattr(out, "info", info)
+  structure(list(beta = res$beta, se = res$se, traits = traits, variants = variants, df = res$df, info = info),
+            class = "eqtl")
+}
+
+#' The pairs of an eqtl() result as a table
+#'
+#' @param x An [eqtl()] result.
+#' @param pheno Trait IDs (`NULL` = every trait tested), given in the order wanted.
+#' @param p_max Keep the pairs with `P <= p_max` (1 = every pair, those without statistics included).
+#' @return data.table with one row per pair, trait by trait and variants in position order: `PHENO`, `CHR`, `POS`,
+#'   `ID`, `A1`, `A2`, `N`, `A1_FREQ`, `BETA`, `SE`, `T`, `P` (t distribution, `x$df` degrees of freedom).
+#' @export
+eqtl_pairs <- function(x, pheno = NULL, p_max = 1) {
+  if (!inherits(x, "eqtl")) stop("x must be an eqtl() result.", call. = FALSE)
+  if (!is.numeric(p_max) || length(p_max) != 1L || is.na(p_max) || p_max < 0 || p_max > 1)
+    stop("p_max must be a number between 0 and 1.", call. = FALSE)
+  tr <- x$traits
+  i <- if (is.null(pheno)) seq_len(nrow(tr)) else match(as.character(pheno), tr$PHENO)
+  if (anyNA(i)) stop("Not a trait of x: ", paste(pheno[is.na(i)], collapse = ", "), call. = FALSE)
+  len <- tr$N_VAR[i]
+  k <- sequence(len, from = (cumsum(as.numeric(tr$N_VAR)) - tr$N_VAR)[i] + 1)  # entries of beta / se
+  vi <- sequence(len, from = tr$FIRST[i])                                      # rows of variants
+  ti <- rep(i, len)
+  beta <- x$beta[k]; se <- x$se[k]
+  stat <- beta / se
+  pv <- 2 * stats::pt(-abs(stat), x$df)
+  if (p_max < 1) {
+    keep <- which(pv <= p_max)
+    vi <- vi[keep]; ti <- ti[keep]; beta <- beta[keep]; se <- se[keep]; stat <- stat[keep]; pv <- pv[keep]
+  }
+  out <- x$variants[vi]
+  out[, `:=`(PHENO = tr$PHENO[ti], BETA = beta, SE = se, T = stat, P = pv)]
+  data.table::setcolorder(out, "PHENO")
   out[]
+}
+
+#' @export
+print.eqtl <- function(x, ...) {
+  cat(sprintf("eqtl: %d traits x the variants of their windows = %.0f pairs (%d samples, %d variants read, df %g)
+",
+              nrow(x$traits), x$info$pairs, x$info$samples, nrow(x$variants), x$df))
+  cat("beta, se: one entry per pair; traits, variants: their tables; eqtl_pairs(x, pheno, p_max): the pairs as a table
+")
+  invisible(x)
 }
