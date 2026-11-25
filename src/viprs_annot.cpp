@@ -1,16 +1,22 @@
-// VIPRS with an annotation model of the per-SNP slab variance, log link (top layer: the package's annotation VIPRS
-// functional unit, built on vi_panel.h / vi_store.h; copied from viprs.cpp and edited).
-// Slab of SNP j: beta_j | gamma_j = 1 ~ N(0, v_j), v_j = exp(a_j' alpha), a_j = (1, annotations of j) (LDSC-type
-// variance model on the log scale). Coordinate update as viprs.cpp with tau_j = 1 / v_j in place of tau:
+// VIPRS with an additive annotation model of the per-SNP effect variance, and the partition of the effects into
+// annotation-specific components (PartitionPRS, Research Design D.1.2). Top layer: the package's annotation VIPRS
+// functional unit, built on vi_panel.h / vi_store.h / ld_bins.h; copied from viprs.cpp and edited.
+// Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
+// residual annotation A_R = 1 for every SNP), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
+// spike and slab with fixed pi, slab variance h2_j / pi (tau_j = pi / h2_j). Coordinate update as viprs.cpp with
+// tau_j in place of tau:
 //   vt_j = n_j d_j / sigma + tau_j,  gamma_j = sigmoid(.5 vt_j mu_j^2 + logit(pi) + .5 (log tau_j - log vt_j))
-// M-step of alpha (pi fixed on the grid): maximize Q(alpha) = sum_j [-.5 pi a_j' alpha - .5 zeta_j exp(-a_j' alpha)],
-// zeta_j = gamma_j (mu_j^2 + 1 / vt_j), weight pi per SNP as the VIPRS 0.1.5 tau update (tau = pi M / sum zeta), so
-// the intercept-only model is viprs(). Q is concave in alpha: Newton steps with step halving, to mstep_tol.
+// M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
+// zeta_j = E[beta_j^2] = gamma_j (mu_j^2 + 1 / vt_j), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
+// S_k = sum_j E[(beta_j^(k))^2]. With the residual annotation only and a0 = -1, b0 = 0 this is the VIPRS 0.1.5 tau
+// update (tau = pi M / sum zeta), i.e. viprs().
+// Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j), the
+// weights of the annotation-specific PRS.
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (any nonzero
 // binary 0/1 annotation column), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
-// no residual update) and left out of the M-step of alpha.
-// Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted);
-// a move of pi shifts the intercept by log(prev_pi / pi) (keeps the implied h2).
+// no residual update) and left out of the M-step.
+// Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted); the
+// sigma2_k (variance of beta) are carried over when pi moves.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -36,9 +42,8 @@ namespace {
 struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
-  int mstep_max_iter, mstep_max_halving;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
-      pi_hi_max, pi_cap, mstep_tol;
+      pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
 };
@@ -67,9 +72,8 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.pi_hi_count = Rcpp::as<double>(c["pi_hi_count"]);
   x.pi_hi_max = Rcpp::as<double>(c["pi_hi_max"]);
   x.pi_cap = Rcpp::as<double>(c["pi_cap"]);
-  x.mstep_max_iter = Rcpp::as<int>(c["mstep_max_iter"]);
-  x.mstep_tol = Rcpp::as<double>(c["mstep_tol"]);
-  x.mstep_max_halving = Rcpp::as<int>(c["mstep_max_halving"]);
+  x.a0 = Rcpp::as<double>(c["a0"]);
+  x.b0 = Rcpp::as<double>(c["b0"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -201,118 +205,86 @@ void stats(int64_t M, const float* d, const float* n, const float* bt, const flo
   out[6] = a6; out[7] = a7; out[8] = a8; out[9] = a9;
 }
 
-// ---- variance model: v_j = exp(a_j' alpha), a_j = (1, A_j) (A row-major M x (K - 1))
+// ---- variance model: h2_j = sum_k a_jk sigma2_k, a_j = (1, A_j) (A row-major M x (K - 1), A >= 0)
 
 struct VarModel {
   int64_t M;
-  int K;                      // coefficients, intercept first
+  int K;                         // annotations, residual annotation first
   const std::vector<double>& A;
-  const std::vector<char>& sup;  // suppressed SNPs: left out of Q
-  std::vector<double> par;    // alpha
-  std::vector<double> x, w;   // x_j = a_j' alpha, w_j = exp(-x_j)
-  std::vector<float> tau, ltau;  // tau_j = 1 / v_j = w_j and log tau_j = -x_j, as used by the sweep
+  const std::vector<char>& sup;  // suppressed SNPs: left out of the M-step
+  std::vector<double> par;       // sigma2_k
+  std::vector<double> h2;        // h2_j
+  std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
+  double pi = 1;
   int threads;
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
-      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), x(M_, 0.), w(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f),
-        threads(threads_) {}
+      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f), threads(threads_) {}
 
-  // x, w, tau from par
+  const double* row(int64_t j) const { return A.data() + j * (K - 1); }
   void set_all() {
 #ifdef _OPENMP
 #pragma omp parallel for num_threads(threads)
 #endif
     for (int64_t j = 0; j < M; ++j) {
-      double v = par[0];
-      const double* r = A.data() + j * (K - 1);
-      for (int k = 1; k < K; ++k) v += r[k - 1] * par[k];
-      x[j] = v; w[j] = std::exp(-v); tau[j] = (float)w[j]; ltau[j] = (float)-v;
+      double h = par[0];
+      const double* r = row(j);
+      for (int k = 1; k < K; ++k) h += r[k - 1] * par[k];
+      h2[j] = h;
+      const double t = pi / h;
+      tau[j] = (float)t; ltau[j] = (float)std::log(t);
     }
   }
-  // start: v_j = h2 / (pi M) for all SNPs (M over all SNPs, as the sigma2 start of sbayesrc())
-  void start(double h2, double pi) {
-    std::fill(par.begin(), par.end(), 0.);
-    par[0] = std::log(h2 / (pi * M));
+  // start: all sigma2_k equal, sum_j h2_j = h2 (LDSC start)
+  void start(double h2_0, double pi_) {
+    pi = pi_;
+    double s = 0;
+    for (int64_t j = 0; j < M; ++j) {
+      s += 1.;
+      const double* r = row(j);
+      for (int k = 1; k < K; ++k) s += r[k - 1];
+    }
+    std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // pi moves from prev to pi: v_j * prev / pi (keeps the implied h2)
-  void pi_move(double prev, double pi) { par[0] += std::log(prev / pi); set_all(); }
+  // pi moves: sigma2_k (variance of beta) kept, the slab variance h2_j / pi follows
+  void pi_move(double pi_) { pi = pi_; set_all(); }
 
-  // Newton on the concave Q(alpha) = sum_j [-pi/2 x_j - zeta_j/2 exp(-x_j)] with step halving; x and w are kept with
-  // alpha, so a Newton step costs one pass for the gradient and Hessian (no exp) and one pass per trial point
-  int mstep(const double* zeta, double pi, int max_iter, double tol, int max_halving) {
-    const int K1 = K - 1, KK = K * K;
-    double q0 = 0;
-#ifdef _OPENMP
-#pragma omp parallel for reduction(+ : q0) num_threads(threads)
-#endif
-    for (int64_t j = 0; j < M; ++j) if (!sup[j]) q0 += -.5 * pi * x[j] - .5 * zeta[j] * w[j];
-    std::vector<double> xn(M), wn(M);
-    int it = 0;
-    for (; it < max_iter; ++it) {
-      std::vector<double> HG(KK + K, 0.);  // Hessian (lower) then gradient
+  // one update of sigma2_k (D.1.2); returns nothing, refreshes h2, tau
+  void mstep(const double* zeta, double a0, double b0) {
+    const int K1 = K - 1;
+    std::vector<double> SN(2 * K, 0.);  // S_k, then sum_j A_jk
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
 #endif
-      {
-        std::vector<double> loc(KK + K, 0.), a(K);
-        double* Hl = loc.data(); double* gl = loc.data() + KK;
+    {
+      std::vector<double> loc(2 * K, 0.);
 #ifdef _OPENMP
 #pragma omp for nowait
 #endif
-        for (int64_t j = 0; j < M; ++j) {
-          if (sup[j]) continue;
-          const double e = .5 * zeta[j] * w[j], gj = e - .5 * pi;
-          a[0] = 1.;
-          const double* r = A.data() + j * K1;
-          for (int k = 1; k < K; ++k) a[k] = r[k - 1];
-          for (int k = 0; k < K; ++k) {
-            const double ek = e * a[k];
-            gl[k] += gj * a[k];
-            for (int l = 0; l <= k; ++l) Hl[k * K + l] += ek * a[l];
-          }
+      for (int64_t j = 0; j < M; ++j) {
+        if (sup[j]) continue;
+        const double h = h2[j], z = zeta[j];
+        const double* r = row(j);
+        for (int k = 0; k < K; ++k) {
+          const double a = k ? r[k - 1] : 1.;
+          if (a == 0.) continue;
+          const double w = a * par[k] / h;
+          loc[k] += w * w * z + w * (1. - w) * h;
+          loc[K + k] += a;
         }
+      }
 #ifdef _OPENMP
 #pragma omp critical
 #endif
-        for (int i = 0; i < KK + K; ++i) HG[i] += loc[i];
-      }
-      Eigen::MatrixXd H(K, K);
-      Eigen::VectorXd g(K);
-      for (int k = 0; k < K; ++k) {
-        g[k] = HG[KK + k];
-        for (int l = 0; l <= k; ++l) H(k, l) = H(l, k) = HG[k * K + l];
-      }
-      const Eigen::VectorXd step = H.ldlt().solve(g);
-      if (!step.allFinite()) break;
-      double t = 1.;
-      bool moved = false;
-      for (int h = 0; h < max_halving; ++h, t *= .5) {
-        double q1 = 0;
-#ifdef _OPENMP
-#pragma omp parallel for reduction(+ : q1) num_threads(threads)
-#endif
-        for (int64_t j = 0; j < M; ++j) {
-          double dj = step[0];
-          const double* r = A.data() + j * K1;
-          for (int k = 1; k < K; ++k) dj += r[k - 1] * step[k];
-          xn[j] = x[j] + t * dj;
-          wn[j] = std::exp(-xn[j]);
-          if (!sup[j]) q1 += -.5 * pi * xn[j] - .5 * zeta[j] * wn[j];
-        }
-        if (std::isfinite(q1) && q1 >= q0) {
-          for (int k = 0; k < K; ++k) par[k] += t * step[k];
-          x.swap(xn); w.swap(wn); q0 = q1; moved = true;
-          break;
-        }
-      }
-      if (!moved || t * step.cwiseAbs().maxCoeff() < tol) { ++it; break; }
+      for (int i = 0; i < 2 * K; ++i) SN[i] += loc[i];
     }
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(threads)
-#endif
-    for (int64_t j = 0; j < M; ++j) { tau[j] = (float)w[j]; ltau[j] = (float)-x[j]; }
-    return it;
+    for (int k = 0; k < K; ++k) {
+      const double den = SN[K + k] + 2. * (a0 + 1.);
+      par[k] = den > 0 ? std::max((SN[k] + 2. * b0) / den, 0.) : 0.;
+    }
+    (void)K1;
+    set_all();
   }
 };
 
@@ -320,7 +292,7 @@ struct VarModel {
 
 struct RunResult {
   double pi, sigma, h2, elbo;
-  int iters, mstep_steps;
+  int iters;
   bool converged, sigma_fixed;
   std::string message;
 };
@@ -382,7 +354,6 @@ struct Fitter {
     std::vector<int64_t> nvis(P.nb, 0);
     double out[10];
     std::vector<double> zeta(M);
-    int msteps = 0;
     vtx(P, st.eta.data(), st.s.data(), threads);
     std::fill(st.active.begin(), st.active.end(), 1);
     double prev_elbo = -INFINITY, prev_sg = NAN, elbo = NAN, sigma_g = 0;
@@ -399,7 +370,7 @@ struct Fitter {
       stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
-      msteps += vm.mstep(zeta.data(), pi, c.mstep_max_iter, c.mstep_tol, c.mstep_max_halving);
+      vm.mstep(zeta.data(), c.a0, c.b0);
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
 #ifdef _OPENMP
@@ -439,7 +410,7 @@ struct Fitter {
     }
     if (it > max_iter) it = max_iter;
     vtx(P, st.eta.data(), st.s.data(), threads);
-    return RunResult{pi, sigma, sigma_g / (sigma_g + sigma), elbo, it, msteps, ok, fixed_sigma, msg};
+    return RunResult{pi, sigma, sigma_g / (sigma_g + sigma), elbo, it, ok, fixed_sigma, msg};
   }
 
   // PUMAS split (magenpy / VIPRS): training half bt + sqrt(c) V xi, xi ~ N(0, I_S), c = 1/(prop_train N) - 1/N
@@ -471,48 +442,45 @@ struct Fitter {
 
 // ---- output
 
-// per annotation column: mean slab variance of its SNPs (weighted by the annotation) over the mean of all SNPs
-// (suppressed SNPs left out)
-Rcpp::NumericVector enrichment(const VarModel& vm) {
-  const int K1 = vm.K - 1;
-  std::vector<double> num(K1, 0.), den(K1, 0.);
-  double all = 0;
-  int64_t nfree = 0;
+// annotation heritability h2_k = (sum_j A_jk) sigma2_k over the SNPs not suppressed (k = 0: residual annotation)
+Rcpp::NumericVector h2_annot(const VarModel& vm) {
+  Rcpp::NumericVector h(vm.K);
   for (int64_t j = 0; j < vm.M; ++j) {
     if (vm.sup[j]) continue;
-    ++nfree;
-    const double v = 1. / vm.tau[j];
-    all += v;
-    const double* r = vm.A.data() + j * K1;
-    for (int k = 0; k < K1; ++k) { num[k] += r[k] * v; den[k] += r[k]; }
+    const double* r = vm.row(j);
+    h[0] += vm.par[0];
+    for (int k = 1; k < vm.K; ++k) h[k] += r[k - 1] * vm.par[k];
   }
-  Rcpp::NumericVector e(K1);
-  for (int k = 0; k < K1; ++k) e[k] = den[k] != 0 ? (num[k] / den[k]) / (all / nfree) : NA_REAL;
-  return e;
+  return h;
 }
 
 template <typename T>
 Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const VarModel& vm,
                 const std::vector<double>& af, double h2_0, Rcpp::List extra) {
   const int64_t M = F.P.M;
-  Rcpp::NumericVector beta(M), bstd(M), pip(M), var(M);
+  const int K = vm.K;
+  Rcpp::NumericVector beta(M), bstd(M), pip(M), h2j(M);
+  Rcpp::NumericMatrix part(M, K);  // eta_j^(k) = w_jk eta_j (standardized scale), k = 0 residual annotation
   for (int64_t j = 0; j < M; ++j) {
     const double p = std::min(std::max(af[j], 1e-6), 1 - 1e-6);
     bstd[j] = st.eta[j];
     beta[j] = st.eta[j] / std::sqrt(2. * p * (1. - p));
     pip[j] = st.gamma[j];
-    var[j] = 1. / vm.tau[j];
+    h2j[j] = vm.h2[j];
+    const double* r = vm.row(j);
+    for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : 1.) * vm.par[k] / vm.h2[j] * st.eta[j];
   }
   Rcpp::List hyp = Rcpp::List::create(
       Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = res.sigma, Rcpp::_["h2"] = res.h2,
-      Rcpp::_["elbo"] = res.elbo, Rcpp::_["iters"] = res.iters, Rcpp::_["mstep_steps"] = res.mstep_steps,
+      Rcpp::_["elbo"] = res.elbo, Rcpp::_["iters"] = res.iters,
       Rcpp::_["converged"] = res.converged, Rcpp::_["message"] = res.message, Rcpp::_["sigma_fixed"] = res.sigma_fixed,
       Rcpp::_["h2_ldsc_init"] = h2_0, Rcpp::_["n_snps"] = (double)M, Rcpp::_["sum_k"] = (double)F.P.S,
       Rcpp::_["sweeps_full"] = (double)F.sweeps_full, Rcpp::_["sweeps_partial"] = (double)F.sweeps_part,
       Rcpp::_["snp_visits_per_M"] = (double)F.snp_visits / M);
   return Rcpp::List::create(Rcpp::_["BETA"] = beta, Rcpp::_["BETA_STD"] = bstd, Rcpp::_["PIP"] = pip,
-                            Rcpp::_["VAR"] = var, Rcpp::_["coef"] = Rcpp::NumericVector(vm.par.begin(), vm.par.end()),
-                            Rcpp::_["enrichment"] = enrichment(vm), Rcpp::_["hyp"] = hyp, Rcpp::_["extra"] = extra);
+                            Rcpp::_["H2_SNP"] = h2j, Rcpp::_["PART_STD"] = part,
+                            Rcpp::_["sigma2"] = Rcpp::NumericVector(vm.par.begin(), vm.par.end()),
+                            Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["hyp"] = hyp, Rcpp::_["extra"] = extra);
 }
 
 // shared set-up of the three entries: inputs -> standardized b, panel
@@ -560,7 +528,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   std::vector<double> xi;
   F.pumas(train, valid, n_tr, xi);
   std::vector<double> gpi, gsig, gh2, gr2, grb, gsec;
-  std::vector<int> git, gms, gconv;
+  std::vector<int> git, gconv;
   Rcpp::NumericMatrix gcoef(grid.size(), K);
   double best_r2 = -INFINITY, bpi = 0, bsig = 0, best_here = -INFINITY;
   State st(P.M, P.S, grid[0]), best(0, 0, 0.);
@@ -568,22 +536,22 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
   bool have_best = false;
   vm.start(h2_0, grid[0]);
-  double sigma = 1. - h2_0, prev_pi = grid[0];
+  double sigma = 1. - h2_0;
   int drops = 0;
   for (double pi : grid) {
-    vm.pi_move(prev_pi, pi);
+    vm.pi_move(pi);
     const auto t1 = std::chrono::steady_clock::now();
     const RunResult r = F.run(st, n_tr.data(), train.data(), pi, vm, sigma, c.grid_max_iter, valid.data());
-    sigma = r.sigma; prev_pi = pi;
+    sigma = r.sigma;
     double r2, rb;
     Fitter<T>::pseudo_r2(st, valid, r2, rb);
     for (int k = 0; k < K; ++k) gcoef(gpi.size(), k) = vm.par[k];
     gpi.push_back(pi); gsig.push_back(sigma); gh2.push_back(r.h2); gr2.push_back(r2);
-    grb.push_back(rb); git.push_back(r.iters); gms.push_back(r.mstep_steps); gconv.push_back(r.converged);
+    grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged);
     gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
     if (r.converged && rb > 0 && r2 > best_r2) {
       best_r2 = r2; best = st; have_best = true;
-      bpi = pi; bsig = sigma; bvm.par = vm.par; bvm.set_all();
+      bpi = pi; bsig = sigma; bvm.par = vm.par; bvm.pi = pi; bvm.set_all();
     }
     if (r2 > best_here) { best_here = r2; drops = 0; }
     else if (c.stop_after && ++drops >= c.stop_after) break;
@@ -593,10 +561,10 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   const int ng = gpi.size();
   Rcpp::DataFrame tab = Rcpp::DataFrame::create(
       Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2, Rcpp::_["pseudo_r2"] = gr2,
-      Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["mstep_steps"] = gms, Rcpp::_["converged"] = gconv,
+      Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
       Rcpp::_["seconds"] = gsec);
   return pack(F, best, res, bvm, in.af, h2_0,
-              Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_coef"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
+              Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
                                  Rcpp::_["best_pseudo_r2"] = best_r2, Rcpp::_["n_bins"] = n_bins,
                                  Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
                                  Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi.begin(), xi.end())));
@@ -628,6 +596,7 @@ Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks
       if (!std::isfinite(x)) Rcpp::stop("A must be finite");
       Ar[j * (K - 1) + k] = x;
     }
+  for (double x : Ar) if (x < 0) Rcpp::stop("annotations must be >= 0 (variance model sum_k A_jk sigma2_k)");
   // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column
   std::vector<char> sup(M, 0);
   double n_bins = 0;
