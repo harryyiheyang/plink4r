@@ -180,19 +180,23 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   out[]
 }
 
-# The genotype file of an association run, from geno_file(): its variants (var: CHR, POS, A1, A2, allele_ct), sample
-# IDs (iid), path, the file rows of the biallelic variants to test (vrow), and the CHR and POS of the multiallelic
-# ones left out (skipped). The variant IDs are read only to find snp_vec.
+# The genotype file of an association run, from geno_file(): its variants (var, the table of geno_file() itself with
+# the columns CHR, POS, A1, A2, allele_ct), sample IDs (iid), path, the file rows of the biallelic variants to test
+# (vrow), and the CHR and POS of the multiallelic ones left out (skipped). The variant IDs are read only to find
+# snp_vec.
 .geno_variants <- function(pfile, bfile, snp_vec) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
   gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = !is.null(snp_vec))
-  v <- gf$variants
-  vrow <- if (is.null(snp_vec)) seq_len(nrow(v)) else {
-    i <- match(as.character(snp_vec), v$id)
-    if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)
+  var <- data.table::setnames(gf$variants, c("chr", "pos", "a1", "a2"), c("CHR", "POS", "A1", "A2"))
+  vrow <- if (is.null(snp_vec)) seq_len(nrow(var)) else {
+    sv <- as.character(snp_vec)
+    i <- match(sv, var$id)
+    if (anyNA(i))
+      warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped: ",
+              paste(utils::head(unique(sv[is.na(i)]), 5L), collapse = ", "), if (sum(is.na(i)) > 5L) ", ...",
+              call. = FALSE)
     sort(unique(i[!is.na(i)]))
   }
-  var <- data.table::data.table(CHR = v$chr, POS = v$pos, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
   multi <- vrow[var$allele_ct[vrow] > 2L]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
