@@ -31,7 +31,7 @@
   res <- gxe_kin_stream_cpp(gv$path, is.null(pfile), length(gv$iid), as.integer(gv$var$allele_ct),
                             as.integer(gv$vrow - 1L), as.integer(D$srow - 1L), nl$null, E, ne, threads, mem_gb,
                             as.integer(block))
-  out <- gv$var[gv$vrow, list(CHR, POS, ID, A1, A2)]
+  out <- gv$var[gv$vrow, list(CHR, POS, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs),
              BETA_MARGINAL = res$beta_marginal, SE_MARGINAL = res$se_marginal)]
   out[, P_MARGINAL := 2 * stats::pnorm(-abs(BETA_MARGINAL / SE_MARGINAL))]

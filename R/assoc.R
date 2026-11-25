@@ -42,7 +42,8 @@
 #'   intercepts as the baseline, the kinship correlation between the records of relatives; see [reml_tau()]), and
 #'   a variant is tested in that model of the records.
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
-#' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
+#' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order. The ID column of the
+#'   `.bim` / `.pvar` is read only when `snp_vec` is given.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
 #' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
 #'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the null model accounts for the
@@ -63,12 +64,13 @@
 #'   its block of genotypes to doubles 2048 samples at a time, and a few hundred variants keep that within the
 #'   cache: 256 took 0.4 to 0.6 of the time of 4096 for 1,000 and 20,000 samples (linear, logistic, kinship, Cox;
 #'   0.5 to 0.65 for [gxe()]).
-#' @return data.table with one row per variant: `CHR`, `POS`, `ID`, `A1` (counted allele: ALT of a PGEN, .bim
+#' @return data.table with one row per variant: `CHR`, `POS`, `A1` (counted allele: ALT of a PGEN, .bim
 #'   column 5 of a BED), `A2`, `N` (non-missing calls), `A1_FREQ`, `BETA`, `SE`, `T` (linear) or `Z`
 #'   (logistic), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. Variants with no variation among the analysed
 #'   samples (`monomorphic` in `info`) or a singular `Z'WZ` (`singular`) have `NA` statistics. Attribute `info`:
 #'   samples, covariate rank, block size, threads, memory budget, SIMD set, variants recomputed by explicit
-#'   projection, monomorphic and singular counts, skipped multiallelic variants.
+#'   projection, monomorphic and singular counts, and `skipped_multiallelic`: the `CHR` and `POS` of the variants
+#'   left out for having more than two alleles.
 #' @export
 gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
                  id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
@@ -178,25 +180,23 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   out[]
 }
 
-# The genotype file of an association run, from geno_file(): its variants (var), sample IDs (iid), path, the file
-# rows of the biallelic variants to test (vrow), and the multiallelic ones left out: their file rows (multi) and their
-# IDs (skipped). With id = FALSE the ID column is not read: var has none, skipped is NULL, snp_vec must be NULL.
-.geno_variants <- function(pfile, bfile, snp_vec, id = TRUE) {
+# The genotype file of an association run, from geno_file(): its variants (var: CHR, POS, A1, A2, allele_ct), sample
+# IDs (iid), path, the file rows of the biallelic variants to test (vrow), and the CHR and POS of the multiallelic
+# ones left out (skipped). The variant IDs are read only to find snp_vec.
+.geno_variants <- function(pfile, bfile, snp_vec) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = id)
+  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = !is.null(snp_vec))
   v <- gf$variants
-  var <- data.table::data.table(CHR = v$chr, POS = v$pos, ID = v$id, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
-  iid <- gf$samples$iid
-  path <- gf$path
-  vrow <- if (is.null(snp_vec)) seq_len(nrow(var)) else {
-    i <- match(as.character(snp_vec), var$ID)
+  vrow <- if (is.null(snp_vec)) seq_len(nrow(v)) else {
+    i <- match(as.character(snp_vec), v$id)
     if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)
     sort(unique(i[!is.na(i)]))
   }
+  var <- data.table::data.table(CHR = v$chr, POS = v$pos, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
   multi <- vrow[var$allele_ct[vrow] > 2L]
   vrow <- vrow[var$allele_ct[vrow] <= 2L]
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
-  list(var = var, iid = iid, path = path, vrow = vrow, skipped = var$ID[multi], multi = multi)
+  list(var = var, iid = gf$samples$iid, path = gf$path, vrow = vrow, skipped = var[multi, list(CHR, POS)])
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
@@ -311,7 +311,7 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   res <- assoc_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
                           as.integer(srow - 1L), X, S, length(ie), resid, w, robust, threads, mem_gb,
                           as.integer(block))
-  out <- var[vrow, list(CHR, POS, ID, A1, A2)]
+  out <- var[vrow, list(CHR, POS, A1, A2)]
   out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
   info <- list(samples = n, covariate_rank = res$rank, null_converged = fit$converged, block = res$block,
                threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,

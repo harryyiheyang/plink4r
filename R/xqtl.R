@@ -96,8 +96,7 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
 
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  # the variant IDs are read only to find snp_vec: the file that is written has none
-  gv <- .geno_variants(pfile, bfile, snp_vec, id = !is.null(snp_vec))
+  gv <- .geno_variants(pfile, bfile, snp_vec)
   var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
 
   # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.
@@ -135,5 +134,5 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
                  active = res$active, products = res$products, waiting_most = res$waiting_most,
                  explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
                  outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]),
-                 skipped_multiallelic = data.table::data.table(CHR = var$CHR[gv$multi], BP = var$POS[gv$multi])))
+                 skipped_multiallelic = data.table::setnames(gv$skipped, "POS", "BP")))
 }
