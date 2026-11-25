@@ -12,10 +12,7 @@ Description: A toolkit for PLINK BED / PGEN genotypes. geno_open() reads a file 
     association of many traits each with the variants of its own window, written to Parquet (xqtl), and scores
     (geno_score). Missing genotype cells and missing GWAS summary statistics are imputed from blockwise
     eigen LD (SBayesRC or plink4r eigen.bin layout), with OpenMP parallelism. Summary-statistics imputation is
-    ported from SBayesRC.QC2. LD scores (plain, stratified by annotations, and cross-ancestry) are computed from
-    the same eigen LD blocks (ld_score, ld_score_cross) and feed LD score regression: heritability, genetic
-    covariance, trans-ancestry genetic covariance and stratified LDSC (ldsc_univ, ldsc_bicov, ldsc_trans,
-    ldsc_strat), ported from ldscR.
+    ported from SBayesRC.QC2.
 License: GPL (>= 3)
 Encoding: UTF-8
 Imports: data.table, arrow, Rcpp, stats, utils
