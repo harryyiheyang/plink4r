@@ -5,11 +5,17 @@
 #' (`block<N>.eigen.bin`, truncated at `thresh`). The sum runs over the panel's LD block, not over a 1 cM window,
 #' and \eqn{r^2} is not corrected for the reference sample size. All numerical work is in `src/ld_score.cpp`
 #' (a block costs \eqn{m k^2} per annotation, k the eigen pairs kept, never the m x m LD matrix).
+#'
+#' With `snps`, k runs over the given SNPs only and only their rows are returned, so the LD scores and the
+#' number of SNPs M that the LD score regression takes from its input refer to the same SNPs. Rows with an `r2`
+#' column below 1 (SNPs filled by [sumstat_impute()]) are not given SNPs.
 #' @param ld_dir the LD panel folder.
 #' @param ref panel SNP table in place of `snpinfo.parquet` of `ld_dir` (data.frame or parquet path).
 #' @param annot annotations (required): CHR, the position column of `build` (BP37 or BP38) and one numeric
 #'   column per annotation; matched to the panel by chromosome and position, panel SNPs without a row get 0. The
 #'   all-ones LD score L2 is always computed as well (it enters the regression weights).
+#' @param snps NULL (default: every panel SNP) or the summary statistics the LD scores are for (output of
+#'   [summarystat_tidy()] or [sumstat_impute()], data.table or file; Block and Index, and `r2` when present).
 #' @param build 37 or 38: the position column `annot` is matched on.
 #' @param thresh eigenvalue variance kept; <= 0 (default) keeps every stored pair.
 #' @param chunk output rows per dense product (memory per thread: chunk x k doubles, plus the block's factor).
@@ -17,7 +23,7 @@
 #' @return data.table by Block and Index: CHR, BP37, BP38, A1, A2, Block, Index, L2, and one `L2_<name>` and one
 #'   `A_<name>` (the annotation value) per annotation column.
 #' @export
-ld_score <- function(ld_dir, annot, ref = NULL, build = 38, thresh = 0, chunk = 1024L, threads = 0L) {
+ld_score <- function(ld_dir, annot, ref = NULL, snps = NULL, build = 38, thresh = 0, chunk = 1024L, threads = 0L) {
   threads <- .threads(threads)
   r <- .with_bp(.ld_panel(ref, ld_dir))
   data.table::setorder(r, Block, Index)
@@ -38,6 +44,18 @@ ld_score <- function(ld_dir, annot, ref = NULL, build = 38, thresh = 0, chunk = 
   storage.mode(Aa) <- "double"
   Aa[is.na(Aa)] <- 0
   A <- cbind(1, Aa)
+  keep <- rep(TRUE, nrow(r))
+  if (!is.null(snps)) {
+    s <- .read_table(snps)
+    if (!all(c("Block", "Index") %in% names(s))) stop("snps needs Block and Index", call. = FALSE)
+    if ("r2" %in% names(s)) s <- s[r2 >= 1]
+    j <- r[data.table::data.table(Block = as.integer(s$Block), Index = as.integer(s$Index)), on = .(Block, Index),
+           which = TRUE]
+    if (anyNA(j)) stop(sum(is.na(j)), " rows of snps are not panel SNPs (Block, Index)", call. = FALSE)
+    keep <- seq_len(nrow(r)) %in% j
+    A[!keep, ] <- 0
+    message(sum(keep), " of ", nrow(r), " panel SNPs given: LD scores over them only")
+  }
   t0 <- Sys.time()
   L <- ld_score_cpp(.ld_block_file(ld_dir, m$Block), c(0L, cumsum(m$m)), A, thresh, as.integer(chunk),
                     as.integer(threads))
@@ -49,5 +67,5 @@ ld_score <- function(ld_dir, annot, ref = NULL, build = 38, thresh = 0, chunk = 
     data.table::set(out, j = paste0("L2_", an[k]), value = L[, k + 1L])
     data.table::set(out, j = paste0("A_", an[k]), value = A[, k + 1L])
   }
-  out[]
+  out[keep]
 }
