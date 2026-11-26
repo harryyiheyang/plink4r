@@ -5,7 +5,8 @@
 # env: BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
-#      L2 / base / baseL2 and one column per annotation named <annot>, <annot>L2 or L2_<annot>; unset: ld_score()).
+#      L2 / L_base / base / baseL2 and one column per annotation named L_<annot>, L2_<annot>, <annot>L2 or <annot>;
+#      unset: ld_score()).
 a <- commandArgs(TRUE); suppressPackageStartupMessages({library(plink4r); library(data.table)})
 RA <- Sys.getenv("RESID_ALL", "0") == "1"
 tab <- fread(a[2])
@@ -27,8 +28,8 @@ if ("AML" %in% meth) {
     f <- Sys.getenv("LDSCORE")
     l <- if (grepl("parquet$", f)) as.data.table(arrow::read_parquet(f)) else fread(f)
     pick <- function(cands) { h <- intersect(cands, names(l)); if (!length(h)) NA_character_ else h[1] }
-    base <- pick(c("L2", "base", "baseL2", "base_L2", "baseline", "baselineL2"))
-    lc <- vapply(acols, function(x) pick(c(x, paste0(x, "L2"), paste0("L2_", x), paste0(x, "_L2"))), "")
+    base <- pick(c("L2", "L_base", "base", "baseL2", "base_L2", "baseline", "baselineL2"))
+    lc <- vapply(acols, function(x) pick(c(paste0("L_", x), paste0("L2_", x), paste0(x, "L2"), paste0(x, "_L2"), x)), "")
     if (is.na(base) || anyNA(lc)) stop("LDSCORE: no column for ", paste(c(if (is.na(base)) "base L2", acols[is.na(lc)]),
                                        collapse = ", "), "; its columns: ", paste(names(l), collapse = " "))
     l <- l[, c("ID", base, lc), with = FALSE]; setnames(l, c("ID", "L2", paste0("L2_", acols)))
