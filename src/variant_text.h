@@ -5,8 +5,10 @@
 //                  allele_count, variant_fields)
 //   what a scan takes from them: allele_counts (a PGEN needs the number of alleles of every variant before any
 //   genotype is read), read_variant_table (chromosome, position and alleles of every line, for a scan that places
-//   windows) and ResultText (the result of a scan of every variant: chromosome, position and alleles of each line
-//   as the line has them, then its statistics).
+//   windows) and ResultText (the result of a scan of every variant: chromosome, position and alleles of each line,
+//   then its statistics).
+// What a result says of a variant is what its line says: chromosome label and alleles are written as the file has
+// them, never recoded. The chromosome code (chr_code) only matches a variant to a table that names chromosomes.
 #ifndef PLINK4R_VARIANT_TEXT_H
 #define PLINK4R_VARIANT_TEXT_H
 
@@ -170,18 +172,17 @@ inline std::vector<int> allele_counts(const std::string& pvar) {
   return ct;
 }
 
-// The distinct allele strings of a table, in upper case, each with the code of its first appearance.
-class AlleleCodes {
+// The distinct texts of a field, as the file writes them, each with the code of its first appearance.
+class TextCodes {
  public:
-  AlleleCodes() { for (int& c : one_) c = -1; }
+  TextCodes() { for (int& c : one_) c = -1; }
   std::int32_t code(const char* s, std::size_t n) {
     if (n == 1) {
-      const unsigned char u = static_cast<unsigned char>(ascii_upper(s[0]));
-      if (one_[u] < 0) { one_[u] = static_cast<std::int32_t>(text.size()); text.emplace_back(1, static_cast<char>(u)); }
+      const unsigned char u = static_cast<unsigned char>(s[0]);
+      if (one_[u] < 0) { one_[u] = static_cast<std::int32_t>(text.size()); text.emplace_back(1, s[0]); }
       return one_[u];
     }
     key_.assign(s, n);
-    for (char& c : key_) c = ascii_upper(c);
     const auto it = more_.find(key_);
     if (it != more_.end()) return it->second;
     const std::int32_t c = static_cast<std::int32_t>(text.size());
@@ -197,19 +198,24 @@ class AlleleCodes {
   std::string key_;
 };
 
-// Every variant line of a .bim / .pvar, by file row: chromosome code and position (-1: none), the two alleles as
-// codes into alleles (upper case), and for a .pvar the number of alleles (a .bim line has two: allele_ct is empty).
+// Every variant line of a .bim / .pvar, by file row: its chromosome label and its two alleles as codes into the
+// distinct texts of the file (chromosomes, alleles: as the file writes them), its position (-1: not a position), and
+// for a .pvar the number of alleles (a .bim line has two: allele_ct is empty). chromosome_code: the chromosome code
+// of each label (chr_code; -1: none).
 struct VariantTable {
   std::vector<std::int32_t> chr, bp, ref, alt;
   std::vector<int> allele_ct;
-  std::vector<std::string> alleles;
+  std::vector<std::string> chromosomes, alleles;
+  std::vector<std::int32_t> chromosome_code;
   std::size_t size() const { return chr.size(); }
   bool biallelic(std::size_t r) const { return allele_ct.empty() || allele_ct[r] == 2; }
+  std::int32_t code(std::size_t r) const { return chromosome_code[chr[r]]; }
 };
 inline VariantTable read_variant_table(const std::string& path, bool bim) {
   VariantLines in(path, bim);
   VariantTable v;
-  AlleleCodes codes;
+  TextCodes chromosomes, alleles;
+  std::int32_t c = -1;  // the label of the line before: the lines of a chromosome follow one another
   const char* s; std::size_t len;
   VariantFields f;
   while (in.next(s, len)) {
@@ -217,13 +223,17 @@ inline VariantTable read_variant_table(const std::string& path, bool bim) {
     if (!variant_fields(s, len, bim, f))
       Rcpp::stop("Line %.0f of the variants of %s has fewer than %d fields.", static_cast<double>(v.size() + 1),
                  path.c_str(), bim ? 6 : 5);
-    v.chr.push_back(chr_code(f.chr, f.chr_n));
+    if (c < 0 || chromosomes.text[c].size() != f.chr_n || std::memcmp(chromosomes.text[c].data(), f.chr, f.chr_n) != 0)
+      c = chromosomes.code(f.chr, f.chr_n);
+    v.chr.push_back(c);
     v.bp.push_back(parse_bp(f.pos, f.pos_n));
-    v.ref.push_back(codes.code(f.ref, f.ref_n));
-    v.alt.push_back(codes.code(f.alt, f.alt_n));
+    v.ref.push_back(alleles.code(f.ref, f.ref_n));
+    v.alt.push_back(alleles.code(f.alt, f.alt_n));
     if (!bim) v.allele_ct.push_back(allele_count(f.alt, f.alt_n));
   }
-  v.alleles = std::move(codes.text);
+  v.chromosomes = std::move(chromosomes.text);
+  v.alleles = std::move(alleles.text);
+  for (const std::string& label : v.chromosomes) v.chromosome_code.push_back(chr_code(label.data(), label.size()));
   return v;
 }
 
