@@ -2,7 +2,7 @@
 // annotation-specific components (PartitionPRS, Research Design D.1.2). Top layer: the package's annotation VIPRS
 // functional unit, built on vi_panel.h / vi_store.h / ld_bins.h; copied from viprs.cpp and edited.
 // Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
-// residual annotation A_R: 1 for every SNP, or only for SNPs without annotation), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
+// intercept, A_j0 = 1 for every SNP), so h2_j = Var(beta_j) = sigma2_0 + sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
 // spike and slab with fixed pi; the slab is a mixture of C classes with fixed shares p_c (mix_prop, default small /
 // medium / large = 6 : 3 : 1) and variances kap_c h2_j / pi (mix_var relative, normalized to sum_c p_c kap_c = 1),
 // so Var(beta_j) = h2_j. Coordinate update (D_j = n_j r_j / sigma; tau_j = pi / h2_j):
@@ -10,14 +10,14 @@
 //   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc
 // (one class: the VIPRS update with tau_j in place of tau).
 // M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
-// zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j: the EM
-// statistic of the scale of a Gaussian scale mixture), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
-// sigma2_k and h2_j are kept >= var_floor * (LDSC h2) / M. S_k = sum_j E[(beta_j^(k))^2] (exact_em: sigma2_k <- (pi S~_k + 2 b0) / (sum_j gamma_j A_jk + 2 (a0 + 1)), S~_k with
-// the conditional term gamma_j w (1 - w) h2_j / pi, the ELBO maximizer at fixed pi). With one slab class, the residual annotation only and a0 = -1, b0 = 0 this is the
-// VIPRS 0.1.5 tau update (tau = pi M / sum zeta), i.e. viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, cut at 0)
-// or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
-// Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j), the
-// weights of the annotation-specific PRS.
+// zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j),
+// sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)), S_k = sum_j E[(beta_j^(k))^2]. No floor: an annotation with
+// sigma2_k = 0 (e.g. a negative ldsc_strat() start cut at 0) has w_jk = 0 and stays 0 (b0 = 0), its SNPs fall back
+// on the intercept. With one slab class, no annotation and a0 = -1, b0 = 0 this is the VIPRS 0.1.5 tau update, i.e.
+// viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, annotation values cut at 0; the intercept must be > 0) or all
+// sigma2_k equal with sum_j h2_j = the naive LDSC h2.
+// Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j, k = 0 the
+// intercept part), the weights of the annotation-specific PRS.
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
@@ -49,8 +49,7 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
-      pi_hi_max, pi_cap, a0, b0, init_floor, var_floor;
-  bool exact_em;
+      pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
   // slab mixture: class c has prior share mix_prop[c] and variance kap[c] h2_j / pi (sum_c mix_prop[c] kap[c] = 1)
@@ -83,9 +82,6 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.pi_cap = Rcpp::as<double>(c["pi_cap"]);
   x.a0 = Rcpp::as<double>(c["a0"]);
   x.b0 = Rcpp::as<double>(c["b0"]);
-  x.init_floor = Rcpp::as<double>(c["init_floor"]);
-  x.var_floor = Rcpp::as<double>(c["var_floor"]);
-  x.exact_em = Rcpp::as<bool>(c["exact_em"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -269,40 +265,30 @@ void stats(int64_t M, const float* d, const float* n, const float* bt, const flo
 
 struct VarModel {
   int64_t M;
-  int K;                         // annotations, residual annotation first
+  int K;                         // annotations, intercept first
   const std::vector<double>& A;
   const std::vector<char>& sup;  // suppressed SNPs: left out of the M-step
-  std::vector<double> aR;        // residual annotation: 1 for every SNP (resid_all) or only for SNPs without annotation
   std::vector<double> par;       // sigma2_k
   std::vector<double> h2;        // h2_j
   std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
   double pi = 1;
-  double vfloor = 0;             // lower bound of every sigma2_k and h2_j (sigma2_k = 0 would be a fixed point, h2_j = 0
-                                 // an infinite precision)
   int threads;
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
-      : M(M_), K(K_), A(A_), sup(sup_), aR(M_, 1.), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f),
-        threads(threads_) {}
-  void set_residual(bool all) {
-    for (int64_t j = 0; j < M; ++j) {
-      bool any = false;
-      const double* r = row(j);
-      for (int k = 1; k < K && !any; ++k) any = r[k - 1] != 0;
-      aR[j] = (all || !any) ? 1. : 0.;
-    }
-  }
+      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f), threads(threads_) {}
 
   const double* row(int64_t j) const { return A.data() + j * (K - 1); }
+  // MMSE weight of piece k of SNP j: w_jk = A_jk sigma2_k / h2_j (A_j0 = 1)
+  double w(int64_t j, int k) const { return (k ? row(j)[k - 1] : 1.) * par[k] / h2[j]; }
   void set_all() {
+    if (!(par[0] > 0)) throw std::runtime_error("the intercept sigma2_0 is not positive");
 #ifdef _OPENMP
 #pragma omp parallel for num_threads(threads)
 #endif
     for (int64_t j = 0; j < M; ++j) {
-      double h = aR[j] * par[0];
+      double h = par[0];
       const double* r = row(j);
       for (int k = 1; k < K; ++k) h += r[k - 1] * par[k];
-      h = std::max(h, vfloor);
       h2[j] = h;
       const double t = pi / h;
       tau[j] = (float)t; ltau[j] = (float)std::log(t);
@@ -313,49 +299,38 @@ struct VarModel {
     pi = pi_;
     double s = 0;
     for (int64_t j = 0; j < M; ++j) {
-      s += aR[j];
+      s += 1.;
       const double* r = row(j);
       for (int k = 1; k < K; ++k) s += r[k - 1];
     }
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // start from given sigma2_k (e.g. stratified LDSC tau_k): values below floor * (mean h2_j of the values cut at 0)
-  // are raised to it, so no sigma2_k starts at 0 (0 is a fixed point of the M-step); returns sum_j h2_j over the
-  // SNPs not suppressed, 0 when the values cut at 0 give no positive h2_j (then nothing is set)
-  double start_at(const std::vector<double>& s2, double floor, double pi_) {
+  // start from given sigma2_k (e.g. stratified LDSC tau_k): annotation values cut at 0; returns sum_j h2_j over the
+  // SNPs not suppressed, or 0 when the intercept is not positive (then nothing is set)
+  double start_at(const std::vector<double>& s2, double pi_) {
+    if (!(s2[0] > 0)) return 0.;
     std::vector<double> p(K);
-    for (int k = 0; k < K; ++k) p[k] = std::max(s2[k], 0.);
-    auto total = [&](const std::vector<double>& q) {
-      double tot = 0;
-      for (int64_t j = 0; j < M; ++j) {
-        if (sup[j]) continue;
-        double h = aR[j] * q[0];
-        const double* r = row(j);
-        for (int k = 1; k < K; ++k) h += r[k - 1] * q[k];
-        tot += h;
-      }
-      return tot;
-    };
-    int64_t m = 0;
-    for (int64_t j = 0; j < M; ++j) m += !sup[j];
-    const double t0 = total(p);
-    if (!(t0 > 0) || m == 0) return 0.;
-    const double lo = floor * t0 / m;
-    for (int k = 0; k < K; ++k) p[k] = std::max(p[k], lo);
+    p[0] = s2[0];
+    for (int k = 1; k < K; ++k) p[k] = std::max(s2[k], 0.);
+    double tot = 0;
+    for (int64_t j = 0; j < M; ++j) {
+      if (sup[j]) continue;
+      double h = p[0];
+      const double* r = row(j);
+      for (int k = 1; k < K; ++k) h += r[k - 1] * p[k];
+      tot += h;
+    }
     par = p; pi = pi_;
     set_all();
-    return total(p);
+    return tot;
   }
   // pi moves: sigma2_k (variance of beta) kept, the slab variance h2_j / pi follows
   void pi_move(double pi_) { pi = pi_; set_all(); }
 
-  // one update of sigma2_k (D.1.2); returns nothing, refreshes h2, tau
-  // exact: the maximizer of the ELBO at fixed pi (slab members only: sigma2_k <- pi S_k / sum_j gamma_j A_jk, the
-  // conditional variance term weighted by gamma_j); otherwise the moment form of VIPRS 0.1.5 (sigma2_k <- S_k /
-  // sum_j A_jk; with pi = sum gamma / M the two agree)
-  void mstep(const double* zeta, const float* gamma, bool exact, double a0, double b0) {
-    const int K1 = K - 1;
+  // one update of sigma2_k (D.1.2), moment form (VIPRS 0.1.5): sigma2_k is the variance of beta, matched to the
+  // posterior second moments of the SNPs not suppressed, sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
+  void mstep(const double* zeta, double a0, double b0) {
     std::vector<double> SN(2 * K, 0.);  // S_k, then sum_j A_jk
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
@@ -367,14 +342,14 @@ struct VarModel {
 #endif
       for (int64_t j = 0; j < M; ++j) {
         if (sup[j]) continue;
-        const double h = h2[j], z = zeta[j], g = exact ? (double)gamma[j] : 1., f = exact ? pi : 1.;
+        const double h = h2[j], z = zeta[j];
         const double* r = row(j);
         for (int k = 0; k < K; ++k) {
-          const double a = k ? r[k - 1] : aR[j];
+          const double a = k ? r[k - 1] : 1.;
           if (a == 0.) continue;
           const double w = a * par[k] / h;
-          loc[k] += f * w * w * z + g * w * (1. - w) * h;
-          loc[K + k] += g * a;
+          loc[k] += w * w * z + w * (1. - w) * h;
+          loc[K + k] += a;
         }
       }
 #ifdef _OPENMP
@@ -384,9 +359,8 @@ struct VarModel {
     }
     for (int k = 0; k < K; ++k) {
       const double den = SN[K + k] + 2. * (a0 + 1.);
-      par[k] = den > 0 ? std::max((SN[k] + 2. * b0) / den, vfloor) : vfloor;
+      par[k] = den > 0 ? (SN[k] + 2. * b0) / den : 0.;
     }
-    (void)K1;
     set_all();
   }
 };
@@ -473,7 +447,7 @@ struct Fitter {
       stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
-      vm.mstep(zeta.data(), st.gamma.data(), c.exact_em, c.a0, c.b0);
+      vm.mstep(zeta.data(), c.a0, c.b0);
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
 #ifdef _OPENMP
@@ -545,13 +519,13 @@ struct Fitter {
 
 // ---- output
 
-// annotation heritability h2_k = (sum_j A_jk) sigma2_k over the SNPs not suppressed (k = 0: residual annotation)
+// annotation heritability h2_k = (sum_j A_jk) sigma2_k over the SNPs not suppressed (k = 0: intercept)
 Rcpp::NumericVector h2_annot(const VarModel& vm) {
   Rcpp::NumericVector h(vm.K);
   for (int64_t j = 0; j < vm.M; ++j) {
     if (vm.sup[j]) continue;
     const double* r = vm.row(j);
-    h[0] += vm.aR[j] * vm.par[0];
+    h[0] += vm.par[0];
     for (int k = 1; k < vm.K; ++k) h[k] += r[k - 1] * vm.par[k];
   }
   return h;
@@ -563,20 +537,19 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
   const int64_t M = F.P.M;
   const int K = vm.K;
   Rcpp::NumericVector beta(M), bstd(M), pip(M), h2j(M);
-  Rcpp::NumericMatrix part(M, K);  // eta_j^(k) = w_jk eta_j (standardized scale), k = 0 residual annotation
+  Rcpp::NumericMatrix part(M, K);  // eta_j^(k) = w_jk eta_j (standardized scale), k = 0 intercept
   for (int64_t j = 0; j < M; ++j) {
     const double p = std::min(std::max(af[j], 1e-6), 1 - 1e-6);
     bstd[j] = st.eta[j];
     beta[j] = st.eta[j] / std::sqrt(2. * p * (1. - p));
     pip[j] = st.gamma[j];
     h2j[j] = vm.h2[j];
-    const double* r = vm.row(j);
-    for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j] * st.eta[j];
+    for (int k = 0; k < K; ++k) part(j, k) = vm.w(j, k) * st.eta[j];
   }
   // heritability of each partitioned PRS: h2_k = E_q[beta^(k)' R beta^(k)] = eta^(k)' R eta^(k) + sum_j R_jj
   // Var_q(beta_j^(k)), with E_q[(beta_j^(k))^2] = gamma_j sum_c psi_jc (w_jk^2 (mu_jc^2 + 1/vt_jc) +
-  // w_jk (1 - w_jk) kap_c h2_j / pi) (the split of beta_j given its class). Not additive over k (cross terms between
-  // the columns); the partitioned PRS are.
+  // w_jk (1 - w_jk) kap_c h2_j / pi) (the piece of beta_j given its class). Not
+  // additive over k (cross terms between the columns); the partitioned PRS are.
   Rcpp::NumericVector h2post(K);
   {
     const int C = (int)F.c.kap.size();
@@ -601,8 +574,7 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
       for (int64_t j = 0; j < M; ++j) {
         x[j] = (float)part(j, k);
         if (vm.sup[j]) continue;
-        const double* r = vm.row(j);
-        const double w = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j];
+        const double w = vm.w(j, k);
         if (w == 0.) continue;
         const double m2 = w * w * e2[j] + w * (1. - w) * cv[j], mm = part(j, k);
         dv += F.P.d[j] * std::max(m2 - mm * mm, 0.);
@@ -663,7 +635,7 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // converge are never chosen)
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
-                    bool resid_all, const std::vector<double>& s2_init, const std::vector<std::string>& files,
+                    const std::vector<double>& s2_init, const std::vector<std::string>& files,
                     double thresh, const ViprsControl& c, int threads) {
   const EigenPanel<T> P = plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
@@ -679,14 +651,12 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   State st(P.M, P.S, grid[0]), best(0, 0, 0.);
   for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
-  vm.set_residual(resid_all); bvm.set_residual(resid_all);
-  vm.vfloor = bvm.vfloor = c.var_floor * h2_0 / (double)P.M;
   bool have_best = false;
   double h2_start = h2_0;
   if (!s2_init.empty()) {
-    const double tot = vm.start_at(s2_init, c.init_floor, grid[0]);
+    const double tot = vm.start_at(s2_init, grid[0]);
     if (tot > 0) h2_start = std::min(std::max(tot, c.h2_min), c.h2_max);
-    else Rcpp::warning("sigma2_init has no positive value: the LDSC start is used");
+    else Rcpp::warning("sigma2_init: the intercept is not positive, the LDSC start is used");
     if (!(tot > 0)) vm.start(h2_0, grid[0]);
   } else vm.start(h2_0, grid[0]);
   double sigma = 1. - h2_start;
@@ -727,16 +697,16 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 
 // Entry: files (eigen.bin of each block), blocks (ids), keep (0-based eigen rows with data per block, increasing), z / n / af per kept SNP (blocks
 // concatenated in that order; af = frequency of the effect allele, for BETA = BETA_STD / sqrt(2 af (1 - af))),
-// A (kept SNPs x annotations, same order; the residual annotation is added here), bin_file (LD-bin list, "" = no
+// A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no
 // suppression), skip_cols (0-based columns of A that make a SNP annotated for the suppression),
 // bin_start (first panel row of each kept block), n_panel (SNPs of the panel), sigma2_init (empty, or sigma2_k of the
-// first grid point, residual first; raised to at least init_floor times the mean h2_j), thresh (eigen truncation, <= 0 = every stored
+// first grid point, intercept first; annotation values cut at 0), thresh (eigen truncation, <= 0 = every stored
 // pair), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]
 Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
-                           const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all,
+                           const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel,
                            Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, double thresh, bool fp16,
                            Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
@@ -746,7 +716,7 @@ Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerV
   if (A.nrow() != M) Rcpp::stop("A must have one row per kept SNP");
   const int K = A.ncol() + 1;
   const std::vector<double> s2(sigma2_init.begin(), sigma2_init.end());
-  if (!s2.empty() && (int)s2.size() != K) Rcpp::stop("sigma2_init needs one value per annotation plus the residual");
+  if (!s2.empty() && (int)s2.size() != K) Rcpp::stop("sigma2_init needs one value per annotation plus the intercept");
   for (double x : s2) if (!std::isfinite(x)) Rcpp::stop("sigma2_init must be finite");
   std::vector<double> Ar(M * (K - 1));
   for (int64_t j = 0; j < M; ++j)
@@ -779,8 +749,8 @@ Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerV
         off += m;
       }
     }
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, s2, files, thresh, c, T)
-                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, s2, files, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, s2, files, thresh, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, s2, files, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }

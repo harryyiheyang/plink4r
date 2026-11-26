@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from gen_ideal_i
 ld, sim = sys.argv[1], sys.argv[2]
 snp = pd.read_csv(f"{sim}/snps.tsv", sep="\t"); C = np.load(f"{sim}/beta_comp.npy")
 cat = pd.read_csv(f"{sim}/categories.tsv", sep="\t", keep_default_na=False)
-names = list(cat.name); cols = [c.split("+") if c else ["residual"] for c in cat["columns"]]
+names = list(cat.name); cols = [c.split("+") if c else ["intercept"] for c in cat["columns"]]
 vecs, labels = [C[:, i] for i in range(C.shape[1])] + [C.sum(1)], [("true", nm) for nm in names] + [("true", "total")]
 for m in sys.argv[3:]:
     d = pd.read_csv(f"{sim}/{m}.tsv", sep="\t").set_index("ID").reindex(snp.ID).fillna(0)

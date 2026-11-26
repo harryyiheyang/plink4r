@@ -5,8 +5,8 @@
 #SBATCH -t 12:00:00
 #SBATCH -o partvar_%j.log
 # Variance-route partition simulation on PanUKB_EUR_ld blocks 1-100 with the real annotations (run from
-# ~/partition_sim2; plink4r in ./lib; scripts of sim/partition here). Two designs (h2 shares; residual = unannotated
-# SNPs, 20%, t(3) effects), 3 seeds each; PI = 0.01 causal, 6:3:1 slab mixture, N = 300000, h2 = 0.3.
+# ~/partition_sim2; plink4r in ./lib; scripts of sim/partition here). Two designs (h2 shares; intercept = 20%, t(3)
+# effects on every causal SNP), 3 seeds each; PI = 0.01 causal, 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 set -euo pipefail
 LD=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/PanUKB_EUR_ld
 AN=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/Annotation
@@ -22,6 +22,6 @@ for d in lipid bp; do
     ANNOT=$AN/annot_9M_all_20261122.parquet DESIGN="${DES[$d]}" PI=0.01 NGWAS=300000 BLOCKS=1-100 \
       python3 gen_var.py $LD ref_1-100.tsv $D $seed | tee $D.gen.txt
     LDSCORE=$AN/ldscore_9M_all_20261122.parquet BINS=ldbin0.98_1-100.bin Rscript run_var.R $LD ref_1-100.tsv $D | tee $D/run.txt
-    python3 eval_var.py $LD $D V A1 AMm AM AML | tee $D/eval.txt
+    python3 eval_var.py $LD $D V A1 AM AML | tee $D/eval.txt
   done
 done

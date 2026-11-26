@@ -659,8 +659,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // viprs_annot_cpp
-Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all, Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, double thresh, bool fp16, Rcpp::List control, int threads);
-RcppExport SEXP _plink4r_viprs_annot_cpp(SEXP filesSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP bin_fileSEXP, SEXP bin_startSEXP, SEXP n_panelSEXP, SEXP resid_allSEXP, SEXP sigma2_initSEXP, SEXP skip_colsSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
+Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, double thresh, bool fp16, Rcpp::List control, int threads);
+RcppExport SEXP _plink4r_viprs_annot_cpp(SEXP filesSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP bin_fileSEXP, SEXP bin_startSEXP, SEXP n_panelSEXP, SEXP sigma2_initSEXP, SEXP skip_colsSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -674,14 +674,13 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const std::string& >::type bin_file(bin_fileSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type bin_start(bin_startSEXP);
     Rcpp::traits::input_parameter< double >::type n_panel(n_panelSEXP);
-    Rcpp::traits::input_parameter< bool >::type resid_all(resid_allSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type sigma2_init(sigma2_initSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type skip_cols(skip_colsSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< bool >::type fp16(fp16SEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type control(controlSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(viprs_annot_cpp(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, sigma2_init, skip_cols, thresh, fp16, control, threads));
+    rcpp_result_gen = Rcpp::wrap(viprs_annot_cpp(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, sigma2_init, skip_cols, thresh, fp16, control, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -792,7 +791,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_sbayesrc_cpp", (DL_FUNC) &_plink4r_sbayesrc_cpp, 13},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {"_plink4r_viprs_cpp", (DL_FUNC) &_plink4r_viprs_cpp, 10},
-    {"_plink4r_viprs_annot_cpp", (DL_FUNC) &_plink4r_viprs_annot_cpp, 17},
+    {"_plink4r_viprs_annot_cpp", (DL_FUNC) &_plink4r_viprs_annot_cpp, 16},
     {"_plink4r_weight_condition_cpp", (DL_FUNC) &_plink4r_weight_condition_cpp, 24},
     {"_plink4r_xqtl_stream_cpp", (DL_FUNC) &_plink4r_xqtl_stream_cpp, 24},
     {NULL, NULL, 0}
