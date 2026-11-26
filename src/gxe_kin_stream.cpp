@@ -2,7 +2,8 @@
 // model of gwas_kin_stream.cpp (the plink4r::KinNull of kin_sparse.h: linear, logistic or Cox, with a sparse
 // kinship or with no related sample), streamed in blocks; the genotype matrix is never formed and no table of the
 // results either: the rows of a group of blocks are written to the result file as soon as they are computed, each
-// one the line of the variant in the .bim / .pvar followed by its statistics (ResultText, variant_text.h).
+// one CHR, BP, REF, ALT of the variant as its .bim / .pvar line has them, then its statistics (ResultText,
+// variant_text.h).
 //
 // The null model is the one of the association test, with the same kinship parameter; the exposures are columns
 // of its design. For a variant g (centred, missing call = mean) and the S columns e_0 = 1, e_1, ..., e_{S-1}
@@ -200,14 +201,14 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 }  // namespace
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
-// .bim / .pvar. out: the text file to write: after each line of the .bim / .pvar N, A1_FREQ, the association test of
-// g (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA and SE of G and of each interaction term (the columns of
-// Z = [g, g e_1, ...], named by the columns of E), and the Wald tests of the exposure terms (P_INT) and of g with
-// them (P_JOINT); NA for a variant without statistics (no variation among the samples, or singular) and for a line
-// with more than two alleles, which is not scanned. sample_idx: 0-based file rows of the analysed samples. null:
-// external pointer to the plink4r::KinNull of the analysis samples (in the order of sample_idx), projected.
-// E: n x (S - 1), the n_exp exposures first, then the interaction covariates (columns of the design of the null
-// model, centred or not), with their names. block: variants per thread (0 = from mem_gb).
+// .bim / .pvar. out: the text file to write: after CHR, BP, REF, ALT of each line of the .bim / .pvar ALT_FREQ, N,
+// the association test of g (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA and SE of G and of each interaction term
+// (the columns of Z = [g, g e_1, ...], named by the columns of E), and the Wald tests of the exposure terms (P_INT)
+// and of g with them (P_JOINT); NA for a variant without statistics (no variation among the samples, or singular)
+// and for a line with more than two alleles, which is not scanned. sample_idx: 0-based file rows of the analysed
+// samples. null: external pointer to the plink4r::KinNull of the analysis samples (in the order of sample_idx),
+// projected. E: n x (S - 1), the n_exp exposures first, then the interaction covariates (columns of the design of
+// the null model, centred or not), with their names. block: variants per thread (0 = from mem_gb).
 // [[Rcpp::export]]
 Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
                              const std::string& out, Rcpp::IntegerVector sample_idx, SEXP null,
@@ -238,7 +239,7 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
   const double per_thread = 8.0 * N * (1 + S) + 8.0 * K.nr * S + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
-  std::vector<std::string> statistics = {"N", "A1_FREQ", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
+  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
   {
     const Rcpp::List dn = E.attr("dimnames");
     if (dn.size() != 2 || Rf_isNull(dn[1])) Rcpp::stop("E has no column names");
@@ -286,7 +287,7 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
       double* cc = cbuf[th].data();
       double* AA = abuf[th].data();
       nexp += block_stats(pre, W, nb, cc, AA);
-      double* v = vbuf[th].data();  // A1_FREQ, BETA_MARGINAL, SE_MARGINAL, P_MARGINAL, (BETA, SE) x S, P_INT, P_JOINT
+      double* v = vbuf[th].data();  // ALT_FREQ, BETA_MARGINAL, SE_MARGINAL, P_MARGINAL, (BETA, SE) x S, P_INT, P_JOINT
       long long r = j0 == c0 ? text.first() : static_cast<long long>(F.vi[j0 - 1]) + 1;  // the next file row to write
       for (int s = 0; s < nb; ++s) {
         const long long j = j0 + s;

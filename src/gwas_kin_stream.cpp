@@ -1,8 +1,8 @@
 // gwas_kin_stream_cpp: the kinship route of gwas(): mixed-model association of every biallelic variant of a PGEN or
 // BED with a sparse kinship (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed
 // and no table of the results either: the rows of a group of blocks are written to the result file as soon as they
-// are computed, each one the line of the variant in the .bim / .pvar followed by its statistics (ResultText,
-// variant_text.h).
+// are computed, each one CHR, BP, REF, ALT of the variant as its .bim / .pvar line has them, then its statistics
+// (ResultText, variant_text.h).
 //
 // Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp / reml_tau_cox.cpp /
 // cox_null.cpp (kin_sparse.h), used as
@@ -134,11 +134,11 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 }  // namespace
 
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
-// .bim / .pvar. out: the text file to write: after each line of the .bim / .pvar N, A1_FREQ, BETA, SE, the statistic
-// BETA / SE under the name `statistic` (T or Z) and its normal P; NA for a variant without statistics (no variation
-// among the samples, or A <= 0) and for a line with more than two alleles, which is not scanned. sample_idx: 0-based
-// file rows of the analysed samples. null: external pointer to the plink4r::KinNull of the analysis samples (in the
-// order of sample_idx), projected. block: variants per thread (0 = from mem_gb).
+// .bim / .pvar. out: the text file to write: after CHR, BP, REF, ALT of each line of the .bim / .pvar ALT_FREQ, N,
+// BETA, SE, the statistic BETA / SE under the name `statistic` (T or Z) and its normal P; NA for a variant without
+// statistics (no variation among the samples, or A <= 0) and for a line with more than two alleles, which is not
+// scanned. sample_idx: 0-based file rows of the analysed samples. null: external pointer to the plink4r::KinNull of
+// the analysis samples (in the order of sample_idx), projected. block: variants per thread (0 = from mem_gb).
 // [[Rcpp::export]]
 Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
                               const std::string& out, const std::string& statistic, Rcpp::IntegerVector sample_idx,
@@ -168,7 +168,7 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, con
   const double per_thread = 8.0 * N + 8.0 * K.nr + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
-  plink4r::ResultText text(variant_text, bed, out, {"N", "A1_FREQ", "BETA", "SE", statistic, "P"});
+  plink4r::ResultText text(variant_text, bed, out, {"ALT_FREQ", "N", "BETA", "SE", statistic, "P"});
   std::vector<Worker> wk(T);
   std::vector<std::vector<double>> cbuf(T), abuf(T), nbuf(T), sbuf(T);
   std::vector<std::string> rows(T);
@@ -207,7 +207,7 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, con
       for (int s = 0; s < nb; ++s) {
         const long long j = j0 + s;
         for (; r < F.vi[j]; ++r) text.row(o, r, 0, nullptr);  // lines with more than two alleles: not scanned
-        double v[5] = {a1_sum[s] / (2 * n_obs[s]), NA_REAL, NA_REAL, NA_REAL, NA_REAL};  // A1_FREQ BETA SE T|Z P
+        double v[5] = {a1_sum[s] / (2 * n_obs[s]), NA_REAL, NA_REAL, NA_REAL, NA_REAL};  // ALT_FREQ BETA SE T|Z P
         if (W.mono[s]) ++n_mono;
         else if (!(AA[s] > 0)) ++n_sing;
         else {

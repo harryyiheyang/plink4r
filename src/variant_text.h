@@ -5,7 +5,8 @@
 //                  allele_count, variant_fields)
 //   what a scan takes from them: allele_counts (a PGEN needs the number of alleles of every variant before any
 //   genotype is read), read_variant_table (chromosome, position and alleles of every line, for a scan that places
-//   windows) and ResultText (the result of a scan of every variant: each line as it is, then its statistics).
+//   windows) and ResultText (the result of a scan of every variant: chromosome, position and alleles of each line
+//   as the line has them, then its statistics).
 #ifndef PLINK4R_VARIANT_TEXT_H
 #define PLINK4R_VARIANT_TEXT_H
 
@@ -68,8 +69,8 @@ class TextLines {
   bool eof_ = false;
 };
 
-// The variant lines of a .bim (six columns, no header) or of a .pvar (its "##" lines are passed over and its
-// "#CHROM" line is kept as header()).
+// The variant lines of a .bim (six columns, no header) or of a .pvar (its "##" lines and its "#CHROM" line are
+// passed over).
 class VariantLines {
  public:
   VariantLines(const std::string& path, bool bim) : in_(path) {
@@ -77,18 +78,16 @@ class VariantLines {
     const char* s; std::size_t len;
     while (in_.next(s, len)) {
       if (len >= 2 && s[0] == '#' && s[1] == '#') continue;
-      if (len >= 6 && std::memcmp(s, "#CHROM", 6) == 0) { header_.assign(s, len); return; }
+      if (len >= 6 && std::memcmp(s, "#CHROM", 6) == 0) return;
       break;
     }
     Rcpp::stop("No #CHROM line before the variants of " + path);
   }
-  const std::string& header() const { return header_; }
   const std::string& path() const { return in_.path(); }
   bool next(const char*& s, std::size_t& len) { return in_.next(s, len); }
 
  private:
   TextLines in_;
-  std::string header_;
 };
 
 // The fields of a variant line that a scan reads, by their place (fields are separated by tabs or blanks):
@@ -240,23 +239,25 @@ inline void put_count(std::string& o, long long v) {
   o.append(b, std::to_chars(b, b + 24, v).ptr);
 }
 
-// The result of a scan of every variant of a file, as text: each line of the .bim / .pvar as it is, then the
-// statistics of that variant, tab-separated; a variant without statistics has NA in their place. The first line names
-// the columns: the "#CHROM" line of the .pvar, or CHR ID CM POS A1 A2 for a .bim (which has none), then the
-// statistics. The blanks between the fields of a .bim line are written as tabs.
+// The result of a scan of every variant of a file, as text: one row per line of the .bim / .pvar, in file order,
+// tab-separated. A row is CHR, BP, REF, ALT, the four fields of the line as they are written there (nothing is
+// recoded; ALT is the counted allele, column 5 of a .bim), then the statistics of the variant; a variant without
+// statistics has NA in their place. The first line names the columns.
 //
-// The scan goes through the file in order. Before a group of threads computes, load() brings in the lines up to the
-// group's last variant; every thread then writes the rows of its own variants into a text of its own (row()), and
-// write() puts those texts into the file in order. finish() writes the lines after the last variant tested.
+// The scan goes through the file in order. Before a group of threads computes, load() brings in the fields of the
+// lines up to the group's last variant; every thread then writes the rows of its own variants into a text of its
+// own (row()), and write() puts those texts into the file in order. finish() writes the lines after the last
+// variant tested.
 class ResultText {
  public:
+  // statistics: the names of the columns after ALT; the second of them is a count (row()).
   ResultText(const std::string& text_path, bool bim, const std::string& out_path,
              const std::vector<std::string>& statistics)
       : in_(text_path, bim), bim_(bim), n_stat_(static_cast<int>(statistics.size())), out_path_(out_path) {
     out_ = std::fopen(out_path.c_str(), "wb");
     if (!out_) Rcpp::stop("Cannot write " + out_path);
     std::setvbuf(out_, nullptr, _IOFBF, std::size_t(1) << 22);
-    std::string h = bim ? std::string("CHR\tID\tCM\tPOS\tA1\tA2") : in_.header();
+    std::string h = "CHR\tBP\tREF\tALT";
     for (const std::string& s : statistics) { h += '\t'; h += s; }
     h += '\n';
     put(h);
@@ -267,7 +268,7 @@ class ResultText {
   ResultText(const ResultText&) = delete;
   ResultText& operator=(const ResultText&) = delete;
 
-  // Brings the lines of the file rows first() .. row_end - 1 into memory, in place of those held before.
+  // Brings the fields of the file rows first() .. row_end - 1 into memory, in place of those held before.
   void load(long long row_end) {
     first_ = next_;
     text_.clear(); off_.clear();
@@ -277,22 +278,24 @@ class ResultText {
         Rcpp::stop("%s has %.0f variant lines, fewer than the genotype file has variants.", in_.path().c_str(),
                    static_cast<double>(next_));
       off_.push_back(text_.size());
-      append_line(text_, s, len);
+      append_fields(text_, s, len);
       ++next_;
     }
     off_.push_back(text_.size());
   }
   long long first() const { return first_; }
   long long end() const { return next_; }
-  // Appends the row of file row r (loaded) to o: its line, then n and the statistics v, or NA for each when v is null.
+  // Appends the row of file row r (loaded) to o: its four fields, then the statistics: v[0], the count n, v[1],
+  // v[2], ...; NA for each when v is null.
   void row(std::string& o, long long r, long long n, const double* v) const {
     const std::size_t i = static_cast<std::size_t>(r - first_);
     o.append(text_.data() + off_[i], off_[i + 1] - off_[i]);
     if (!v) {
       for (int k = 0; k < n_stat_; ++k) o += "\tNA";
     } else {
+      o += '\t'; put_number(o, v[0]);
       o += '\t'; put_count(o, n);
-      for (int k = 0; k + 1 < n_stat_; ++k) { o += '\t'; put_number(o, v[k]); }
+      for (int k = 1; k + 1 < n_stat_; ++k) { o += '\t'; put_number(o, v[k]); }
     }
     o += '\n';
   }
@@ -303,8 +306,8 @@ class ResultText {
     std::string o;
     const char* s; std::size_t len;
     while (take(s, len)) {
+      append_fields(o, s, len);
       ++next_;
-      append_line(o, s, len);
       for (int k = 0; k < n_stat_; ++k) o += "\tNA";
       o += '\n';
       if (o.size() > (std::size_t(1) << 20)) { put(o); o.clear(); }
@@ -325,19 +328,15 @@ class ResultText {
     while (in_.next(s, len)) if (len) return true;
     return false;
   }
-  void append_line(std::string& o, const char* s, std::size_t len) const {
-    if (!bim_ || !std::memchr(s, ' ', len)) { o.append(s, len); return; }  // tab-separated already
-    const char* p = s; const char* const e = s + len;
-    bool any = false;
-    while (p < e) {
-      while (p < e && (*p == '\t' || *p == ' ')) ++p;
-      if (p == e) break;
-      const char* b = p;
-      while (p < e && *p != '\t' && *p != ' ') ++p;
-      if (any) o += '\t';
-      o.append(b, static_cast<std::size_t>(p - b));
-      any = true;
-    }
+  void append_fields(std::string& o, const char* s, std::size_t len) const {  // of variant line next_ + 1
+    VariantFields f;
+    if (!variant_fields(s, len, bim_, f))
+      Rcpp::stop("Line %.0f of the variants of %s has fewer than %d fields.", static_cast<double>(next_ + 1),
+                 in_.path().c_str(), bim_ ? 6 : 5);
+    o.append(f.chr, f.chr_n); o += '\t';
+    o.append(f.pos, f.pos_n); o += '\t';
+    o.append(f.ref, f.ref_n); o += '\t';
+    o.append(f.alt, f.alt_n);
   }
   void put(const std::string& s) {
     if (s.empty()) return;

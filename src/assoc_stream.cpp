@@ -1,7 +1,8 @@
 // gwas_stream_cpp, gxe_stream_cpp: single-trait association (GWAS, S = 1) and G x E (S > 1) of every biallelic
 // variant of a PGEN or BED, streamed in blocks; the genotype matrix is never formed and no table of the results
-// either: the rows of a group of blocks are written to the result file as soon as they are computed, each one the
-// line of the variant in the .bim / .pvar followed by its statistics (ResultText, variant_text.h).
+// either: the rows of a group of blocks are written to the result file as soon as they are computed, each one
+// CHR, BP, REF, ALT of the variant as its .bim / .pvar line has them, then its statistics (ResultText,
+// variant_text.h).
 //
 // Ported from the StreamBlock scheme of GEM 2 (GPL >= 3; Hong, Chen, Pham, Pan, Salehi Nasab). For variant i let
 // Z = [g, g e_1, ..., g e_{S-1}] (n x S), X the covariates (n x k, columns 0..S-1 are the intercept and the e_j),
@@ -247,8 +248,9 @@ struct Run {
   double df = 0, df_m = 0;
 };
 
-// The scan of every biallelic variant of the file, written as it goes (ResultText of variant_text.h): each line of
-// the .bim / .pvar, then N and the statistics that `row` puts into v for the variant (statistics.size() - 1 numbers).
+// The scan of every biallelic variant of the file, written as it goes (ResultText of variant_text.h): CHR, BP, REF,
+// ALT of each line of the .bim / .pvar, then the columns `statistics`: ALT_FREQ, N and what else `row` puts into v
+// for the variant (v: statistics.size() - 1 numbers, ALT_FREQ first; N is not one of them).
 // path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
 // .bim / .pvar. out: the text file to write. sample_idx: 0-based file rows of the analysed samples. X: n x kX
 // covariates, columns 0..S-1 = intercept and the interaction variables (the n_exp exposures first, then the
@@ -398,14 +400,15 @@ Rcpp::List scan(const std::string& path, bool bed, int n_raw, const std::string&
 
 }  // namespace
 
-// The association of one trait with every biallelic variant of the file (S = 1): after each line of the .bim / .pvar
-// N, A1_FREQ, BETA, SE, T (linear) or Z (logistic), P, and SE_ROBUST, P_ROBUST with robust. Arguments as scan().
+// The association of one trait with every biallelic variant of the file (S = 1): after CHR, BP, REF, ALT of each
+// line of the .bim / .pvar ALT_FREQ, N, BETA, SE, T (linear) or Z (logistic), P, and SE_ROBUST, P_ROBUST with robust.
+// Arguments as scan().
 // [[Rcpp::export]]
 Rcpp::List gwas_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
                            const std::string& out, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X,
                            Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust, int threads, double mem_gb,
                            int block) {
-  std::vector<std::string> statistics = {"N", "A1_FREQ", "BETA", "SE", w.size() ? "Z" : "T", "P"};
+  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA", "SE", w.size() ? "Z" : "T", "P"};
   if (robust) { statistics.push_back("SE_ROBUST"); statistics.push_back("P_ROBUST"); }
   return scan(path, bed, n_raw, variant_text, out, statistics, sample_idx, X, 1, 0, resid, w, robust, threads, mem_gb,
               block, [](const Run& g, const Stat& s, double* v) {
@@ -416,18 +419,18 @@ Rcpp::List gwas_stream_cpp(const std::string& path, bool bed, int n_raw, const s
               });
 }
 
-// Gene-environment interaction of one trait with every biallelic variant of the file: after each line of the
-// .bim / .pvar N, A1_FREQ, the marginal test of G (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA and SE of G and of
-// each interaction term (terms: the names of columns 1..S-1 of X), and the Wald tests of the exposure interactions
-// (P_INT) and of G with them (P_JOINT); with robust the robust standard errors and tests beside them. Arguments as
-// scan().
+// Gene-environment interaction of one trait with every biallelic variant of the file: after CHR, BP, REF, ALT of
+// each line of the .bim / .pvar ALT_FREQ, N, the marginal test of G (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA
+// and SE of G and of each interaction term (terms: the names of columns 1..S-1 of X), and the Wald tests of the
+// exposure interactions (P_INT) and of G with them (P_JOINT); with robust the robust standard errors and tests
+// beside them. Arguments as scan().
 // [[Rcpp::export]]
 Rcpp::List gxe_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
                           const std::string& out, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, int S,
                           int n_exp, Rcpp::CharacterVector terms, Rcpp::NumericVector resid, Rcpp::NumericVector w,
                           bool robust, int threads, double mem_gb, int block) {
   if (terms.size() != S - 1) Rcpp::stop("terms do not match S");
-  std::vector<std::string> statistics = {"N", "A1_FREQ", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
+  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
   if (robust) { statistics.push_back("SE_MARGINAL_ROBUST"); statistics.push_back("P_MARGINAL_ROBUST"); }
   for (int q = 0; q < S; ++q) {
     const std::string nm = q == 0 ? std::string("G") : "GxE_" + Rcpp::as<std::string>(terms[q - 1]);

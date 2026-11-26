@@ -24,16 +24,15 @@
 #' them, write that part to a file of its own first (e.g. with PLINK).
 #'
 #' The result is written to the text file `out` as the scan goes; R holds nothing of it and reads no line of the
-#' `.bim` / `.pvar`. That file is the skeleton of the result: every line of it is written as it is, in file order,
-#' followed by the statistics of its variant (tab-separated), so the columns of the variant file (chromosome, ID,
-#' position, alleles, and whatever else a `.pvar` holds) are in the result without having been read. The first line
-#' names the columns: the `#CHROM` line of the `.pvar`, or `CHR ID CM POS A1 A2` for a `.bim` (which has none),
-#' then the statistics: `N` (non-missing calls among the analysed samples), `A1_FREQ` (frequency of the counted
-#' allele: ALT of a PGEN, .bim column 5 of a BED), `BETA`, `SE`, `T` (linear) or `Z` (logistic, Cox), `P`, and
-#' `SE_ROBUST`, `P_ROBUST` when `robust`. A variant with no variation among the analysed samples or a singular
-#' `Z'WZ` has `NA` after `A1_FREQ`; a line with more than two alleles (PGEN) is not tested and has `NA` throughout.
-#' The file has one row per line of the `.bim` / `.pvar`, in its order, so any other table of the same variants can
-#' be pasted beside it. Numbers are written with the digits that read back as the same double.
+#' `.bim` / `.pvar`. The file is tab-separated, with one row per line of the `.bim` / `.pvar`, in its order. A row
+#' is `CHR`, `BP`, `REF`, `ALT`, the chromosome, position and alleles of the line as they are written there (nothing
+#' is recoded, and no other column of the line is read; `ALT` is the counted allele: ALT of a PGEN, .bim column 5
+#' of a BED), then `ALT_FREQ` (frequency of the counted allele), `N` (non-missing calls among the analysed samples),
+#' `BETA`, `SE`, `T` (linear) or `Z` (logistic, Cox), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. A variant with
+#' no variation among the analysed samples or a singular `Z'WZ` has `NA` after `N`; a line with more than two
+#' alleles (PGEN) is not tested and has `NA` after `ALT`. As row i of the file is line i of the `.bim` / `.pvar`,
+#' any other column of the variants (their IDs, for one) can be pasted beside it. Numbers are written with the
+#' digits that read back as the same double.
 #'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
@@ -116,7 +115,8 @@ gwas <- function(formula, data, out, pfile = NULL, bfile = NULL, family = c("gau
 #' covariates (numeric ones and indicators alike), so `BETA_G` is the effect of `g` at their mean; the
 #' interaction estimates do not change.
 #'
-#' Written per variant to `out`, after its line of the `.bim` / `.pvar` and `N`, `A1_FREQ` as [gwas()] writes them: the marginal effect from the model without interactions (`BETA_MARGINAL`,
+#' Written per variant to `out`, after `CHR`, `BP`, `REF`, `ALT`, `ALT_FREQ` and `N` as [gwas()] writes them: the
+#' marginal effect from the model without interactions (`BETA_MARGINAL`,
 #' `SE_MARGINAL`, `P_MARGINAL`, as [gwas()]); the main effect `BETA_G`, `SE_G` and every interaction
 #' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the Wald test
 #' of all exposure interactions (`df` = number of exposure terms), and `P_JOINT`, of `g` and those interactions
