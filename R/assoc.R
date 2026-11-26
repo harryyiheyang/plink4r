@@ -1,6 +1,6 @@
 #' Genome-wide association of one trait (linear, logistic or Cox)
 #'
-#' Tests every selected variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
+#' Tests every biallelic variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
 #' `formula + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
 #' never formed: the null model `formula` is fitted once with [stats::glm()] (which calls glm.fit), and its numeric design (`x = TRUE`: factors and characters expanded by base R with the current contrasts) is the covariate matrix used below; then variants are streamed
 #' from the file in blocks whose size follows from `mem_gb` and reduced in C++ to a few numbers each (the
@@ -20,7 +20,19 @@
 #' Common variants: every test here is a large-sample test (normal or chi-square reference), meant for variants
 #' with a minor allele frequency above 0.01. For the logistic and Cox models the reference also needs minor
 #' alleles among the cases (events), about `2 x cases x MAF >= 30`, which MAF > 0.01 gives from 1,500 cases on.
-#' Variants are not filtered here: give the variants to test in `snp_vec`.
+#' Variants are not filtered here: every biallelic variant of the file is tested, in file order. To test a part of
+#' them, write that part to a file of its own first (e.g. with PLINK).
+#'
+#' The result is written to the text file `out` as the scan goes; R holds nothing of it and reads no line of the
+#' `.bim` / `.pvar`. The file is tab-separated, with one row per line of the `.bim` / `.pvar`, in its order. A row
+#' is `CHR`, `BP`, `REF`, `ALT`, the chromosome, position and alleles of the line as they are written there (nothing
+#' is recoded, and no other column of the line is read; `ALT` is the counted allele: ALT of a PGEN, .bim column 5
+#' of a BED), then `ALT_FREQ` (frequency of the counted allele), `N` (non-missing calls among the analysed samples),
+#' `BETA`, `SE`, `T` (linear) or `Z` (logistic, Cox), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. A variant with
+#' no variation among the analysed samples or a singular `Z'WZ` has `NA` after `N`; a line with more than two
+#' alleles (PGEN) is not tested and has `NA` after `ALT`. As row i of the file is line i of the `.bim` / `.pvar`,
+#' any other column of the variants (their IDs, for one) can be pasted beside it. Numbers are written with the
+#' digits that read back as the same double.
 #'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
@@ -29,6 +41,7 @@
 #' @param data data.frame with one row per sample: `id_col` and the columns named in `formula`. Samples with a
 #'   missing value in any of them, or not in the genotype file, are left out. A covariate that is not finite after
 #'   its transformation (e.g. `log(0)`) in one of the analysed samples is an error.
+#' @param out Path of the text file to write (replaced when it exists); read it with `data.table::fread(out)`.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
 #' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards). Cox: the
@@ -42,7 +55,6 @@
 #'   intercepts as the baseline, the kinship correlation between the records of relatives; see [reml_tau()]), and
 #'   a variant is tested in that model of the records.
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
-#' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
 #' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
 #'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the null model accounts for the
@@ -54,8 +66,8 @@
 #'   squares `BETA = g' P y / g' P g`, `SE = (g' P g)^-1/2` (exact, no GRAMMAR-GAMMA approximation), `T` or `Z` =
 #'   `BETA / SE` and its normal `P`. Samples without a listed relative enter as in the ordinary test; with no
 #'   related pair among the analysed samples the logistic result is that of `kinship = NULL`, and the linear one
-#'   differs only by using the null-model variance and the normal distribution. The attribute `info` then also
-#'   holds `tau`, `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`.
+#'   differs only by using the null-model variance and the normal distribution. The value then also holds `tau`,
+#'   `s2e`, `h2`, `lrt`, `p_lrt`, `n_related`, `pairs`.
 #' @param para With `kinship`: named list overriding [reml_tau_para()].
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param mem_gb Memory budget in GB that sets the block size; 0 takes it from [plink4r_resources()].
@@ -63,43 +75,36 @@
 #'   its block of genotypes to doubles 2048 samples at a time, and a few hundred variants keep that within the
 #'   cache: 256 took 0.4 to 0.6 of the time of 4096 for 1,000 and 20,000 samples (linear, logistic, kinship, Cox;
 #'   0.5 to 0.65 for [gxe()]).
-#' @return data.table with one row per variant: `CHR`, `POS`, `ID`, `A1` (counted allele: ALT of a PGEN, .bim
-#'   column 5 of a BED), `A2`, `N` (non-missing calls), `A1_FREQ`, `BETA`, `SE`, `T` (linear) or `Z`
-#'   (logistic), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. Variants with no variation among the analysed
-#'   samples (`monomorphic` in `info`) or a singular `Z'WZ` (`singular`) have `NA` statistics. Attribute `info`:
-#'   samples, covariate rank, block size, threads, memory budget, SIMD set, variants recomputed by explicit
-#'   projection, monomorphic and singular counts, skipped multiallelic variants.
+#' @return Invisibly, a list: `out` (the file), `variants` (its rows: the lines of the `.bim` / `.pvar`), `tested`
+#'   (the biallelic ones), `bytes` (size of the file), and the run: samples, covariate rank, whether the null model
+#'   converged, `df` (of the t distribution of the linear model), block size, threads, memory budget, SIMD set,
+#'   whether dosages were read, variants recomputed by explicit projection, `monomorphic` and `singular` (variants
+#'   without statistics) and `multiallelic` (lines not tested).
 #' @export
-gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
-                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
+gwas <- function(formula, data, out, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
+                 id_col = "IID", robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
                  kinship = NULL, para = list()) {
   family <- match.arg(family)
+  out <- .result_path(out)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (robust) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gwas_kinship(formula, data, pfile, bfile, kinship, family, id_col, snp_vec, threads, mem_gb, block,
-                         para))
+    return(.gwas_kinship(formula, data, out, pfile, bfile, kinship, family, id_col, threads, mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
-  r <- .assoc_run(formula, data, pfile, bfile, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
-                  robust, center = FALSE, threads, mem_gb, block)
-  res <- r$res; out <- r$out
-  stat <- if (family == "gaussian") "T" else "Z"
-  out[, `:=`(BETA = res$beta[, 1L], SE = res$se[, 1L])]
-  out[, (stat) := BETA / SE]
-  out[, P := if (family == "gaussian") 2 * stats::pt(-abs(get(stat)), res$df) else 2 * stats::pnorm(-abs(get(stat)))]
-  if (robust) {
-    out[, SE_ROBUST := res$se_robust[, 1L]]
-    out[, P_ROBUST := 2 * stats::pnorm(-abs(BETA / SE_ROBUST))]
-  }
-  data.table::setattr(out, "info", r$info)
-  out[]
+  gf <- .geno_files(pfile, bfile)
+  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
+  nl <- .assoc_null(formula, data, gf$iid, exposure = NULL, int_covar = NULL, family, id_col, robust, center = FALSE,
+                    threads, mem_gb)
+  res <- gwas_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, nl$srow, nl$X, nl$resid, nl$w, robust,
+                         nl$threads, nl$mem_gb, as.integer(block))
+  invisible(.assoc_value(out, nl, res))
 }
 
 #' Gene-environment interaction of one trait (linear, logistic or Cox)
 #'
-#' For every selected variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
+#' For every biallelic variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
 #' (`formula`, which contains the exposures and interaction covariates) and the same streaming as [gwas()]. The
 #' null model is the one of [gwas()] called with the same `formula`, `family`, `kinship` and `para`: without
 #' `kinship` the linear or logistic fit of [stats::glm()] (design taken from the fit); with `kinship`, and for the
@@ -110,7 +115,8 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
 #' covariates (numeric ones and indicators alike), so `BETA_G` is the effect of `g` at their mean; the
 #' interaction estimates do not change.
 #'
-#' Reported per variant: the marginal effect from the model without interactions (`BETA_MARGINAL`,
+#' Written per variant to `out`, after `CHR`, `BP`, `REF`, `ALT`, `ALT_FREQ` and `N` as [gwas()] writes them: the
+#' marginal effect from the model without interactions (`BETA_MARGINAL`,
 #' `SE_MARGINAL`, `P_MARGINAL`, as [gwas()]); the main effect `BETA_G`, `SE_G` and every interaction
 #' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the Wald test
 #' of all exposure interactions (`df` = number of exposure terms), and `P_JOINT`, of `g` and those interactions
@@ -134,69 +140,72 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
 #' @param int_covar Names of interaction covariates (adjusted for, not tested), terms of `formula`, or `NULL`.
 #' @param center Centre the exposures and interaction covariates.
 #' @param robust Linear model without `kinship` only: add sandwich standard errors (default `TRUE` there).
-#' @return data.table, one row per variant, as described above; attribute `info` as [gwas()], with the columns
-#'   of the design used as `exposure_terms` and `int_covar_terms`.
+#' @return Invisibly, a list as that of [gwas()], with `df_marginal` (of the t distribution of `P_MARGINAL`, linear
+#'   model) and the columns of the design used as `exposure_terms` and `int_covar_terms`.
 #' @export
-gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile = NULL,
+gxe <- function(formula, data, exposure, out, int_covar = NULL, pfile = NULL, bfile = NULL,
                 family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
+                threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
   family <- match.arg(family)
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
+  out <- .result_path(out)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (isTRUE(robust)) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gxe_kinship(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center, snp_vec,
+    return(.gxe_kinship(formula, data, exposure, out, int_covar, pfile, bfile, kinship, family, id_col, center,
                         threads, mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   if (is.null(robust)) robust <- family == "gaussian"
-  r <- .assoc_run(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust, center,
-                  threads, mem_gb, block)
-  res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp
-  lin <- family == "gaussian"
-  pz <- function(b, s) if (lin) 2 * stats::pt(-abs(b / s), res$df_marginal) else 2 * stats::pnorm(-abs(b / s))
-  out[, `:=`(BETA_MARGINAL = res$beta_marginal, SE_MARGINAL = res$se_marginal)]
-  out[, P_MARGINAL := pz(BETA_MARGINAL, SE_MARGINAL)]
-  if (robust) {
-    out[, SE_MARGINAL_ROBUST := res$se_marginal_robust]
-    out[, P_MARGINAL_ROBUST := 2 * stats::pnorm(-abs(BETA_MARGINAL / SE_MARGINAL_ROBUST))]
-  }
-  nm <- c("G", paste0("GxE_", terms))
-  for (q in seq_along(nm)) {
-    out[, (paste0("BETA_", nm[q])) := res$beta[, q]]
-    out[, (paste0("SE_", nm[q])) := res$se[, q]]
-    if (robust) out[, (paste0("SE_ROBUST_", nm[q])) := res$se_robust[, q]]
-  }
-  out[, `:=`(P_INT = stats::pchisq(res$chisq_int, ne, lower.tail = FALSE),
-             P_JOINT = stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE))]
-  if (robust)
-    out[, `:=`(P_INT_ROBUST = stats::pchisq(res$chisq_int_robust, ne, lower.tail = FALSE),
-               P_JOINT_ROBUST = stats::pchisq(res$chisq_joint_robust, ne + 1L, lower.tail = FALSE))]
-  data.table::setattr(out, "info", c(r$info, list(exposure_terms = terms[seq_len(ne)],
-                                                  int_covar_terms = terms[-seq_len(ne)])))
-  out[]
+  gf <- .geno_files(pfile, bfile)
+  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
+  nl <- .assoc_null(formula, data, gf$iid, exposure, int_covar, family, id_col, robust, center, threads, mem_gb)
+  res <- gxe_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, nl$srow, nl$X, nl$S, nl$n_exp, nl$terms,
+                        nl$resid, nl$w, robust, nl$threads, nl$mem_gb, as.integer(block))
+  invisible(c(.assoc_value(out, nl, res),
+              list(df_marginal = res$df_marginal, exposure_terms = nl$terms[seq_len(nl$n_exp)],
+                   int_covar_terms = nl$terms[-seq_len(nl$n_exp)])))
 }
 
-# The genotype file of an association run, from geno_file(): its variants (var), sample IDs (iid), path, the file
-# rows of the biallelic variants to test (vrow), and the multiallelic ones left out: their file rows (multi) and their
-# IDs (skipped). With id = FALSE the ID column is not read: var has none, skipped is NULL, snp_vec must be NULL.
-.geno_variants <- function(pfile, bfile, snp_vec, id = TRUE) {
+# The path of the result file of gwas() / gxe(), checked.
+.result_path <- function(out) {
+  if (missing(out) || !is.character(out) || length(out) != 1L || is.na(out) || !nzchar(out))
+    stop("out must be the path of the text file to write.", call. = FALSE)
+  if (!dir.exists(dirname(out))) stop("No such directory: ", dirname(out), call. = FALSE)
+  path.expand(out)
+}
+
+# The value of gwas() / gxe() without kinship: the file and the run (nl: .assoc_null, res: the C++ stream).
+.assoc_value <- function(out, nl, res) {
+  list(out = out, variants = res$variants, tested = res$tested, bytes = res$bytes, samples = nl$n,
+       covariate_rank = res$rank, null_converged = nl$converged, df = res$df, block = res$block,
+       threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
+       explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
+       multiallelic = res$variants - res$tested)
+}
+
+# The files of an association run: the genotype file (path; bed = whether a BED), its variant text, which the compiled
+# code reads (text: the .bim, or the .pvar; a .pvar.zst is expanded into a temporary file, tmp, which the caller
+# removes), and the sample IDs in file order (iid). R reads no line of the variant text.
+.geno_files <- function(pfile, bfile) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = id)
-  v <- gf$variants
-  var <- data.table::data.table(CHR = v$chr, POS = v$pos, ID = v$id, A1 = v$a1, A2 = v$a2, allele_ct = v$allele_ct)
-  iid <- gf$samples$iid
-  path <- gf$path
-  vrow <- if (is.null(snp_vec)) seq_len(nrow(var)) else {
-    i <- match(as.character(snp_vec), var$ID)
-    if (anyNA(i)) warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped.", call. = FALSE)
-    sort(unique(i[!is.na(i)]))
+  if (!is.null(bfile)) {
+    bed <- .geno_bed_path(bfile)
+    base <- sub("\\.bed$", "", bed)
+    for (f in paste0(base, c(".bim", ".fam"))) if (!file.exists(f)) stop("File not found: ", f, call. = FALSE)
+    fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, select = 2L, colClasses = "character")
+    return(list(path = bed, bed = TRUE, text = paste0(base, ".bim"), tmp = NULL, iid = fam[[1L]]))
   }
-  multi <- vrow[var$allele_ct[vrow] > 2L]
-  vrow <- vrow[var$allele_ct[vrow] <= 2L]
-  if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
-  list(var = var, iid = iid, path = path, vrow = vrow, skipped = var$ID[multi], multi = multi)
+  files <- .geno_pgen_files(pfile)
+  pvar <- paste0(files$prefix, ".pvar")
+  tmp <- NULL
+  if (!file.exists(pvar)) {
+    if (!file.exists(paste0(pvar, ".zst"))) stop("no .pvar or .pvar.zst for ", files$prefix, call. = FALSE)
+    pvar <- tmp <- .zst_expand(paste0(pvar, ".zst"))
+  }
+  list(path = files$pgen, bed = FALSE, text = normalizePath(pvar, winslash = "/"), tmp = tmp,
+       iid = .psam_ids(files$prefix))
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
@@ -265,13 +274,13 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   list(d = d, srow = srow, y = y, status = status)
 }
 
-# Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
-.assoc_run <- function(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust,
-                       center, threads, mem_gb, block) {
+# Shared part of gwas() and gxe() without kinship: the analysis samples (iid: the sample IDs of the genotype file),
+# the design and the null model, as the C++ streams take them: X (columns: intercept, exposures, interaction
+# covariates, the rest), S (1 + interaction columns), n_exp, the names of the interaction columns (terms), the
+# null residual, the weights of a logistic null, and the 0-based file rows of the samples (srow).
+.assoc_null <- function(formula, data, iid, exposure, int_covar, family, id_col, robust, center, threads, mem_gb) {
   if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
-  var <- gv$var; iid <- gv$iid; path <- gv$path; vrow <- gv$vrow; skipped <- gv$skipped
   sm <- .pheno_samples(as.data.frame(data), formula, family, id_col, iid)
   d <- sm$d; srow <- sm$srow; y <- sm$y
   n <- nrow(d)
@@ -308,15 +317,6 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   resid <- y - mu
   w <- if (family == "binomial") mu * (1 - mu) else numeric(0)
 
-  res <- assoc_stream_cpp(path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
-                          as.integer(srow - 1L), X, S, length(ie), resid, w, robust, threads, mem_gb,
-                          as.integer(block))
-  out <- var[vrow, list(CHR, POS, ID, A1, A2)]
-  out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs))]
-  info <- list(samples = n, covariate_rank = res$rank, null_converged = fit$converged, block = res$block,
-               threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
-               explicit_projection = res$explicit, monomorphic = sum(res$status == 1L),
-               singular = sum(res$status == 2L),
-               skipped_multiallelic = skipped)
-  list(res = res, out = out, info = info, terms = terms, n_exp = length(ie))
+  list(X = X, S = S, n_exp = length(ie), terms = terms, resid = resid, w = w, srow = as.integer(srow - 1L), n = n,
+       converged = fit$converged, threads = threads, mem_gb = mem_gb)
 }

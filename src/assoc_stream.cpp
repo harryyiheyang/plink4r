@@ -1,5 +1,8 @@
-// assoc_stream_cpp: single-trait association (GWAS, S = 1) and G x E (S > 1) of every selected variant of a
-// PGEN or BED, streamed in blocks; the genotype matrix is never formed.
+// gwas_stream_cpp, gxe_stream_cpp: single-trait association (GWAS, S = 1) and G x E (S > 1) of every biallelic
+// variant of a PGEN or BED, streamed in blocks; the genotype matrix is never formed and no table of the results
+// either: the rows of a group of blocks are written to the result file as soon as they are computed, each one
+// CHR, BP, REF, ALT of the variant as its .bim / .pvar line has them, then its statistics (ResultText,
+// variant_text.h).
 //
 // Ported from the StreamBlock scheme of GEM 2 (GPL >= 3; Hong, Chen, Pham, Pan, Salehi Nasab). For variant i let
 // Z = [g, g e_1, ..., g e_{S-1}] (n x S), X the covariates (n x k, columns 0..S-1 are the intercept and the e_j),
@@ -12,7 +15,7 @@
 // to doubles kScanRowChunk rows at a time from the 2-bit codes (hard calls) or 0.01 dosages, so a thread holds
 // b variants as n/4 (or 2n) bytes each plus 2 x kScanRowChunk x b doubles. A variant whose A_jj lost more than
 // 1 - 1/kKappaMax of Z_j'W Z_j to the subtraction (strong collinearity with the covariates) is recomputed by
-// explicit projection. The block size b follows from mem_gb (shared L1, L2, V, outputs; then per thread).
+// explicit projection. The block size b follows from mem_gb (shared L1, L2, V; then per thread).
 // Products: la().dgemm_tn (SIMD dispatch of la_kernel.cpp); small S x S algebra: Eigen.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
@@ -25,6 +28,7 @@
 #include <omp.h>
 #endif
 #include "la_dispatch.h"
+#include "p_value.h"
 #include "scan_block.h"
 #include "resources.h"
 
@@ -33,6 +37,7 @@ namespace {
 using plink4r::kScanRowChunk;
 constexpr double kKappaMax = 1e4;        // explicit projection when Z_j'WZ_j / A_jj exceeds this
 constexpr double kRankTol = 1.4901161193847656e-08;  // sqrt(DBL_EPSILON), as mgcv
+constexpr double kRowBytes = 512.0;      // text of a variant while its block is written, for the memory budget
 
 
 inline int pair_index(int S, int j, int l) {
@@ -226,131 +231,227 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA, doub
   return nexp;
 }
 
-}  // namespace
+// What the scan computes of one variant; NaN where a statistic was not computed (no variation among the samples, or
+// a singular Z'WZ, in which case the marginal statistics are still there).
+struct Stat {
+  double n_obs = 0, a1_sum = 0;
+  const double* beta = nullptr;     // S: the columns of Z = [g, g e_1, ...]
+  const double* se = nullptr;
+  const double* se_rob = nullptr;
+  double beta_m = NA_REAL, se_m = NA_REAL, se_m_rob = NA_REAL;  // G alone (the model without the interaction terms)
+  double chi_int = NA_REAL, chi_joint = NA_REAL, chi_int_rob = NA_REAL, chi_joint_rob = NA_REAL;
+};
+// What a row needs of the run.
+struct Run {
+  int S = 1, n_exp = 0;
+  bool logistic = false, robust = false;
+  double df = 0, df_m = 0;
+};
 
-// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
-// var_idx, sample_idx: 0-based file rows. X: n x kX covariates, columns 0..S-1 = intercept and the
-// interaction variables (the n_exp exposures first, then the interaction covariates). resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
-// block: variants per thread (0 = from mem_gb). Returns per variant (rows) the statistics below; beta, se in
-// columns of Z = [g, g e_1, ...]; status 0 ok, 1 monomorphic / all missing.
-// [[Rcpp::export]]
-Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
-                            Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X,
-                            int S, int n_exp, Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust,
-                            int threads, double mem_gb, int block) {
+// The scan of every biallelic variant of the file, written as it goes (ResultText of variant_text.h): CHR, BP, REF,
+// ALT of each line of the .bim / .pvar, then the columns `statistics`: ALT_FREQ, N and what else `row` puts into v
+// for the variant (v: statistics.size() - 1 numbers, ALT_FREQ first; N is not one of them).
+// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
+// .bim / .pvar. out: the text file to write. sample_idx: 0-based file rows of the analysed samples. X: n x kX
+// covariates, columns 0..S-1 = intercept and the interaction variables (the n_exp exposures first, then the
+// interaction covariates). resid: null residual y - mu. w: mu (1 - mu) for a logistic null, empty for linear.
+// block: variants per thread (0 = from mem_gb).
+template <class Row>
+Rcpp::List scan(const std::string& path, bool bed, int n_raw, const std::string& variant_text, const std::string& out,
+                const std::vector<std::string>& statistics, const Rcpp::IntegerVector& sample_idx,
+                const Rcpp::NumericMatrix& X, int S, int n_exp, const Rcpp::NumericVector& resid,
+                const Rcpp::NumericVector& w, bool robust, int threads, double mem_gb, int block, Row row) {
   const int T = plink4r::resolve_threads(threads);
   mem_gb = plink4r::resolve_mem_gb(mem_gb, T);
-  const int p = var_idx.size(), ns = sample_idx.size();
+  const int ns = sample_idx.size();
   if (X.nrow() != ns || resid.size() != ns || (w.size() && w.size() != ns)) Rcpp::stop("X / resid / w do not match");
   if (S < 1 || S > X.ncol()) Rcpp::stop("S out of range");
   if (n_exp < 0 || n_exp > S - 1) Rcpp::stop("n_exp out of range");
   if (robust && w.size()) Rcpp::stop("robust standard errors are for the linear model only");
-  plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
+  const plink4r::FileVariants fv = plink4r::file_variants(path, bed, n_raw, variant_text);
+  plink4r::ScanFile F(path, bed, n_raw, fv.m, fv.allele_ct, fv.rows, sample_idx, T);
   const bool dos = F.dosage;
+  const int p = static_cast<int>(F.vi.size());
 
   Pre pre;
   build_pre(pre, X, S, resid, w, robust);
-  const int k = pre.k, P = pre.P;
+  const int k = pre.k;
   double rr = 0.0;
   for (double v : pre.r) rr += v * v;
+  Run run;
+  run.S = S; run.n_exp = n_exp; run.logistic = pre.logistic; run.robust = robust;
+  run.df = static_cast<double>(ns) - k - S; run.df_m = static_cast<double>(ns) - k - 1;
+  const double df = run.df, df_m = run.df_m;
 
   // block size from the memory budget
   const std::size_t N = ns;
-  const double shared = 8.0 * N * (pre.m1 + pre.m2 + k + S + 4) + 8.0 * p * (4 * S + 2 * S * S + 12) +
-                        8.0 * N * X.ncol() * 2;
+  const double shared = 8.0 * N * (pre.m1 + pre.m2 + k + S + 4) + 8.0 * N * X.ncol() * 2;
   const double per_var = plink4r::ScanBlock::var_bytes(ns, dos) + 16.0 * std::min<int>(kScanRowChunk, ns) +
-                         8.0 * (pre.m1 + pre.m2) + 8.0 * (S + 2 * S * S + 4);
+                         8.0 * (pre.m1 + pre.m2) + 8.0 * (S + 2 * S * S + 4) + kRowBytes;
   const double per_thread = 8.0 * N * (1 + 2 * S) + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
-  // outputs
-  Rcpp::NumericVector nobs(p), asum(p);
-  Rcpp::IntegerVector status(p);
-  Rcpp::NumericMatrix beta(p, S), se(p, S), se_rob(p, robust ? S : 0);
-  Rcpp::NumericVector beta_m(p), se_m(p), se_m_rob(p), chi_int(p), chi_joint(p), chi_int_rob(p), chi_joint_rob(p);
-  std::fill(beta.begin(), beta.end(), NA_REAL); std::fill(se.begin(), se.end(), NA_REAL);
-  std::fill(se_rob.begin(), se_rob.end(), NA_REAL);
-  for (Rcpp::NumericVector* v : {&beta_m, &se_m, &se_m_rob, &chi_int, &chi_joint, &chi_int_rob, &chi_joint_rob})
-    std::fill(v->begin(), v->end(), NA_REAL);
-  const double df = static_cast<double>(ns) - k - S, df_m = static_cast<double>(ns) - k - 1;
-
+  plink4r::ResultText text(variant_text, bed, out, statistics);
+  const std::size_t nv = statistics.size() - 1;
   std::vector<Worker> wk(T);
-  std::vector<std::vector<double>> cbuf(T), abuf(T), bbuf(T);
+  std::vector<std::vector<double>> cbuf(T), abuf(T), bbuf(T), nbuf(T), sbuf(T), qbuf(T), vbuf(T);
+  std::vector<std::string> rows(T);
   for (int t = 0; t < T; ++t) {
     wk[t].init(pre, b, dos);
     cbuf[t].resize(static_cast<std::size_t>(b) * S);
     abuf[t].resize(static_cast<std::size_t>(b) * S * S);
     if (robust) bbuf[t].resize(static_cast<std::size_t>(b) * S * S);
+    nbuf[t].resize(b); sbuf[t].resize(b);
+    qbuf[t].resize(static_cast<std::size_t>(3) * S);
+    vbuf[t].resize(nv);
   }
   std::vector<int> bad(T, -1);
-  double* n_obs = nobs.begin();
-  double* a1_sum = asum.begin();
   int nexp = 0;
+  long long n_mono = 0, n_sing = 0;
 
   for (long long c0 = 0; c0 < p; c0 += static_cast<long long>(b) * T) {
+    const long long c1 = std::min<long long>(p, c0 + static_cast<long long>(b) * T);
+    text.load(static_cast<long long>(F.vi[c1 - 1]) + 1);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp)
+#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp, n_mono, n_sing)
 #endif
     for (int t = 0; t < T; ++t) {
+      std::string& o = rows[t];
+      o.clear();
       const int th = plink4r::thread_id();
       Worker& W = wk[th];
       const long long j0 = c0 + static_cast<long long>(t) * b;
       if (j0 >= p) continue;
       const int nb = static_cast<int>(std::min<long long>(b, p - j0));
+      double* n_obs = nbuf[th].data();
+      double* a1_sum = sbuf[th].data();
       const long long failed = W.read(F, j0, nb, th, n_obs, a1_sum);
       if (failed >= 0) bad[th] = static_cast<int>(failed);
       double* cc = cbuf[th].data();
       double* AA = abuf[th].data();
       double* BB = robust ? bbuf[th].data() : nullptr;
       nexp += block_stats(pre, W, nb, cc, AA, BB);
-      // statistics
+      double* beta = qbuf[th].data();
+      double* se = beta + S;
+      double* se_rob = se + S;
+      double* v = vbuf[th].data();
+      long long r = j0 == c0 ? text.first() : static_cast<long long>(F.vi[j0 - 1]) + 1;  // the next file row to write
       for (int s = 0; s < nb; ++s) {
         const long long j = j0 + s;
-        if (W.mono[s]) { status[j] = 1; continue; }
-        Eigen::Map<const Eigen::MatrixXd> A(AA + static_cast<std::size_t>(s) * S * S, S, S);
-        Eigen::Map<const Eigen::VectorXd> c(cc + static_cast<std::size_t>(s) * S, S);
-        const double a00 = A(0, 0), c0v = c[0];
-        // marginal G (the model without the interaction terms)
-        beta_m[j] = c0v / a00;
-        if (pre.logistic) se_m[j] = std::sqrt(1.0 / a00);
-        else se_m[j] = std::sqrt(std::max(0.0, rr - c0v * c0v / a00) / df_m / a00);
-        if (robust) se_m_rob[j] = std::sqrt(BB[static_cast<std::size_t>(s) * S * S] / (a00 * a00));
-        Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
-        if (ldlt.info() != Eigen::Success) { status[j] = 2; continue; }
-        const Eigen::MatrixXd Ainv = ldlt.solve(Eigen::MatrixXd::Identity(S, S));
-        const Eigen::VectorXd bt = Ainv * c;
-        const double s2 = pre.logistic ? 1.0 : std::max(0.0, rr - c.dot(bt)) / df;
-        const Eigen::MatrixXd Vm = s2 * Ainv;
-        for (int q = 0; q < S; ++q) { beta(j, q) = bt[q]; se(j, q) = std::sqrt(Vm(q, q)); }
-        Eigen::MatrixXd Vr;
-        if (robust) {
-          Eigen::Map<const Eigen::MatrixXd> Bm(BB + static_cast<std::size_t>(s) * S * S, S, S);
-          Vr = Ainv * Bm * Ainv;
-          for (int q = 0; q < S; ++q) se_rob(j, q) = std::sqrt(Vr(q, q));
-        }
-        if (n_exp > 0) {  // Wald tests of the exposure interactions (terms 1..n_exp) and of G with them (0..n_exp)
-          const int ne = n_exp;
-          const Eigen::VectorXd bi = bt.segment(1, ne), bj = bt.head(ne + 1);
-          chi_int[j] = bi.dot(Vm.block(1, 1, ne, ne).ldlt().solve(bi));
-          chi_joint[j] = bj.dot(Vm.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
+        for (; r < F.vi[j]; ++r) text.row(o, r, 0, nullptr);  // lines with more than two alleles: not scanned
+        Stat st;
+        st.n_obs = n_obs[s]; st.a1_sum = a1_sum[s];
+        st.beta = beta; st.se = se; st.se_rob = se_rob;
+        std::fill(beta, beta + 3 * S, NA_REAL);
+        for (;;) {  // the statistics of the variant, as far as they can be computed
+          if (W.mono[s]) { ++n_mono; break; }
+          Eigen::Map<const Eigen::MatrixXd> A(AA + static_cast<std::size_t>(s) * S * S, S, S);
+          Eigen::Map<const Eigen::VectorXd> c(cc + static_cast<std::size_t>(s) * S, S);
+          const double a00 = A(0, 0), c0v = c[0];
+          // marginal G (the model without the interaction terms)
+          st.beta_m = c0v / a00;
+          if (pre.logistic) st.se_m = std::sqrt(1.0 / a00);
+          else st.se_m = std::sqrt(std::max(0.0, rr - c0v * c0v / a00) / df_m / a00);
+          if (robust) st.se_m_rob = std::sqrt(BB[static_cast<std::size_t>(s) * S * S] / (a00 * a00));
+          Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+          if (ldlt.info() != Eigen::Success) { ++n_sing; break; }
+          const Eigen::MatrixXd Ainv = ldlt.solve(Eigen::MatrixXd::Identity(S, S));
+          const Eigen::VectorXd bt = Ainv * c;
+          const double s2 = pre.logistic ? 1.0 : std::max(0.0, rr - c.dot(bt)) / df;
+          const Eigen::MatrixXd Vm = s2 * Ainv;
+          for (int q = 0; q < S; ++q) { beta[q] = bt[q]; se[q] = std::sqrt(Vm(q, q)); }
+          Eigen::MatrixXd Vr;
           if (robust) {
-            chi_int_rob[j] = bi.dot(Vr.block(1, 1, ne, ne).ldlt().solve(bi));
-            chi_joint_rob[j] = bj.dot(Vr.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
+            Eigen::Map<const Eigen::MatrixXd> Bm(BB + static_cast<std::size_t>(s) * S * S, S, S);
+            Vr = Ainv * Bm * Ainv;
+            for (int q = 0; q < S; ++q) se_rob[q] = std::sqrt(Vr(q, q));
           }
+          if (n_exp > 0) {  // Wald tests of the exposure interactions (terms 1..n_exp) and of G with them (0..n_exp)
+            const int ne = n_exp;
+            const Eigen::VectorXd bi = bt.segment(1, ne), bj = bt.head(ne + 1);
+            st.chi_int = bi.dot(Vm.block(1, 1, ne, ne).ldlt().solve(bi));
+            st.chi_joint = bj.dot(Vm.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
+            if (robust) {
+              st.chi_int_rob = bi.dot(Vr.block(1, 1, ne, ne).ldlt().solve(bi));
+              st.chi_joint_rob = bj.dot(Vr.topLeftCorner(ne + 1, ne + 1).ldlt().solve(bj));
+            }
+          }
+          break;
         }
+        row(run, st, v);
+        text.row(o, r, static_cast<long long>(st.n_obs), v);
+        ++r;
       }
     }
     for (int t = 0; t < T; ++t)
       if (bad[t] >= 0) Rcpp::stop("Genotype read failed at variant %d of %s", bad[t] + 1, path.c_str());
+    for (int t = 0; t < T; ++t) text.write(rows[t]);
     Rcpp::checkUserInterrupt();
   }
+  text.finish(static_cast<long long>(fv.m));
 
-  Rcpp::List out;
-  out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
-  out["se_robust"] = se_rob; out["beta_marginal"] = beta_m; out["se_marginal"] = se_m;
-  out["se_marginal_robust"] = se_m_rob; out["chisq_int"] = chi_int; out["chisq_joint"] = chi_joint;
-  out["chisq_int_robust"] = chi_int_rob; out["chisq_joint_robust"] = chi_joint_rob; out["df"] = df;
-  out["df_marginal"] = df_m; out["rank"] = k; out["explicit"] = nexp; out["block"] = b; out["threads"] = T;
-  out["mem_gb"] = mem_gb; out["dosage"] = dos; out["simd"] = std::string(plink4r::la().isa);
-  return out;
+  Rcpp::List res;
+  res["variants"] = static_cast<double>(fv.m); res["tested"] = p; res["bytes"] = text.bytes();
+  res["monomorphic"] = static_cast<double>(n_mono); res["singular"] = static_cast<double>(n_sing);
+  res["df"] = df; res["df_marginal"] = df_m; res["rank"] = k; res["explicit"] = nexp; res["block"] = b;
+  res["threads"] = T; res["mem_gb"] = mem_gb; res["dosage"] = dos; res["simd"] = std::string(plink4r::la().isa);
+  return res;
+}
+
+}  // namespace
+
+// The association of one trait with every biallelic variant of the file (S = 1): after CHR, BP, REF, ALT of each
+// line of the .bim / .pvar ALT_FREQ, N, BETA, SE, T (linear) or Z (logistic), P, and SE_ROBUST, P_ROBUST with robust.
+// Arguments as scan().
+// [[Rcpp::export]]
+Rcpp::List gwas_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
+                           const std::string& out, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X,
+                           Rcpp::NumericVector resid, Rcpp::NumericVector w, bool robust, int threads, double mem_gb,
+                           int block) {
+  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA", "SE", w.size() ? "Z" : "T", "P"};
+  if (robust) { statistics.push_back("SE_ROBUST"); statistics.push_back("P_ROBUST"); }
+  return scan(path, bed, n_raw, variant_text, out, statistics, sample_idx, X, 1, 0, resid, w, robust, threads, mem_gb,
+              block, [](const Run& g, const Stat& s, double* v) {
+                const double z = s.beta[0] / s.se[0];
+                v[0] = s.a1_sum / (2 * s.n_obs); v[1] = s.beta[0]; v[2] = s.se[0]; v[3] = z;
+                v[4] = g.logistic ? plink4r::p_z(z) : plink4r::p_t(z, g.df);
+                if (g.robust) { v[5] = s.se_rob[0]; v[6] = plink4r::p_z(s.beta[0] / s.se_rob[0]); }
+              });
+}
+
+// Gene-environment interaction of one trait with every biallelic variant of the file: after CHR, BP, REF, ALT of
+// each line of the .bim / .pvar ALT_FREQ, N, the marginal test of G (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA
+// and SE of G and of each interaction term (terms: the names of columns 1..S-1 of X), and the Wald tests of the
+// exposure interactions (P_INT) and of G with them (P_JOINT); with robust the robust standard errors and tests
+// beside them. Arguments as scan().
+// [[Rcpp::export]]
+Rcpp::List gxe_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
+                          const std::string& out, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, int S,
+                          int n_exp, Rcpp::CharacterVector terms, Rcpp::NumericVector resid, Rcpp::NumericVector w,
+                          bool robust, int threads, double mem_gb, int block) {
+  if (terms.size() != S - 1) Rcpp::stop("terms do not match S");
+  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
+  if (robust) { statistics.push_back("SE_MARGINAL_ROBUST"); statistics.push_back("P_MARGINAL_ROBUST"); }
+  for (int q = 0; q < S; ++q) {
+    const std::string nm = q == 0 ? std::string("G") : "GxE_" + Rcpp::as<std::string>(terms[q - 1]);
+    statistics.push_back("BETA_" + nm); statistics.push_back("SE_" + nm);
+    if (robust) statistics.push_back("SE_ROBUST_" + nm);
+  }
+  statistics.push_back("P_INT"); statistics.push_back("P_JOINT");
+  if (robust) { statistics.push_back("P_INT_ROBUST"); statistics.push_back("P_JOINT_ROBUST"); }
+  return scan(path, bed, n_raw, variant_text, out, statistics, sample_idx, X, S, n_exp, resid, w, robust, threads,
+              mem_gb, block, [](const Run& g, const Stat& s, double* v) {
+                const double zm = s.beta_m / s.se_m;
+                *v++ = s.a1_sum / (2 * s.n_obs); *v++ = s.beta_m; *v++ = s.se_m;
+                *v++ = g.logistic ? plink4r::p_z(zm) : plink4r::p_t(zm, g.df_m);
+                if (g.robust) { *v++ = s.se_m_rob; *v++ = plink4r::p_z(s.beta_m / s.se_m_rob); }
+                for (int q = 0; q < g.S; ++q) {
+                  *v++ = s.beta[q]; *v++ = s.se[q];
+                  if (g.robust) *v++ = s.se_rob[q];
+                }
+                *v++ = plink4r::p_chisq(s.chi_int, g.n_exp); *v++ = plink4r::p_chisq(s.chi_joint, g.n_exp + 1);
+                if (g.robust) {
+                  *v++ = plink4r::p_chisq(s.chi_int_rob, g.n_exp); *v++ = plink4r::p_chisq(s.chi_joint_rob, g.n_exp + 1);
+                }
+              });
 }

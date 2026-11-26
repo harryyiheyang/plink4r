@@ -15,8 +15,10 @@
 #' those in `outcome`, in `covariate` with no missing covariate, and in the genotype file.
 #'
 #' The file has one row per outcome-variant pair, outcomes in the order of their windows along the genome and
-#' variants in position order: `Outcome` (its name), `CHR` (integer code: 23 = X), `BP`, `REF`, `ALT` (the counted
-#' allele, which `BETA` is per copy of: ALT of a PGEN, .bim column 5 of a BED), `BETA`, `SE` (single precision), `N`
+#' variants in position order: `Outcome` (its name), `CHR`, `BP`, `REF`, `ALT` (chromosome, position and alleles of
+#' the variant as its line of the `.bim` / `.pvar` has them: the chromosome label and the alleles are the text of
+#' the file, not recoded; `ALT` is the counted allele, which `BETA` is per copy of: ALT of a PGEN, .bim column 5 of
+#' a BED), `BETA`, `SE` (single precision), `N`
 #' (non-missing calls of the variant among the analysed samples). A variant with no variation among the analysed
 #' samples, or in the span of the covariates, has no row. The P value of a pair is
 #' `2 * pt(-abs(BETA / SE), df)` with `df = n - k - 1` (`n` samples, `k` the rank of the covariates with the
@@ -29,7 +31,8 @@
 #'   outcome to test: give the columns wanted. No missing value among the analysed samples.
 #' @param position data.frame with the position of every outcome: `Outcome` (the column name in `outcome`), `CHR`,
 #'   `Start` and `End`, positions on `CHR` in the coordinates of the genotype file with `Start <= End`: the two ends
-#'   of a gene or region, or `Start = End` for a single anchor (e.g. the transcription start site). A column of
+#'   of a gene or region, or `Start = End` for a single anchor (e.g. the transcription start site). `CHR` is matched
+#'   to the chromosome of the variants whatever form either has (`1` and `chr1`; `X` and `23`). A column of
 #'   `outcome` without a row here is an error; rows naming no column of `outcome` are ignored (the table may be that
 #'   of the whole genome). An outcome whose row has no chromosome that the package reads (1 to 22, X, Y, MT), no
 #'   `Start` or `End`, or no variant in its window (e.g. on a chromosome that the genotype file does not hold) is
@@ -50,11 +53,11 @@
 #'   run: samples, outcomes tested, variants read, pairs asked for, covariate rank, block size, threads, memory
 #'   budget, SIMD set, `active` (per block of variants the number of outcomes it met), `products` (outcome-variant
 #'   products computed; at least `pairs`), `waiting_most` (the most pairs held in memory at once), monomorphic and
-#'   singular variants, outcomes not tested, and `skipped_multiallelic`: the `CHR` and `BP` of the variants left out
-#'   for having more than two alleles.
+#'   singular variants, outcomes not tested, and `skipped_multiallelic`: the `CHR` (as the file writes it) and `BP`
+#'   of the variants left out for having more than two alleles.
 #' @export
-xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
-                 threads = 0L, mem_gb = 0, block = 256L) {
+xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, threads = 0L,
+                 mem_gb = 0, block = 256L) {
   some <- function(x) paste0(paste(utils::head(x, 5L), collapse = ", "),
                              if (length(x) > 5L) sprintf(", ... (%d in all)", length(x)))
   if (!is.data.frame(outcome) || ncol(outcome) < 2L)
@@ -96,9 +99,9 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
 
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  # the variant IDs are read only to find snp_vec: the file that is written has none
-  gv <- .geno_variants(pfile, bfile, snp_vec, id = !is.null(snp_vec))
-  var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
+  gf <- .geno_files(pfile, bfile)
+  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
+  iid <- gf$iid
 
   # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.
   # .pheno_samples takes its samples with a phenotype: here a column of zeros under a name that covariate does not have
@@ -121,10 +124,9 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   X <- stats::model.matrix(eval(call("~", rhs)), d)
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
 
-  # ---- the tables go to C++ as they are: it puts the variants in position order, places the windows among them and
-  # reads the outcomes of the analysed samples from the columns of outcome
-  res <- xqtl_stream_cpp(gv$path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
-                         as.integer(var$CHR), as.integer(var$POS), var$A2, var$A1, as.integer(srow - 1L), X,
+  # ---- the tables go to C++ as they are: it reads the .bim / .pvar itself, puts the variants in position order,
+  # places the windows among them and reads the outcomes of the analysed samples from the columns of outcome
+  res <- xqtl_stream_cpp(gf$path, gf$bed, length(iid), gf$text, as.integer(srow - 1L), X,
                          outcome, match(d[[id_col]], oid) - 1L, match(a$Outcome, oname), a$Outcome, a$CHR,
                          as.numeric(a$Start), as.numeric(a$End), window, path.expand(out),
                          paste("plink4r version", utils::packageVersion("plink4r")), threads, mem_gb,
@@ -135,5 +137,5 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
                  active = res$active, products = res$products, waiting_most = res$waiting_most,
                  explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
                  outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]),
-                 skipped_multiallelic = data.table::data.table(CHR = var$CHR[gv$multi], BP = var$POS[gv$multi])))
+                 skipped_multiallelic = data.table::data.table(CHR = res$skipped_chr, BP = res$skipped_bp)))
 }

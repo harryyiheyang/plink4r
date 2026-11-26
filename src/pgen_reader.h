@@ -274,7 +274,10 @@ inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]
 // PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
 // a variant (all samples, file order) in the .bed coding (00 two A1, 01 missing, 10 one A1, 11 no A1);
 // read_counts() the same row recoded as a genovec counting A1 (codes 0/1/2, 3 missing), so the PGEN helpers
-// (compact_genovec, count_codes) apply. The package's one .bed reader.
+// (compact_genovec, count_codes) apply. A stream is moved only when the variant asked for is not the one after the
+// last it read: a seek empties the buffer of the stream, so a seek per variant costs a read of a whole buffer for
+// a row that may be a few bytes (10 million rows of 5 bytes: 4.8 s with a seek each, 0.13 s without). The package's
+// one .bed reader.
 class BedFile {
 public:
   BedFile(const std::string& path, std::size_t n, std::size_t m, int threads)
@@ -289,8 +292,9 @@ public:
     if (!f.read(reinterpret_cast<char*>(h), 3) || h[0] != 0x6c || h[1] != 0x1b || h[2] != 0x01)
       Rcpp::stop("BED must be a PLINK SNP-major BED file: " + path);
     for (int t = 0; t < std::max(1, threads); ++t) {
-      streams_.emplace_back(new std::ifstream(path, std::ios::binary));
-      rows_.emplace_back(stride_);
+      readers_.emplace_back(new Reader);
+      readers_.back()->f.open(path, std::ios::binary);
+      readers_.back()->row.resize(stride_);
     }
   }
   std::size_t stride() const { return stride_; }
@@ -312,19 +316,28 @@ public:
     for (std::size_t y = 0; y < stride; ++y) row[y] = T.t[row[y]];
   }
 private:
+  // The stream of one thread, the row it read last and the place in the file where it stands (kNowhere: not known).
+  static constexpr std::uint64_t kNowhere = ~static_cast<std::uint64_t>(0);
+  struct Reader {
+    std::ifstream f;
+    std::vector<unsigned char> row;
+    std::uint64_t at = kNowhere;
+  };
   unsigned char* load(std::size_t variant, int thread) {
-    std::ifstream& f = *streams_[thread];
-    f.seekg(static_cast<std::streamoff>(3 + static_cast<std::uint64_t>(variant) * stride_));
-    if (!f.read(reinterpret_cast<char*>(rows_[thread].data()), static_cast<std::streamsize>(stride_))) {
-      f.clear();
+    Reader& r = *readers_[thread];
+    const std::uint64_t pos = 3 + static_cast<std::uint64_t>(variant) * stride_;
+    if (r.at != pos) r.f.seekg(static_cast<std::streamoff>(pos));
+    if (!r.f.read(reinterpret_cast<char*>(r.row.data()), static_cast<std::streamsize>(stride_))) {
+      r.f.clear();
+      r.at = kNowhere;
       return nullptr;
     }
-    return rows_[thread].data();
+    r.at = pos + stride_;
+    return r.row.data();
   }
   std::string path_;
   std::size_t stride_;
-  std::vector<std::unique_ptr<std::ifstream>> streams_;
-  std::vector<std::vector<unsigned char>> rows_;
+  std::vector<std::unique_ptr<Reader>> readers_;
 };
 
 }  // namespace plink4r

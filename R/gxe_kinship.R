@@ -5,13 +5,14 @@
 # Z = [g, g e_1, ..., g e_{S-1}], a variant gets c = Z' P y and A = Z' P Z (S x S): the association test of g is
 # c_1, A_11 (that of gwas()), and beta = A^-1 c with covariance A^-1 gives the main effect, the interactions and
 # their Wald tests (generalised least squares; one step from the null model for the logistic and Cox models).
-.gxe_kinship <- function(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center,
-                         snp_vec, threads, mem_gb, block, para) {
+.gxe_kinship <- function(formula, data, exposure, out, int_covar, pfile, bfile, kinship, family, id_col, center,
+                         threads, mem_gb, block, para) {
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
-  D <- .mm_design(formula, data, family, id_col, gv$iid)
+  gf <- .geno_files(pfile, bfile)
+  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
+  D <- .mm_design(formula, data, family, id_col, gf$iid)
   lab <- gsub("`", "", D$labels)
   nt <- setdiff(gsub("`", "", c(exposure, int_covar)), lab)
   if (length(nt))
@@ -28,28 +29,11 @@
   terms <- colnames(E); ne <- length(ie)
   nl <- .reml_null(D, kinship, family, P, proj = TRUE)
   t1 <- proc.time()[["elapsed"]]
-  res <- gxe_kin_stream_cpp(gv$path, is.null(pfile), length(gv$iid), as.integer(gv$var$allele_ct),
-                            as.integer(gv$vrow - 1L), as.integer(D$srow - 1L), nl$null, E, ne, threads, mem_gb,
-                            as.integer(block))
-  out <- gv$var[gv$vrow, list(CHR, POS, ID, A1, A2)]
-  out[, `:=`(N = as.integer(res$n_obs), A1_FREQ = res$a1_sum / (2 * res$n_obs),
-             BETA_MARGINAL = res$beta_marginal, SE_MARGINAL = res$se_marginal)]
-  out[, P_MARGINAL := 2 * stats::pnorm(-abs(BETA_MARGINAL / SE_MARGINAL))]
-  nm <- c("G", paste0("GxE_", terms))
-  for (q in seq_along(nm)) {
-    out[, (paste0("BETA_", nm[q])) := res$beta[, q]]
-    out[, (paste0("SE_", nm[q])) := res$se[, q]]
-  }
-  out[, `:=`(P_INT = stats::pchisq(res$chisq_int, ne, lower.tail = FALSE),
-             P_JOINT = stats::pchisq(res$chisq_joint, ne + 1L, lower.tail = FALSE))]
+  res <- gxe_kin_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, as.integer(D$srow - 1L), nl$null, E, ne,
+                            threads, mem_gb, as.integer(block))
   t2 <- proc.time()[["elapsed"]]
-  data.table::setattr(out, "info", c(nl$est[setdiff(names(nl$est), c("beta", "baseline"))],
-                                     list(samples = nl$est$n, family = family, covariate_rank = length(nl$est$beta),
-                                          block = res$block, threads = res$threads, mem_gb = res$mem_gb,
-                                          simd = res$simd, dosage = res$dosage, explicit_projection = res$explicit,
-                                          monomorphic = sum(res$status == 1L), singular = sum(res$status == 2L),
-                                          skipped_multiallelic = gv$skipped, exposure_terms = terms[seq_len(ne)],
-                                          int_covar_terms = terms[-seq_len(ne)],
-                                          time = c(null = t1 - t0, stream = t2 - t1, total = t2 - t0))))
-  out[]
+  invisible(c(list(out = out, variants = res$variants, tested = res$tested, bytes = res$bytes),
+              .kin_value(nl, family, res),
+              list(exposure_terms = terms[seq_len(ne)], int_covar_terms = terms[-seq_len(ne)],
+                   time = c(null = t1 - t0, stream = t2 - t1, total = t2 - t0))))
 }

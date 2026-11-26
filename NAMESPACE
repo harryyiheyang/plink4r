@@ -7,8 +7,6 @@ export(geno_score, geno_score_para, geno_open, geno_read, geno_crossprod, geno_m
 export(plink4r_resources)
 export(gwas, gxe, xqtl)
 export(reml_tau, reml_tau_para)
-export(ld_score, ld_score_cross, ldsc_univ, ldsc_bicov, ldsc_trans, ldsc_strat)
-S3method("$", ldsc_bootstrap_result)
 S3method(dim, geno)
 S3method(dimnames, geno)
 S3method(print, geno)

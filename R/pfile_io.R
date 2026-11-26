@@ -27,22 +27,33 @@
   if (identical(fu, u)) x else fu[match(x, u)]
 }
 
-# A .pvar.zst read through R's zstd connection (R >= 4.5) into a temporary file, else through zstdcat.
+# A .pvar.zst read through its expansion into a temporary file.
 .read_pvar_zst <- function(path, sel, cc) {
-  if (!exists("zstdfile", baseenv())) {
-    return(data.table::fread(cmd = paste("zstdcat", shQuote(path)), skip = "#CHROM", select = sel, colClasses = cc))
-  }
-  tmp <- tempfile(fileext = ".pvar")
+  tmp <- .zst_expand(path)
   on.exit(unlink(tmp))
+  data.table::fread(tmp, skip = "#CHROM", select = sel, colClasses = cc)
+}
+
+# A zstd-compressed text expanded into a temporary file (R's zstd connection, R >= 4.5, else zstdcat); returns the
+# path of that file, which the caller removes.
+.zst_expand <- function(path) {
+  tmp <- tempfile(fileext = ".pvar")
+  if (!exists("zstdfile", baseenv())) {
+    if (system(paste("zstdcat", shQuote(path), ">", shQuote(tmp))) != 0L) {
+      unlink(tmp)
+      stop("Could not expand ", path, " (zstdcat).", call. = FALSE)
+    }
+    return(tmp)
+  }
   con <- get("zstdfile", baseenv())(path, "rb")
   out <- file(tmp, "wb")
+  on.exit({ close(out); close(con) })
   repeat {
     b <- readBin(con, "raw", 64L * 1024L^2)
     if (!length(b)) break
     writeBin(b, out)
   }
-  close(out); close(con)
-  data.table::fread(tmp, skip = "#CHROM", select = sel, colClasses = cc)
+  tmp
 }
 
 # IIDs of a .psam, in file order (the #IID or IID column, read as character); with fid, list(iid, fid), fid "0"
