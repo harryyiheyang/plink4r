@@ -117,3 +117,7 @@ viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_sta
     .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads)
 }
 
+viprs_annot_mix_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_annot_mix_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads)
+}
+
