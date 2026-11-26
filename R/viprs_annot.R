@@ -20,6 +20,7 @@
 #' @inheritParams viprs
 #' @param annot data.frame with ID and one numeric column per annotation (binary 0/1 or continuous score >= 0);
 #'   SNPs not in `annot` get 0.
+#' @param resid_all residual annotation A_R = 1 for every SNP (TRUE) or only for SNPs without annotation (FALSE).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin; must exist).
 #' @param control [viprs_annot_control()].
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
@@ -28,7 +29,7 @@
 #'   SNPs not suppressed) and `h2_share` (h2_k / sum_k h2_k), `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
-viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, thresh = 0, fp16 = TRUE,
+viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, resid_all = TRUE, thresh = 0, fp16 = TRUE,
                         control = viprs_annot_control(), threads = 4L, output = NULL) {
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
@@ -46,7 +47,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, thr
   if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   t0 <- Sys.time()
   res <- viprs_annot_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, bin_file, d$start, d$n_panel,
-                         thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
+                         resid_all = resid_all, thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
   n_sup <- sum(res$extra$suppressed)
   hyp <- res$hyp
   message(sprintf("viprs_annot: %d SNPs (%d suppressed in %.0f LD bins), sum k %d; pi %.4g, h2 %.4f, sigma %.4f, %d iterations (%s), %.1f s",

@@ -97,6 +97,10 @@ genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh
     .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
 }
 
+mixpart_cpp <- function(ld_dir, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads) {
+    .Call(`_plink4r_mixpart_cpp`, ld_dir, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads)
+}
+
 sbayesrc_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads) {
     .Call(`_plink4r_sbayesrc_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads)
 }
@@ -109,7 +113,7 @@ viprs_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, thr
     .Call(`_plink4r_viprs_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
 }
 
-viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, thresh, fp16, control, threads) {
-    .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, thresh, fp16, control, threads)
+viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads)
 }
 

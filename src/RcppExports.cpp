@@ -405,6 +405,27 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// mixpart_cpp
+Rcpp::List mixpart_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericMatrix A, bool resid_all, double thresh, bool fp16, Rcpp::List control, int threads);
+RcppExport SEXP _plink4r_mixpart_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP ASEXP, SEXP resid_allSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const std::string& >::type ld_dir(ld_dirSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type blocks(blocksSEXP);
+    Rcpp::traits::input_parameter< Rcpp::List >::type keep(keepSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type z(zSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type n(nSEXP);
+    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type A(ASEXP);
+    Rcpp::traits::input_parameter< bool >::type resid_all(resid_allSEXP);
+    Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
+    Rcpp::traits::input_parameter< bool >::type fp16(fp16SEXP);
+    Rcpp::traits::input_parameter< Rcpp::List >::type control(controlSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(mixpart_cpp(ld_dir, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // sbayesrc_cpp
 Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, Rcpp::List control, Rcpp::Nullable<Rcpp::List> replay, int threads);
 RcppExport SEXP _plink4r_sbayesrc_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP bin_fileSEXP, SEXP bin_startSEXP, SEXP n_panelSEXP, SEXP controlSEXP, SEXP replaySEXP, SEXP threadsSEXP) {
@@ -466,8 +487,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // viprs_annot_cpp
-Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, double thresh, bool fp16, Rcpp::List control, int threads);
-RcppExport SEXP _plink4r_viprs_annot_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP bin_fileSEXP, SEXP bin_startSEXP, SEXP n_panelSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
+Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all, double thresh, bool fp16, Rcpp::List control, int threads);
+RcppExport SEXP _plink4r_viprs_annot_cpp(SEXP ld_dirSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP afSEXP, SEXP ASEXP, SEXP bin_fileSEXP, SEXP bin_startSEXP, SEXP n_panelSEXP, SEXP resid_allSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -481,11 +502,12 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const std::string& >::type bin_file(bin_fileSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericVector >::type bin_start(bin_startSEXP);
     Rcpp::traits::input_parameter< double >::type n_panel(n_panelSEXP);
+    Rcpp::traits::input_parameter< bool >::type resid_all(resid_allSEXP);
     Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
     Rcpp::traits::input_parameter< bool >::type fp16(fp16SEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type control(controlSEXP);
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(viprs_annot_cpp(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, thresh, fp16, control, threads));
+    rcpp_result_gen = Rcpp::wrap(viprs_annot_cpp(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -515,10 +537,11 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_impute_geno_cpp", (DL_FUNC) &_plink4r_genotype_impute_geno_cpp, 13},
     {"_plink4r_pgen_stats_cpp", (DL_FUNC) &_plink4r_pgen_stats_cpp, 6},
     {"_plink4r_genotype_fill_ld_geno_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_geno_cpp, 13},
+    {"_plink4r_mixpart_cpp", (DL_FUNC) &_plink4r_mixpart_cpp, 11},
     {"_plink4r_sbayesrc_cpp", (DL_FUNC) &_plink4r_sbayesrc_cpp, 13},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {"_plink4r_viprs_cpp", (DL_FUNC) &_plink4r_viprs_cpp, 10},
-    {"_plink4r_viprs_annot_cpp", (DL_FUNC) &_plink4r_viprs_annot_cpp, 14},
+    {"_plink4r_viprs_annot_cpp", (DL_FUNC) &_plink4r_viprs_annot_cpp, 15},
     {NULL, NULL, 0}
 };
 

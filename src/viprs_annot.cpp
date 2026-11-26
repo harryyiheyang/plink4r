@@ -2,7 +2,7 @@
 // annotation-specific components (PartitionPRS, Research Design D.1.2). Top layer: the package's annotation VIPRS
 // functional unit, built on vi_panel.h / vi_store.h / ld_bins.h; copied from viprs.cpp and edited.
 // Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
-// residual annotation A_R = 1 for every SNP), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
+// residual annotation A_R: 1 for every SNP, or only for SNPs without annotation), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
 // spike and slab with fixed pi, slab variance h2_j / pi (tau_j = pi / h2_j). Coordinate update as viprs.cpp with
 // tau_j in place of tau:
 //   vt_j = n_j d_j / sigma + tau_j,  gamma_j = sigmoid(.5 vt_j mu_j^2 + logit(pi) + .5 (log tau_j - log vt_j))
@@ -212,6 +212,7 @@ struct VarModel {
   int K;                         // annotations, residual annotation first
   const std::vector<double>& A;
   const std::vector<char>& sup;  // suppressed SNPs: left out of the M-step
+  std::vector<double> aR;        // residual annotation: 1 for every SNP (resid_all) or only for SNPs without annotation
   std::vector<double> par;       // sigma2_k
   std::vector<double> h2;        // h2_j
   std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
@@ -219,7 +220,16 @@ struct VarModel {
   int threads;
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
-      : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f), threads(threads_) {}
+      : M(M_), K(K_), A(A_), sup(sup_), aR(M_, 1.), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f),
+        threads(threads_) {}
+  void set_residual(bool all) {
+    for (int64_t j = 0; j < M; ++j) {
+      bool any = false;
+      const double* r = row(j);
+      for (int k = 1; k < K && !any; ++k) any = r[k - 1] != 0;
+      aR[j] = (all || !any) ? 1. : 0.;
+    }
+  }
 
   const double* row(int64_t j) const { return A.data() + j * (K - 1); }
   void set_all() {
@@ -227,7 +237,7 @@ struct VarModel {
 #pragma omp parallel for num_threads(threads)
 #endif
     for (int64_t j = 0; j < M; ++j) {
-      double h = par[0];
+      double h = aR[j] * par[0];
       const double* r = row(j);
       for (int k = 1; k < K; ++k) h += r[k - 1] * par[k];
       h2[j] = h;
@@ -240,7 +250,7 @@ struct VarModel {
     pi = pi_;
     double s = 0;
     for (int64_t j = 0; j < M; ++j) {
-      s += 1.;
+      s += aR[j];
       const double* r = row(j);
       for (int k = 1; k < K; ++k) s += r[k - 1];
     }
@@ -267,7 +277,7 @@ struct VarModel {
         const double h = h2[j], z = zeta[j];
         const double* r = row(j);
         for (int k = 0; k < K; ++k) {
-          const double a = k ? r[k - 1] : 1.;
+          const double a = k ? r[k - 1] : aR[j];
           if (a == 0.) continue;
           const double w = a * par[k] / h;
           loc[k] += w * w * z + w * (1. - w) * h;
@@ -448,7 +458,7 @@ Rcpp::NumericVector h2_annot(const VarModel& vm) {
   for (int64_t j = 0; j < vm.M; ++j) {
     if (vm.sup[j]) continue;
     const double* r = vm.row(j);
-    h[0] += vm.par[0];
+    h[0] += vm.aR[j] * vm.par[0];
     for (int k = 1; k < vm.K; ++k) h[k] += r[k - 1] * vm.par[k];
   }
   return h;
@@ -468,7 +478,7 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
     pip[j] = st.gamma[j];
     h2j[j] = vm.h2[j];
     const double* r = vm.row(j);
-    for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : 1.) * vm.par[k] / vm.h2[j] * st.eta[j];
+    for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j] * st.eta[j];
   }
   Rcpp::List hyp = Rcpp::List::create(
       Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = res.sigma, Rcpp::_["h2"] = res.h2,
@@ -519,7 +529,7 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // converge are never chosen)
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
-                    const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
+                    bool resid_all, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
   const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
@@ -534,6 +544,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   State st(P.M, P.S, grid[0]), best(0, 0, 0.);
   for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
+  vm.set_residual(resid_all); bvm.set_residual(resid_all);
   bool have_best = false;
   vm.start(h2_0, grid[0]);
   double sigma = 1. - h2_0;
@@ -581,7 +592,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 // [[Rcpp::export]]
 Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
-                           const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, double thresh,
+                           const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all,
+                           double thresh,
                            bool fp16, Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
@@ -624,8 +636,8 @@ Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks
         off += m;
       }
     }
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, ld_dir, thresh, c, T)
-                : fit_path<float>(in, Ar, K, sup, n_bins, ld_dir, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, ld_dir, thresh, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, ld_dir, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }
