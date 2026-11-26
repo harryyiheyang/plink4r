@@ -15,8 +15,12 @@
 #' back on the intercept.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
-#' Search, PUMAS pseudo-validation and refit as [viprs()] (pi grid ascending, each point warm-started from the last);
-#' `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
+#' Search, PUMAS pseudo-validation and refit by VI as [viprs()] (pi grid ascending, each point warm-started from the
+#' last); `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
+#' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
+#' with Rao-Blackwell means; sigma2_k and sigma by stochastic approximation of the same M-step. BETA is the mean of
+#' the conditional posterior means m_j over the draws and BETA_k the mean of w_jk m_j (w_jk of each sweep), so the
+#' columns still sum to BETA.
 #'
 #' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, default 0.98,
 #' made by [ld_bins()]) with at least one annotated member (nonzero in any of the columns `skip_annot`), the members
@@ -36,10 +40,11 @@
 #' @param control [viprs_annot_control()].
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
 #'   BETA_<annotation> per annotation and BETA_intercept (BETA_STD scale: BETA_STD_<annotation>, ...); per SNP the
-#'   BETA_<...> columns sum to BETA. Attributes `sigma2` (sigma2_k), `h2_annot` (h2_k = (sum_j A_jk) sigma2_k over
-#'   the SNPs not suppressed; k = intercept: M sigma2_0) and `h2_share`, `h2_post` (heritability of each partitioned PRS,
-#'   E[beta^(k)' R beta^(k)] = b_k' R b_k + sum_j R_jj Var(beta_j^(k)) with the posterior variance; the PRS add up,
-#'   these do not: the columns have cross terms),
+#'   BETA_<...> columns sum to BETA. Attributes `sigma2` (sigma2_k), `h2_annot` (model h2_k = (sum_j A_jk) sigma2_k
+#'   over the SNPs not suppressed; k = intercept: M sigma2_0) and `h2_share`; `h2_shapley` (heritability of each
+#'   column as its Shapley value in beta' R beta: the mean over the draws of beta^(k)' R beta, cross terms split evenly
+#'   between the two columns, so the values add up to the total) with `h2_shapley_sd` (sd over the draws);
+#'   `var_shapley` (the same for the output PRS, b_k' R b: they add up to b' R b, the PRS variance on the panel),
 #'   `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
@@ -85,7 +90,9 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   attr(out, "sigma2") <- stats::setNames(res$sigma2, nm)
   attr(out, "h2_annot") <- stats::setNames(res$h2_annot, nm)
   attr(out, "h2_share") <- stats::setNames(res$h2_annot / sum(res$h2_annot), nm)
-  attr(out, "h2_post") <- stats::setNames(res$h2_post, nm)
+  attr(out, "h2_shapley") <- stats::setNames(res$h2_shapley, nm)
+  attr(out, "h2_shapley_sd") <- stats::setNames(res$h2_shapley_sd, nm)
+  attr(out, "var_shapley") <- stats::setNames(res$var_shapley, nm)
   attr(out, "n_bins") <- res$extra$n_bins
   attr(out, "n_suppressed") <- n_sup
   attr(out, "grid") <- data.table::as.data.table(res$extra$grid)
@@ -106,14 +113,17 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
+#' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
+#'   VI refit as the final fit.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
-                                a0 = 0, b0 = 0) {
+                                gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var),
+                             mix_var = as.numeric(mix_var), gibbs_burn = as.integer(gibbs_burn),
+                             gibbs_draws = as.integer(gibbs_draws),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
 

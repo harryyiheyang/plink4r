@@ -16,8 +16,10 @@
 // on the intercept. With one slab class, no annotation and a0 = -1, b0 = 0 this is the VIPRS 0.1.5 tau update, i.e.
 // viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, annotation values cut at 0; the intercept must be > 0) or all
 // sigma2_k equal with sum_j h2_j = the naive LDSC h2.
-// Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j, k = 0 the
-// intercept part), the weights of the annotation-specific PRS.
+// Search by VI (below); final fit at the chosen pi by a short Gibbs sampler with Rao-Blackwell means
+// (viprs_annot_gibbs.h; gibbs_draws = 0: the VI refit). Output: posterior mean b_j and its MMSE allocation
+// b_j^(k) = w_jk b_j (Gibbs: the mean over the draws of w_jk m_j; sum_k b_j^(k) = b_j, k = 0 the intercept part), the
+// weights of the annotation-specific PRS, and the Shapley value of each column in beta' R beta.
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
@@ -47,7 +49,8 @@ namespace {
 
 struct ViprsControl {
   bool use_active;
-  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
+  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
+      gibbs_burn, gibbs_draws;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
@@ -83,6 +86,9 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.a0 = Rcpp::as<double>(c["a0"]);
   x.b0 = Rcpp::as<double>(c["b0"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
+  x.gibbs_burn = Rcpp::as<int>(c["gibbs_burn"]);
+  x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
+  if (x.gibbs_burn < 0 || x.gibbs_draws < 0) Rcpp::stop("gibbs_burn and gibbs_draws must be >= 0");
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
   const std::vector<double> mp = Rcpp::as<std::vector<double>>(c["mix_prop"]), mv = Rcpp::as<std::vector<double>>(c["mix_var"]);
@@ -531,71 +537,61 @@ Rcpp::NumericVector h2_annot(const VarModel& vm) {
   return h;
 }
 
+#include "viprs_annot_gibbs.h"
+
+// Output from the final fit: Gibbs + RB (G.draws > 0) or the VI state (st, vm). Columns: the mean of w_jk m_j (Gibbs)
+// or w_jk eta_j (VI); per SNP they sum to BETA_STD. Heritability per column: the Shapley value in beta'R beta,
+// h2_shapley = mean over the draws of beta^(k)' R beta (sd over the draws; VI: b_k' R b), and the Shapley value of the
+// partitioned PRS themselves, var_shapley = b_k' R b with b the output means (sum_k = b' R b, the variance of the PRS
+// on the panel).
 template <typename T>
-Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const VarModel& vm,
+Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const VarModel& vm, const GibbsOut& G,
                 const std::vector<double>& af, double h2_0, Rcpp::List extra) {
-  const int64_t M = F.P.M;
+  const EigenPanel<T>& P = F.P;
+  const int64_t M = P.M;
   const int K = vm.K;
+  const bool gib = G.draws > 0;
   Rcpp::NumericVector beta(M), bstd(M), pip(M), h2j(M);
-  Rcpp::NumericMatrix part(M, K);  // eta_j^(k) = w_jk eta_j (standardized scale), k = 0 intercept
+  Rcpp::NumericMatrix part(M, K);  // standardized scale, k = 0 intercept
+  std::vector<float> bf(M);
   for (int64_t j = 0; j < M; ++j) {
     const double p = std::min(std::max(af[j], 1e-6), 1 - 1e-6);
-    bstd[j] = st.eta[j];
-    beta[j] = st.eta[j] / std::sqrt(2. * p * (1. - p));
-    pip[j] = st.gamma[j];
+    const double b = gib ? G.bmean[j] : st.eta[j];
+    bstd[j] = b; bf[j] = (float)b;
+    beta[j] = b / std::sqrt(2. * p * (1. - p));
+    pip[j] = gib ? G.pip[j] : st.gamma[j];
     h2j[j] = vm.h2[j];
-    for (int k = 0; k < K; ++k) part(j, k) = vm.w(j, k) * st.eta[j];
+    for (int k = 0; k < K; ++k) part(j, k) = gib ? G.part[(size_t)j * K + k] : vm.w(j, k) * b;
   }
-  // heritability of each partitioned PRS: h2_k = E_q[beta^(k)' R beta^(k)] = eta^(k)' R eta^(k) + sum_j R_jj
-  // Var_q(beta_j^(k)), with E_q[(beta_j^(k))^2] = gamma_j sum_c psi_jc (w_jk^2 (mu_jc^2 + 1/vt_jc) +
-  // w_jk (1 - w_jk) kap_c h2_j / pi) (the piece of beta_j given its class). Not
-  // additive over k (cross terms between the columns); the partitioned PRS are.
-  Rcpp::NumericVector h2post(K);
-  {
-    const int C = (int)F.c.kap.size();
-    std::vector<float> e2(M, 0.f), cv(M, 0.f);  // E[beta_j^2], gamma_j sum_c psi_jc kap_c h2_j / pi
-    for (int64_t j = 0; j < M; ++j) {
-      if (vm.sup[j]) continue;
-      float psi[16], vt[16], m_;
-      const float D = st.mu[j];
-      mix_post(D, F.n[j] * F.P.d[j] / (float)res.sigma, vm.tau[j], vm.ltau[j], 0.f, F.c, m_, psi, vt);
-      double q = 0, v = 0;
-      for (int i = 0; i < C; ++i) {
-        const double mc = (double)D / vt[i];
-        q += psi[i] * (mc * mc + 1. / vt[i]);
-        v += psi[i] * F.c.kap[i];
-      }
-      e2[j] = (float)(st.gamma[j] * q);
-      cv[j] = (float)(st.gamma[j] * v * vm.h2[j] / vm.pi);
-    }
-    std::vector<float> x(M), sk(F.P.S);
-    for (int k = 0; k < K; ++k) {
-      double dv = 0;
-      for (int64_t j = 0; j < M; ++j) {
-        x[j] = (float)part(j, k);
-        if (vm.sup[j]) continue;
-        const double w = vm.w(j, k);
-        if (w == 0.) continue;
-        const double m2 = w * w * e2[j] + w * (1. - w) * cv[j], mm = part(j, k);
-        dv += F.P.d[j] * std::max(m2 - mm * mm, 0.);
-      }
-      vtx(F.P, x.data(), sk.data(), F.threads);
-      double q = 0;
-      for (int64_t i = 0; i < F.P.S; ++i) q += (double)sk[i] * sk[i];
-      h2post[k] = q + dv;
-    }
+  std::vector<float> sb(P.S);
+  vtx(P, bf.data(), sb.data(), F.threads);
+  std::vector<double> q(M);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(F.threads)
+#endif
+  for (int b = 0; b < P.nb; ++b)
+    for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j)
+      q[j] = RowStore<T>::dot(P.row(b, j), sb.data() + P.s_off[b], P.k[b]);
+  Rcpp::NumericVector vsh(K), hsh(K), hsd(K);
+  for (int64_t j = 0; j < M; ++j)
+    for (int k = 0; k < K; ++k) vsh[k] += part(j, k) * q[j];
+  for (int k = 0; k < K; ++k) {
+    hsh[k] = gib ? G.phi[k] : vsh[k];
+    hsd[k] = gib ? std::sqrt(std::max(G.phi2[k] - G.phi[k] * G.phi[k], 0.)) : NA_REAL;
   }
   Rcpp::List hyp = Rcpp::List::create(
-      Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = res.sigma, Rcpp::_["h2"] = res.h2,
+      Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = gib ? G.sigma : res.sigma, Rcpp::_["h2"] = gib ? G.h2 : res.h2,
       Rcpp::_["elbo"] = res.elbo, Rcpp::_["iters"] = res.iters,
       Rcpp::_["converged"] = res.converged, Rcpp::_["message"] = res.message, Rcpp::_["sigma_fixed"] = res.sigma_fixed,
+      Rcpp::_["gibbs_draws"] = G.draws,
       Rcpp::_["h2_ldsc_init"] = h2_0, Rcpp::_["n_snps"] = (double)M, Rcpp::_["sum_k"] = (double)F.P.S,
       Rcpp::_["sweeps_full"] = (double)F.sweeps_full, Rcpp::_["sweeps_partial"] = (double)F.sweeps_part,
       Rcpp::_["snp_visits_per_M"] = (double)F.snp_visits / M);
   return Rcpp::List::create(Rcpp::_["BETA"] = beta, Rcpp::_["BETA_STD"] = bstd, Rcpp::_["PIP"] = pip,
                             Rcpp::_["H2_SNP"] = h2j, Rcpp::_["PART_STD"] = part,
                             Rcpp::_["sigma2"] = Rcpp::NumericVector(vm.par.begin(), vm.par.end()),
-                            Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["h2_post"] = h2post, Rcpp::_["hyp"] = hyp,
+                            Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["h2_shapley"] = hsh,
+                            Rcpp::_["h2_shapley_sd"] = hsd, Rcpp::_["var_shapley"] = vsh, Rcpp::_["hyp"] = hyp,
                             Rcpp::_["extra"] = extra);
 }
 
@@ -681,12 +677,14 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   }
   if (!have_best) Rcpp::stop("no grid point converged with a positive pseudo R2");
   RunResult res = F.run(best, in.n.data(), P.bt.data(), bpi, bvm, bsig, c.max_iter, nullptr);
+  GibbsOut G;
+  if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, best, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
   const int ng = gpi.size();
   Rcpp::DataFrame tab = Rcpp::DataFrame::create(
       Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2, Rcpp::_["pseudo_r2"] = gr2,
       Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
       Rcpp::_["seconds"] = gsec);
-  return pack(F, best, res, bvm, in.af, h2_0,
+  return pack(F, best, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
                                  Rcpp::_["best_pseudo_r2"] = best_r2, Rcpp::_["n_bins"] = n_bins,
                                  Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
