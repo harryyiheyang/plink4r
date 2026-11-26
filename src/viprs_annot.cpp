@@ -12,13 +12,14 @@
 // M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
 // zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j: the EM
 // statistic of the scale of a Gaussian scale mixture), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
-// S_k = sum_j E[(beta_j^(k))^2]. With one slab class, the residual annotation only and a0 = -1, b0 = 0 this is the
+// S_k = sum_j E[(beta_j^(k))^2] (exact_em: sigma2_k <- (pi S~_k + 2 b0) / (sum_j gamma_j A_jk + 2 (a0 + 1)), S~_k with
+// the conditional term gamma_j w (1 - w) h2_j / pi, the ELBO maximizer at fixed pi). With one slab class, the residual annotation only and a0 = -1, b0 = 0 this is the
 // VIPRS 0.1.5 tau update (tau = pi M / sum zeta), i.e. viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, cut at 0)
 // or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
 // Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j), the
 // weights of the annotation-specific PRS.
-// LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (any nonzero
-// binary 0/1 annotation column), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
+// LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
+// any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
 // Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted); the
 // sigma2_k (variance of beta) are carried over when pi moves (the start sets those of the first grid point).
@@ -49,6 +50,7 @@ struct ViprsControl {
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0, init_floor;
+  bool exact_em;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
   // slab mixture: class c has prior share mix_prop[c] and variance kap[c] h2_j / pi (sum_c mix_prop[c] kap[c] = 1)
@@ -82,6 +84,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.a0 = Rcpp::as<double>(c["a0"]);
   x.b0 = Rcpp::as<double>(c["b0"]);
   x.init_floor = Rcpp::as<double>(c["init_floor"]);
+  x.exact_em = Rcpp::as<bool>(c["exact_em"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -343,7 +346,10 @@ struct VarModel {
   void pi_move(double pi_) { pi = pi_; set_all(); }
 
   // one update of sigma2_k (D.1.2); returns nothing, refreshes h2, tau
-  void mstep(const double* zeta, double a0, double b0) {
+  // exact: the maximizer of the ELBO at fixed pi (slab members only: sigma2_k <- pi S_k / sum_j gamma_j A_jk, the
+  // conditional variance term weighted by gamma_j); otherwise the moment form of VIPRS 0.1.5 (sigma2_k <- S_k /
+  // sum_j A_jk; with pi = sum gamma / M the two agree)
+  void mstep(const double* zeta, const float* gamma, bool exact, double a0, double b0) {
     const int K1 = K - 1;
     std::vector<double> SN(2 * K, 0.);  // S_k, then sum_j A_jk
 #ifdef _OPENMP
@@ -356,14 +362,14 @@ struct VarModel {
 #endif
       for (int64_t j = 0; j < M; ++j) {
         if (sup[j]) continue;
-        const double h = h2[j], z = zeta[j];
+        const double h = h2[j], z = zeta[j], g = exact ? (double)gamma[j] : 1., f = exact ? pi : 1.;
         const double* r = row(j);
         for (int k = 0; k < K; ++k) {
           const double a = k ? r[k - 1] : aR[j];
           if (a == 0.) continue;
           const double w = a * par[k] / h;
-          loc[k] += w * w * z + w * (1. - w) * h;
-          loc[K + k] += a;
+          loc[k] += f * w * w * z + g * w * (1. - w) * h;
+          loc[K + k] += g * a;
         }
       }
 #ifdef _OPENMP
@@ -462,7 +468,7 @@ struct Fitter {
       stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
-      vm.mstep(zeta.data(), c.a0, c.b0);
+      vm.mstep(zeta.data(), st.gamma.data(), c.exact_em, c.a0, c.b0);
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
 #ifdef _OPENMP
@@ -562,6 +568,38 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
     const double* r = vm.row(j);
     for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j] * st.eta[j];
   }
+  // posterior heritability allocation h2_k = eta^(k)' R eta + sum_j d_j w_jk (E[beta_j^2] - eta_j^2): additive over k
+  // (sum_k = E_q[beta' R beta], the fitted genetic variance) and with the posterior variance, not only the shrunk means
+  Rcpp::NumericVector h2post(K);
+  {
+    const float lp = 0.f;
+    std::vector<double> var(M, 0.);
+    for (int64_t j = 0; j < M; ++j) {
+      if (vm.sup[j]) continue;
+      float psi[16], vt[16], m_;
+      const float D = st.mu[j];
+      mix_post(D, F.n[j] * F.P.d[j] / (float)res.sigma, vm.tau[j], vm.ltau[j], lp, F.c, m_, psi, vt);
+      double e2 = 0;
+      for (int i = 0; i < (int)F.c.kap.size(); ++i) {
+        const double mc = (double)D / vt[i];
+        e2 += psi[i] * (mc * mc + 1. / vt[i]);
+      }
+      var[j] = std::max((double)st.gamma[j] * e2 - (double)st.eta[j] * st.eta[j], 0.);
+    }
+    std::vector<float> x(M), sk(F.P.S);
+    for (int k = 0; k < K; ++k) {
+      double dv = 0;
+      for (int64_t j = 0; j < M; ++j) {
+        x[j] = (float)part(j, k);
+        const double w = st.eta[j] != 0 ? part(j, k) / st.eta[j] : 0.;
+        dv += F.P.d[j] * w * var[j];
+      }
+      vtx(F.P, x.data(), sk.data(), F.threads);
+      double q = 0;
+      for (int64_t i = 0; i < F.P.S; ++i) q += (double)sk[i] * st.s[i];
+      h2post[k] = q + dv;
+    }
+  }
   Rcpp::List hyp = Rcpp::List::create(
       Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = res.sigma, Rcpp::_["h2"] = res.h2,
       Rcpp::_["elbo"] = res.elbo, Rcpp::_["iters"] = res.iters,
@@ -572,7 +610,8 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
   return Rcpp::List::create(Rcpp::_["BETA"] = beta, Rcpp::_["BETA_STD"] = bstd, Rcpp::_["PIP"] = pip,
                             Rcpp::_["H2_SNP"] = h2j, Rcpp::_["PART_STD"] = part,
                             Rcpp::_["sigma2"] = Rcpp::NumericVector(vm.par.begin(), vm.par.end()),
-                            Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["hyp"] = hyp, Rcpp::_["extra"] = extra);
+                            Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["h2_post"] = h2post, Rcpp::_["hyp"] = hyp,
+                            Rcpp::_["extra"] = extra);
 }
 
 // shared set-up of the three entries: inputs -> standardized b, panel
@@ -674,7 +713,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 
 // Entry: files (eigen.bin of each block), blocks (ids), keep (0-based eigen rows with data per block, increasing), z / n / af per kept SNP (blocks
 // concatenated in that order; af = frequency of the effect allele, for BETA = BETA_STD / sqrt(2 af (1 - af))),
-// A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no suppression),
+// A (kept SNPs x annotations, same order; the residual annotation is added here), bin_file (LD-bin list, "" = no
+// suppression), skip_cols (0-based columns of A that make a SNP annotated for the suppression),
 // bin_start (first panel row of each kept block), n_panel (SNPs of the panel), sigma2_init (empty, or sigma2_k of the
 // first grid point, residual first; raised to at least init_floor times the mean h2_j), thresh (eigen truncation, <= 0 = every stored
 // pair), fp16 (store V as float16), control (viprs_annot_control()).
@@ -683,8 +723,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
                            const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all,
-                           Rcpp::NumericVector sigma2_init, double thresh, bool fp16, Rcpp::List control,
-                           int threads) {
+                           Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, double thresh, bool fp16,
+                           Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
   const Inputs in = read_inputs(blocks, keep, z, n, af);
@@ -702,15 +742,11 @@ Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerV
       Ar[j * (K - 1) + k] = x;
     }
   for (double x : Ar) if (x < 0) Rcpp::stop("annotations must be >= 0 (variance model sum_k A_jk sigma2_k)");
-  // LD-bin suppression: annotated = any nonzero binary (0/1) annotation column
+  // LD-bin suppression: annotated = any nonzero value in the columns skip_cols (0-based)
   std::vector<char> sup(M, 0);
   double n_bins = 0;
-  std::vector<int> bincol;
-  for (int a = 0; a < A.ncol(); ++a) {
-    bool bin01 = true;
-    for (int64_t j = 0; j < M && bin01; ++j) bin01 = A(j, a) == 0 || A(j, a) == 1;
-    if (bin01) bincol.push_back(a);
-  }
+  const std::vector<int> bincol(skip_cols.begin(), skip_cols.end());
+  for (int a : bincol) if (a < 0 || a >= A.ncol()) Rcpp::stop("skip_cols outside A");
   try {
     if (!bin_file.empty() && !bincol.empty()) {
       if ((std::size_t)bin_start.size() != in.keep.size()) Rcpp::stop("bin_start needs one entry per block");

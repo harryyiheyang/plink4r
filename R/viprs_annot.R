@@ -16,10 +16,10 @@
 #' Search, PUMAS pseudo-validation and refit as [viprs()] (pi grid ascending, each point warm-started from the last);
 #' `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #'
-#' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, default 0.98, see
-#' [sbayesrc()] for the format) with at least one annotated member (any nonzero binary 0/1 annotation column), the
-#' members without annotation are fixed at beta = 0 (never updated, so they never change the residual) and are left
-#' out of the M-step. Without binary annotation columns nothing is suppressed.
+#' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, default 0.98,
+#' made by [ld_bins()]) with at least one annotated member (nonzero in any of the columns `skip_annot`), the members
+#' without annotation are fixed at beta = 0 (never updated, so they never change the residual) and are left out of the
+#' M-step.
 #'
 #' @inheritParams viprs
 #' @param annot annotations keyed by Block and Index (or CHR and BP37 / BP38), one numeric column per annotation
@@ -30,15 +30,20 @@
 #'   same annotations (tau_c; with `resid_all = FALSE` the annotation values are tau_0 + tau_k, exact for
 #'   non-overlapping 0/1 annotations), or a numeric vector named `residual` and the annotation names. Values are cut
 #'   at 0 and then raised to at least `init_floor` times the mean h2_j (a sigma2_k at 0 would stay 0).
-#' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin; must exist).
+#' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin, from [ld_bins()]; must exist).
+#' @param skip_annot annotation columns that make a SNP annotated for the LD-bin suppression: NULL (default) every
+#'   binary 0/1 column, character(0) no suppression.
 #' @param control [viprs_annot_control()].
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
 #'   BETA_<annotation> per annotation and BETA_residual (BETA_STD scale: BETA_STD_<annotation>, ...); per SNP the
 #'   BETA_<...> columns sum to BETA. Attributes `sigma2` (sigma2_k), `h2_annot` (h2_k = (sum_j A_jk) sigma2_k over the
-#'   SNPs not suppressed) and `h2_share` (h2_k / sum_k h2_k), `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
+#'   SNPs not suppressed) and `h2_share` (h2_k / sum_k h2_k), `h2_post` (posterior allocation h2_k =
+#'   Cov(PRS_k, PRS) + sum_j R_jj w_jk Var(beta_j), additive: sum_k h2_post = E[beta' R beta]) and `h2_post_share`,
+#'   `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
-viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, resid_all = TRUE, sigma2_init = NULL,
+viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, resid_all = TRUE,
+                        sigma2_init = NULL,
                         thresh = 0, fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
@@ -48,11 +53,15 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
   if ("residual" %in% cols) stop("the annotation name 'residual' is reserved", call. = FALSE)
   if (any(A < 0)) stop("annotations must be >= 0", call. = FALSE)
   s2 <- .sigma2_init(sigma2_init, cols, resid_all)
+  if (is.null(skip_annot)) skip_annot <- cols[vapply(seq_along(cols), function(k) all(A[, k] %in% c(0, 1)), logical(1))]
+  miss <- setdiff(skip_annot, cols)
+  if (length(miss)) stop("skip_annot names no annotation column: ", paste(miss, collapse = ", "), call. = FALSE)
   if (is.null(bin_file)) bin_file <- file.path(ld_dir, paste0("ldbin", ctl$bin_r2, ".bin"))
   if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   t0 <- Sys.time()
   res <- viprs_annot_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, A, bin_file, d$start, d$n_panel,
-                         resid_all = resid_all, sigma2_init = s2, thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
+                         resid_all = resid_all, sigma2_init = s2, skip_cols = match(skip_annot, cols) - 1L,
+                         thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
   n_sup <- sum(res$extra$suppressed)
   hyp <- res$hyp
   message(sprintf("viprs_annot: %d SNPs (%d suppressed in %.0f LD bins), sum k %d; pi %.4g, h2 %.4f, sigma %.4f, %d iterations (%s), %.1f s",
@@ -73,6 +82,8 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
   attr(out, "sigma2") <- stats::setNames(res$sigma2, nm)
   attr(out, "h2_annot") <- stats::setNames(res$h2_annot, nm)
   attr(out, "h2_share") <- stats::setNames(res$h2_annot / sum(res$h2_annot), nm)
+  attr(out, "h2_post") <- stats::setNames(res$h2_post, nm)
+  attr(out, "h2_post_share") <- stats::setNames(res$h2_post / sum(res$h2_post), nm)
   attr(out, "n_bins") <- res$extra$n_bins
   attr(out, "n_suppressed") <- n_sup
   attr(out, "grid") <- data.table::as.data.table(res$extra$grid)
@@ -93,15 +104,18 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
+#' @param exact_em M-step of sigma2_k: TRUE the maximizer of the ELBO at fixed pi (sigma2_k <- pi S_k /
+#'   sum_j gamma_j A_jk), FALSE the moment form of VIPRS 0.1.5 (sigma2_k <- S_k / sum_j A_jk, as [viprs()]).
 #' @param init_floor smallest start value of a sigma2_k given by `sigma2_init`, as a fraction of the mean h2_j.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
-                                init_floor = 0.01, a0 = 0, b0 = 0) {
+                                exact_em = TRUE, init_floor = 0.01, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var), init_floor = as.numeric(init_floor), a0 = as.numeric(a0), b0 = as.numeric(b0)))
+                             mix_var = as.numeric(mix_var), exact_em = isTRUE(exact_em), init_floor = as.numeric(init_floor),
+                             a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
 
 # sigma2_k of the first grid point (residual first, then cols), or numeric(0) for the LDSC start

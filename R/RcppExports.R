@@ -89,6 +89,10 @@ gxe_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx,
     .Call(`_plink4r_gxe_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block)
 }
 
+ld_bins_cpp <- function(files, m, thresh, r2_min, chunk, threads) {
+    .Call(`_plink4r_ld_bins_cpp`, files, m, thresh, r2_min, chunk, threads)
+}
+
 ld_score_cpp <- function(files, offset, A, thresh, chunk, threads) {
     .Call(`_plink4r_ld_score_cpp`, files, offset, A, thresh, chunk, threads)
 }
@@ -145,8 +149,8 @@ viprs_cpp <- function(files, blocks, keep, z, n, af, thresh, fp16, control, thre
     .Call(`_plink4r_viprs_cpp`, files, blocks, keep, z, n, af, thresh, fp16, control, threads)
 }
 
-viprs_annot_cpp <- function(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, sigma2_init, thresh, fp16, control, threads) {
-    .Call(`_plink4r_viprs_annot_cpp`, files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, sigma2_init, thresh, fp16, control, threads)
+viprs_annot_cpp <- function(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, sigma2_init, skip_cols, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_annot_cpp`, files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, sigma2_init, skip_cols, thresh, fp16, control, threads)
 }
 
 weight_condition_cpp <- function(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads) {
