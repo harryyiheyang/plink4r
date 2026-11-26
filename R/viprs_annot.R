@@ -15,11 +15,13 @@
 #' back on the intercept.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
-#' Eigen cutoff: with more than one value in `cutoffs` (default 0.995, 0.999), one VI fit per cutoff at
-#' pi = `cut_pi` on the PUMAS training half (the same split at every cutoff, warm start across cutoffs), scored by the
-#' correlation with the validation half; the largest cutoff unless a smaller one has |r / r_largest| > `rel_r_min`
-#' (SBayesRC rule). Then search, PUMAS pseudo-validation and refit by VI as [viprs()] (pi grid ascending, each point warm-started from the
-#' last); `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
+#' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every eigen cutoff and pi):
+#' for each cutoff in `cutoffs` (default 0.995, 0.999) the pi grid of [viprs()] ascending, each point warm-started from
+#' the last (sigma2_k carried over); `sigma2_init` sets the sigma2_k of the first grid point of each cutoff, e.g. the
+#' stratified LDSC estimates of [ldsc_strat()].
+#' Each (cutoff, pi) is scored by r = eta' valid / sqrt(eta' R eta); per cutoff its best converged pi, across cutoffs
+#' the largest cutoff unless a smaller one has r / r_largest > `rel_r_min` (SBayesRC rule). The chosen (cutoff, pi) is
+#' refitted by VI on all data.
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
 #' with Rao-Blackwell means; sigma2_k and sigma by stochastic approximation of the same M-step. BETA is the mean of
 #' the conditional posterior means m_j over the draws and BETA_k the mean of w_jk m_j (w_jk of each sweep), so the
@@ -48,7 +50,8 @@
 #'   column as its Shapley value in beta' R beta: the mean over the draws of beta^(k)' R beta, cross terms split evenly
 #'   between the two columns, so the values add up to the total) with `h2_shapley_sd` (sd over the draws);
 #'   `var_shapley` (the same for the output PRS, b_k' R b: they add up to b' R b, the PRS variance on the panel),
-#'   `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
+#'   `grid` (one row per (cutoff, pi) with its pseudo-validation r), `grid_sigma2` (sigma2_k at each grid point),
+#'   `cutoff` and `best_pseudo_r` (the chosen point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
 viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, sigma2_init = NULL,
@@ -102,9 +105,8 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   gs <- res$extra$grid_sigma2
   colnames(gs) <- nm
   attr(out, "grid_sigma2") <- gs
-  attr(out, "best_pseudo_r2") <- res$extra$best_pseudo_r2
+  attr(out, "best_pseudo_r") <- res$extra$best_pseudo_r
   attr(out, "cutoff") <- res$extra$cutoff
-  attr(out, "cutoff_table") <- data.table::as.data.table(res$extra$cutoff_table)
   attr(out, "pumas_xi") <- res$extra$pumas_xi
   .prs_write(out, output)
   out[]
@@ -118,10 +120,9 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
-#' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) compared by VI; one value fixes the cutoff; a
-#'   value at or above the panel's stored cutoff keeps every stored pair.
-#' @param cut_pi pi of the VI fits that compare the cutoffs.
-#' @param rel_r_min a smaller cutoff is taken when its |r / r_largest| exceeds this.
+#' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) searched jointly with pi; one value fixes the
+#'   cutoff; a value at or above the panel's stored cutoff keeps every stored pair.
+#' @param rel_r_min a smaller cutoff is taken when its r / r_largest exceeds this.
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
@@ -129,10 +130,10 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
-                                cutoffs = c(0.995, 0.999), cut_pi = 0.01, rel_r_min = 1.25,
+                                cutoffs = c(0.995, 0.999), rel_r_min = 1.25,
                                 gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs), cut_pi = as.numeric(cut_pi),
+                             mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
                              rel_r_min = as.numeric(rel_r_min), gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))

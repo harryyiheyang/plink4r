@@ -23,9 +23,11 @@
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
-// Eigen cutoff (cutoffs, SBayesRC rule) by VI at pi = cut_pi (choose_cutoff). Then, on the panel at that cutoff,
-// Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted); the
-// sigma2_k (variance of beta) are carried over when pi moves (the start sets those of the first grid point).
+// Eigen cutoff and pi searched jointly by VI on one PUMAS split (fit_path): xi is drawn once on the full panel, the
+// truncated panel of each cutoff uses its leading entries, so every (cutoff, pi) is scored on the same pseudo
+// validation, r = eta' valid / sqrt(eta' R eta). Per cutoff the pi grid runs ascending with warm start (sigma2_k carried
+// over when pi moves); its best converged point is kept. Across cutoffs (as sbayesrc()): the largest cutoff unless a
+// smaller one has r / r_largest > rel_r_min. The chosen (cutoff, pi) is refitted on all data, then the Gibbs fit.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -53,8 +55,8 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
-  double cut_pi, rel_r_min;
-  std::vector<double> cutoffs;  // eigen cutoffs compared by VI at cut_pi (one value: fixed)
+  double rel_r_min;
+  std::vector<double> cutoffs;  // eigen cutoffs searched jointly with pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
@@ -93,12 +95,11 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.gibbs_burn = Rcpp::as<int>(c["gibbs_burn"]);
   x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
   x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
-  x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
   x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
   if (x.cutoffs.empty()) Rcpp::stop("cutoffs: at least one eigen cutoff");
   for (double v : x.cutoffs) if (!(v > 0 && v <= 1)) Rcpp::stop("cutoffs must be in (0, 1]");
   std::sort(x.cutoffs.begin(), x.cutoffs.end());
-  if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
+
   if (x.gibbs_burn < 0 || x.gibbs_draws < 0) Rcpp::stop("gibbs_burn and gibbs_draws must be >= 0");
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -528,14 +529,6 @@ struct Fitter {
       n_tr[j] = n[j] * (float)c.prop_train;
     }
   }
-
-  static void pseudo_r2(const State& st, const std::vector<float>& bv, double& r2, double& rb) {
-    rb = 0;
-    double bsb = 0;
-    for (std::size_t j = 0; j < st.eta.size(); ++j) rb += (double)st.eta[j] * bv[j];
-    for (float x : st.s) bsb += (double)x * x;
-    r2 = bsb > 0 ? rb * rb / bsb : 0.;
-  }
 };
 
 // ---- output
@@ -641,9 +634,6 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
   return in;
 }
 
-// pi ascending with warm start (state and variance model carried over), PUMAS pseudo-validation, early stop after
-// stop_after consecutive drops of pseudo R2, refit of the best converged point on all data (points that did not
-// converge are never chosen)
 // variance model start: sigma2_init (intercept > 0) or all sigma2_k equal with sum_j h2_j = the LDSC h2; returns the
 // start h2 (sigma = 1 - it)
 double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0, double pi, const ViprsControl& c) {
@@ -656,142 +646,121 @@ double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0
   return h2_0;
 }
 
-// Eigen cutoff (SBayesRC rule, VI): the panel is read once with every stored pair; at each cutoff (ascending, effects
-// and sigma2_k warm-started from the last) one VI fit at pi = cut_pi on the PUMAS training half (the same xi draws at
-// every cutoff), scored by r = b' valid / sqrt(b' R b) with the validation half and R of the full panel. Base: the
-// largest cutoff; a smaller one is taken when its |r / r_base| is the largest and above rel_r_min (or r_base < 0).
-// Returns the index of the chosen cutoff and its panel (null: the full panel).
-template <typename T>
-int choose_cutoff(const EigenPanel<T>& P0, const Inputs& in, const std::vector<double>& A, int K,
-                  const std::vector<char>& sup, const std::vector<double>& s2_init, const std::vector<std::string>& files,
-                  const ViprsControl& c, int threads, std::unique_ptr<EigenPanel<T>>& chosen, Rcpp::DataFrame& tab) {
-  const int nc = (int)c.cutoffs.size();
-  std::vector<std::vector<int>> ks(nc, std::vector<int>(P0.nb));
-  for (int i = 0; i < nc; ++i)
-    for (int b = 0; b < P0.nb; ++b) {
-      int m = 0;
-      plink4r::eigen_block_dims(files[b], c.cutoffs[i], m, ks[i][b], true);
-      ks[i][b] = std::min(ks[i][b], P0.k[b]);
-    }
-  if (nc == 1) {
-    if (ks[0] != P0.k) chosen.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[0], threads)));
-    tab = Rcpp::DataFrame::create(Rcpp::_["cut"] = c.cutoffs[0]);
-    return 0;
-  }
-  Fitter<T> F0(P0, c, in.n, in.z, threads);
-  std::vector<float> tr0, valid0, ntr0;
-  std::vector<double> xi0;
-  F0.pumas(tr0, valid0, ntr0, xi0);
-  const double h2_0 = F0.h2_ldsc();
-  std::vector<double> rr(nc), sec(nc);
-  std::vector<int> ktot(nc), conv(nc);
-  std::vector<float> eta(P0.M, 0.f), gam(P0.M, (float)c.cut_pi), s0(P0.S);
-  for (int64_t j = 0; j < P0.M; ++j) if (sup[j]) gam[j] = 0.f;
-  VarModel vm(P0.M, K, A, sup, threads);
-  double sigma = 1. - start_model(vm, s2_init, h2_0, c.cut_pi, c);
-  for (int i = 0; i < nc; ++i) {
-    const auto t0 = std::chrono::steady_clock::now();
-    std::unique_ptr<EigenPanel<T>> Pi;
-    if (ks[i] != P0.k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[i], threads)));
-    const EigenPanel<T>& P = Pi ? *Pi : P0;
-    Fitter<T> F(P, c, in.n, in.z, threads);
-    std::vector<float> train, valid, n_tr;
-    std::vector<double> xi;
-    F.pumas(train, valid, n_tr, xi);
-    State st(P.M, P.S, c.cut_pi);
-    st.eta = eta; st.gamma = gam;
-    vm.pi_move(c.cut_pi);
-    const RunResult r = F.run(st, n_tr.data(), train.data(), c.cut_pi, vm, sigma, c.grid_max_iter, nullptr);
-    sigma = r.sigma; eta = st.eta; gam = st.gamma;
-    double bv = 0, bb = 0;
-    for (int64_t j = 0; j < P0.M; ++j) bv += (double)eta[j] * valid0[j];
-    vtx(P0, eta.data(), s0.data(), threads);
-    for (float x : s0) bb += (double)x * x;
-    rr[i] = bb > 0 ? bv / std::sqrt(bb) : 0.;
-    conv[i] = r.converged;
-    ktot[i] = 0;
-    for (int k : ks[i]) ktot[i] += k;
-    sec[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    Rcpp::checkUserInterrupt();
-  }
-  const int ib = nc - 1;
-  std::vector<double> rel(nc);
-  int best = -1;
-  for (int i = 0; i < nc; ++i) {
-    rel[i] = rr[ib] != 0 ? std::fabs(rr[i] / rr[ib]) : 0.;
-    if (rr[i] > 0 && (best < 0 || rel[i] > rel[best])) best = i;
-  }
-  int ich = ib;
-  if (best >= 0 && best != ib && (rel[best] > c.rel_r_min || rr[ib] < 0)) ich = best;
-  tab = Rcpp::DataFrame::create(Rcpp::_["cut"] = c.cutoffs, Rcpp::_["k_total"] = ktot, Rcpp::_["r"] = rr,
-                                Rcpp::_["rel_r"] = rel, Rcpp::_["converged"] = conv, Rcpp::_["seconds"] = sec,
-                                Rcpp::_["chosen"] = Rcpp::LogicalVector(nc, false));
-  Rcpp::LogicalVector ch = tab["chosen"];
-  ch[ich] = true;
-  if (ks[ich] != P0.k) chosen.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[ich], threads)));
-  return ich;
-}
-
+// Joint search of the eigen cutoff and pi by VI on one PUMAS split: the panel is read once with every stored pair (P0);
+// xi is drawn once per block (Fitter::pumas), the panel at a smaller cutoff uses its leading entries, so every cutoff
+// trains on the same pseudo data. For each cutoff (ascending): the pi grid ascending with warm start (state and
+// variance model carried over; early stop after stop_after consecutive drops), each point scored on the validation
+// half of P0 with R of P0, r = b' valid / sqrt(b' R b). Per cutoff the best converged point with r > 0; across cutoffs
+// the largest cutoff unless a smaller one has |r / r_largest| > rel_r_min (SBayesRC rule). Refit of the chosen point on
+// all data at its cutoff, then the final Gibbs fit.
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
                     const std::vector<double>& s2_init, const std::vector<std::string>& files,
                     const ViprsControl& c, int threads) {
   std::unique_ptr<EigenPanel<T>> P0(
       new EigenPanel<T>(plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, 0., threads)));
+  const int nc = (int)c.cutoffs.size();
+  std::vector<std::vector<int>> ks(nc, std::vector<int>(P0->nb));
+  for (int i = 0; i < nc; ++i)
+    for (int b = 0; b < P0->nb; ++b) {
+      int m = 0;
+      plink4r::eigen_block_dims(files[b], c.cutoffs[i], m, ks[i][b], true);
+      ks[i][b] = std::min(ks[i][b], P0->k[b]);
+    }
+  std::vector<float> valid0;
+  std::vector<double> xi0;
+  {
+    Fitter<T> F0(*P0, c, in.n, in.z, threads);
+    std::vector<float> tr0, ntr0;
+    F0.pumas(tr0, valid0, ntr0, xi0);
+  }
+  std::vector<float> s0(P0->S);
+  auto score = [&](const State& st, double& rb, double& bsb) {
+    rb = 0; bsb = 0;
+    for (int64_t j = 0; j < P0->M; ++j) rb += (double)st.eta[j] * valid0[j];
+    vtx(*P0, st.eta.data(), s0.data(), threads);
+    for (float x : s0) bsb += (double)x * x;
+  };
+  std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gsec;
+  std::vector<int> git, gconv;
+  std::vector<std::vector<double>> gpar;
+  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0; State st{0, 0, 0.}; std::vector<double> par; };
+  std::vector<Best> best(nc);
+  std::unique_ptr<EigenPanel<T>> Pbest;  // truncated panel of the best cutoff so far (null: P0)
+  int ibest = -1;
+  double h2_0 = 0;
+  for (int ic = 0; ic < nc; ++ic) {
+    std::unique_ptr<EigenPanel<T>> Pi;
+    if (ks[ic] != P0->k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ic], threads)));
+    const EigenPanel<T>& P = Pi ? *Pi : *P0;
+    Fitter<T> F(P, c, in.n, in.z, threads);
+    const double h0 = F.h2_ldsc();
+    if (ic == nc - 1) h2_0 = h0;
+    const std::vector<double> grid = F.pi_grid();
+    std::vector<float> train, valid, n_tr;
+    std::vector<double> xi;
+    F.pumas(train, valid, n_tr, xi);
+    State st(P.M, P.S, grid[0]);
+    for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
+    VarModel vm(P.M, K, A, sup, threads);
+    double sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
+    double best_here = -INFINITY;
+    int drops = 0;
+    for (double pi : grid) {
+      vm.pi_move(pi);
+      const auto t1 = std::chrono::steady_clock::now();
+      const RunResult r = F.run(st, n_tr.data(), train.data(), pi, vm, sigma, c.grid_max_iter, nullptr);
+      sigma = r.sigma;
+      double rb, bsb;
+      score(st, rb, bsb);
+      const double rr = bsb > 0 ? rb / std::sqrt(bsb) : 0.;
+      gcut.push_back(c.cutoffs[ic]); gpi.push_back(pi); gsig.push_back(sigma); gh2.push_back(r.h2); gr.push_back(rr);
+      grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged); gpar.push_back(vm.par);
+      gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+      if (r.converged && rr > 0 && rr > best[ic].r) {
+        best[ic].have = true; best[ic].r = rr; best[ic].pi = pi; best[ic].sigma = sigma; best[ic].st = st;
+        best[ic].par = vm.par;
+      }
+      if (rr > best_here) { best_here = rr; drops = 0; }
+      else if (c.stop_after && ++drops >= c.stop_after) break;
+      Rcpp::checkUserInterrupt();
+    }
+    // keep this cutoff's panel only while it is the provisional choice (smallest cutoff with the best r so far)
+    if (best[ic].have && (ibest < 0 || best[ic].r > best[ibest].r)) { ibest = ic; Pbest = std::move(Pi); }
+  }
+  // SBayesRC rule across cutoffs: base = the largest cutoff with a usable point
+  int ib = -1;
+  for (int ic = nc - 1; ic >= 0 && ib < 0; --ic) if (best[ic].have) ib = ic;
+  if (ib < 0) Rcpp::stop("no grid point converged with a positive pseudo r");
+  int ich = ib;
+  if (ibest >= 0 && ibest != ib && best[ibest].r / best[ib].r > c.rel_r_min) ich = ibest;
   std::unique_ptr<EigenPanel<T>> Pc;
-  Rcpp::DataFrame cut_tab;
-  const int ich = choose_cutoff(*P0, in, A, K, sup, s2_init, files, c, threads, Pc, cut_tab);
-  if (Pc) P0.reset();  // the chosen panel is a truncated copy: the full one is no longer needed
+  if (ich == ibest) Pc = std::move(Pbest);
+  else if (ks[ich] != P0->k) Pc.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ich], threads)));
+  Pbest.reset();
+  if (Pc) P0.reset();
   const EigenPanel<T>& P = Pc ? *Pc : *P0;
   Fitter<T> F(P, c, in.n, in.z, threads);
-  const double h2_0 = F.h2_ldsc();
-  const std::vector<double> grid = F.pi_grid();
-  std::vector<float> train, valid, n_tr;
-  std::vector<double> xi;
-  F.pumas(train, valid, n_tr, xi);
-  std::vector<double> gpi, gsig, gh2, gr2, grb, gsec;
-  std::vector<int> git, gconv;
-  Rcpp::NumericMatrix gcoef(grid.size(), K);
-  double best_r2 = -INFINITY, bpi = 0, bsig = 0, best_here = -INFINITY;
-  State st(P.M, P.S, grid[0]), best(0, 0, 0.);
-  for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
-  VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
-  bool have_best = false;
-  double sigma = 1. - start_model(vm, s2_init, h2_0, grid[0], c);
-  int drops = 0;
-  for (double pi : grid) {
-    vm.pi_move(pi);
-    const auto t1 = std::chrono::steady_clock::now();
-    const RunResult r = F.run(st, n_tr.data(), train.data(), pi, vm, sigma, c.grid_max_iter, valid.data());
-    sigma = r.sigma;
-    double r2, rb;
-    Fitter<T>::pseudo_r2(st, valid, r2, rb);
-    for (int k = 0; k < K; ++k) gcoef(gpi.size(), k) = vm.par[k];
-    gpi.push_back(pi); gsig.push_back(sigma); gh2.push_back(r.h2); gr2.push_back(r2);
-    grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged);
-    gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
-    if (r.converged && rb > 0 && r2 > best_r2) {
-      best_r2 = r2; best = st; have_best = true;
-      bpi = pi; bsig = sigma; bvm.par = vm.par; bvm.pi = pi; bvm.set_all();
-    }
-    if (r2 > best_here) { best_here = r2; drops = 0; }
-    else if (c.stop_after && ++drops >= c.stop_after) break;
-  }
-  if (!have_best) Rcpp::stop("no grid point converged with a positive pseudo R2");
-  RunResult res = F.run(best, in.n.data(), P.bt.data(), bpi, bvm, bsig, c.max_iter, nullptr);
+  if (Pc) h2_0 = F.h2_ldsc();
+  VarModel bvm(P.M, K, A, sup, threads);
+  bvm.par = best[ich].par; bvm.pi = best[ich].pi; bvm.set_all();
+  State bst = best[ich].st;
+  RunResult res = F.run(bst, in.n.data(), P.bt.data(), best[ich].pi, bvm, best[ich].sigma, c.max_iter, nullptr);
   GibbsOut G;
-  if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, best, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
+  if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, bst, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
   const int ng = gpi.size();
+  Rcpp::NumericMatrix gcoef(ng, K);
+  for (int g = 0; g < ng; ++g) for (int k = 0; k < K; ++k) gcoef(g, k) = gpar[g][k];
   Rcpp::DataFrame tab = Rcpp::DataFrame::create(
-      Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2, Rcpp::_["pseudo_r2"] = gr2,
-      Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
+      Rcpp::_["cutoff"] = gcut, Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2,
+      Rcpp::_["pseudo_r"] = gr, Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
       Rcpp::_["seconds"] = gsec);
-  return pack(F, best, res, bvm, G, in.af, h2_0,
-              Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
-                                 Rcpp::_["best_pseudo_r2"] = best_r2, Rcpp::_["n_bins"] = n_bins,
-                                 Rcpp::_["cutoff"] = c.cutoffs[ich], Rcpp::_["cutoff_table"] = cut_tab,
+  return pack(F, bst, res, bvm, G, in.af, h2_0,
+              Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef,
+                                 Rcpp::_["best_pseudo_r"] = best[ich].r, Rcpp::_["n_bins"] = n_bins,
+                                 Rcpp::_["cutoff"] = c.cutoffs[ich],
                                  Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
-                                 Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi.begin(), xi.end())));
+                                 Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi0.begin(), xi0.end())));
 }
 
 }  // namespace
