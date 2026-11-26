@@ -22,6 +22,6 @@ for d in lipid bp; do
     ANNOT=$AN/annot_9M_all_20261122.parquet DESIGN="${DES[$d]}" PI=0.01 NGWAS=300000 BLOCKS=1-100 \
       python3 gen_var.py $LD ref_1-100.tsv $D $seed | tee $D.gen.txt
     LDSCORE=$AN/ldscore_9M_all_20261122.parquet BINS=ldbin0.98_1-100.bin Rscript run_var.R $LD ref_1-100.tsv $D | tee $D/run.txt
-    python3 eval_var.py $LD $D V A1 AMm AM AML | tee $D/eval.txt
+    python3 eval_var.py $LD $D V A P PL | tee $D/eval.txt
   done
 done

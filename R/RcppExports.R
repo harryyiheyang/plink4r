@@ -125,6 +125,10 @@ mixpart_cpp <- function(files, blocks, keep, z, n, A, resid_all, thresh, fp16, c
     .Call(`_plink4r_mixpart_cpp`, files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads)
 }
 
+partprs_cpp <- function(files, blocks, keep, z, n, af, A, suppressed, pi, sigma2, sigma, beta, h2_ref, thresh, fp16, control, threads) {
+    .Call(`_plink4r_partprs_cpp`, files, blocks, keep, z, n, af, A, suppressed, pi, sigma2, sigma, beta, h2_ref, thresh, fp16, control, threads)
+}
+
 reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }
