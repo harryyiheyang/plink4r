@@ -1,7 +1,7 @@
 /* C / C++ interface to the genotype kernels of plink4r, for other packages' compiled code.
  *
  * In the dependent package: DESCRIPTION `LinkingTo: plink4r` and `Imports: plink4r`, NAMESPACE
- * `importFrom(plink4r, geno_open)` (or any import, so that plink4r is loaded), then in C / C++
+ * `importFrom(plink4r, geno_crossprod)` (any import, so that plink4r is loaded), then in C / C++
  *   #include <Rcpp.h>            // or <Rinternals.h>; before this header
  *   #include <plink4r_api.h>
  * and pass the geno object's external pointer X$ptr and scale flag X$scale from R. The functions are
@@ -12,7 +12,10 @@
  * result into the caller's buffer (nothing is allocated for the result) and returns PLINK4R_API_OK or an
  * error code (no R error is raised); threads is the OpenMP thread count of plink4r's kernels (0 = from
  * plink4r_resources()). With scale != 0 the result is that of the column-standardized matrix (mean 0, sd 1
- * with n - 1; constant columns only centered), with the same values as the R functions named below.
+ * with n - 1; constant columns only centered). Each function and the R function named with it are wrappers
+ * of one kernel, so the two give identical values. The functions only read the geno object and keep nothing
+ * between calls, so they may be called from several threads at once, also on one object; a caller that
+ * needs a result more than once keeps it itself.
  */
 #ifndef PLINK4R_API_H
 #define PLINK4R_API_H
@@ -22,7 +25,7 @@
 
 #define PLINK4R_API_OK 0
 #define PLINK4R_API_EPTR 1   /* not a live geno external pointer */
-#define PLINK4R_API_EARG 2   /* bad size, NULL buffer or column index out of range */
+#define PLINK4R_API_EARG 2   /* bad size, NULL buffer, column index out of range or non-finite weight */
 #define PLINK4R_API_EFAIL 3  /* failure inside plink4r (e.g. out of memory) */
 
 #ifdef __cplusplus
@@ -56,13 +59,12 @@ static inline int plink4r_geno_mx(SEXP ptr, int scale, const double* B, int k, d
   return fn(ptr, scale, B, k, out, threads);
 }
 
-/* out (q x q) = X'X of the q = nc columns cols, or of all p columns when cols is NULL (nc ignored),
- * standardized in place in out; geno_crossprod(X)[cols + 1, cols + 1]. */
-static inline int plink4r_geno_xtx(SEXP ptr, int scale, const int* cols, int nc, double* out, int threads) {
-  typedef int (*fn_t)(SEXP, int, const int*, int, double*, int);
+/* out (p x p) = X'X; geno_crossprod(X). Computed on every call. */
+static inline int plink4r_geno_xtx(SEXP ptr, int scale, double* out, int threads) {
+  typedef int (*fn_t)(SEXP, int, double*, int);
   static fn_t fn = NULL;
   if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtx");
-  return fn(ptr, scale, cols, nc, out, threads);
+  return fn(ptr, scale, out, threads);
 }
 
 /* out (n x nc) = the columns cols as double; X[, cols + 1]. */
@@ -71,6 +73,19 @@ static inline int plink4r_geno_cols(SEXP ptr, int scale, const int* cols, int nc
   static fn_t fn = NULL;
   if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_cols");
   return fn(ptr, scale, cols, nc, out, threads);
+}
+
+/* out (p x p) = X'W~X with W~ = diag(w binned): rows sorted by w, each run of 64 sorted rows takes the mean
+ * of its w (n values); when more than 1% of the cells are stored off the 0/1/2 grid (dosages, mean-filled
+ * missing calls), W~ = diag(w) instead (float products, double sums). Standardized in place in out with the
+ * weights of the result; w_bin (n values, may be NULL) receives those weights.
+ * geno_wcrossprod_bin(X, w)$XtWX and $w. */
+static inline int plink4r_geno_xtwx_bin(SEXP ptr, int scale, const double* w, double* out, double* w_bin,
+                                        int threads) {
+  typedef int (*fn_t)(SEXP, int, const double*, double*, double*, int);
+  static fn_t fn = NULL;
+  if (!fn) fn = (fn_t) R_GetCCallable("plink4r", "plink4r_geno_xtwx_bin");
+  return fn(ptr, scale, w, out, w_bin, threads);
 }
 
 #ifdef __cplusplus

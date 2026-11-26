@@ -13,21 +13,18 @@
 #' The pi grid is VIPRS's official one (`pi_steps` values, log10 spaced from max(10 / M, 1e-5) to min(1e4 / M, 0.2),
 #' extended upward by `grid_extend` points), or `pi_grid` when given (the cgrid setting: `pi_grid = c * r^(kmin:kmax)`).
 #'
-#' @param sumstat output of [summarystat_tidy()] or [summarystat_impute()] (data.table or file): columns ID, A1, A2,
-#'   Z, N (optionally r2: rows with r2 <= 0 carry no data and are dropped). Rows are matched to the panel by ID; A1 / A2
-#'   swapped relative to the panel alt / ref flips Z; other rows are dropped.
-#' @param ld_dir directory with block<N>.eigen.bin (SBayesRC or plink4r layout) and the panel SNP .parquet.
-#' @param ref panel SNP table in place of the .parquet in `ld_dir` (data.frame or parquet path): ID, chr, bp37 and / or
-#'   bp38, ref, alt, AF_PanUKB, block, ld_index.
+#' @param sumstat output of [summarystat_tidy()] or [sumstat_impute()] with this panel (data.table or file): A1, A2
+#'   (the panel's), Z, N, Block, Index (optionally r2: rows with r2 <= 0 carry no data and are dropped).
+#' @param ld_dir the LD panel folder: block<N>.eigen.bin (SBayesRC or plink4r layout) and snpinfo.parquet.
+#' @param ref panel SNP table in place of snpinfo.parquet of `ld_dir` (data.frame or parquet path).
 #' @param thresh eigenvalue variance kept per block; <= 0 (default) keeps every stored eigenpair (as viprs_eigen).
 #' @param fp16 store V as IEEE float16 (half the memory; the data terms are computed from the rounded rows).
 #' @param control [viprs_control()].
 #' @param threads OpenMP threads (0: [plink4r_resources()]).
 #' @param output optional output path (.parquet or text).
-#' @return data.table over the fitted SNPs: ID, chr, bp37, bp38, A1, A2, freq (A1 frequency of the panel), BETA (per
-#'   A1 allele, BETA_STD / sqrt(2 freq (1 - freq))), BETA_STD, PIP; attributes `hyp` (hyperparameters, iterations,
-#'   counts), `grid` (one row per grid point), `best_pseudo_r2` and `pumas_xi`. ID, A1 and BETA are
-#'   the columns [geno_score()] reads.
+#' @return data.table over the fitted SNPs, by Block and Index: CHR, BP37, BP38, A1, A2, A1Freq (of the panel), Block,
+#'   Index, BETA (per A1 allele, BETA_STD / sqrt(2 A1Freq (1 - A1Freq))), BETA_STD, PIP; attributes `hyp`
+#'   (hyperparameters, iterations, counts), `grid` (one row per grid point), `best_pseudo_r2` and `pumas_xi`.
 #' @export
 viprs <- function(sumstat, ld_dir, ref = NULL, thresh = 0, fp16 = TRUE, control = viprs_control(), threads = 4L,
                   output = NULL) {
@@ -35,13 +32,13 @@ viprs <- function(sumstat, ld_dir, ref = NULL, thresh = 0, fp16 = TRUE, control 
   d <- .prs_inputs(sumstat, ref, ld_dir)
   ctl <- do.call(viprs_control, control)
   t0 <- Sys.time()
-  res <- viprs_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, thresh = thresh, fp16 = fp16, control = ctl,
+  res <- viprs_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, thresh = thresh, fp16 = fp16, control = ctl,
                    threads = threads)
   hyp <- res$hyp
   message(sprintf("viprs: %d SNPs, sum k %d; pi %.4g, h2 %.4f, sigma %.4f, %d iterations (%s), %.1f s",
                   as.integer(hyp$n_snps), as.integer(hyp$sum_k), hyp$pi, hyp$h2, hyp$sigma, as.integer(hyp$iters),
                   hyp$message, as.numeric(difftime(Sys.time(), t0, units = "secs"))))
-  out <- d$x[, .(ID, chr, bp37, bp38, A1, A2, freq)]
+  out <- d$x[, .(CHR, BP37, BP38, A1, A2, A1Freq, Block, Index)]
   out[, `:=`(BETA = res$BETA, BETA_STD = res$BETA_STD, PIP = res$PIP)]
   attr(out, "hyp") <- hyp
   attr(out, "grid") <- data.table::as.data.table(res$extra$grid)

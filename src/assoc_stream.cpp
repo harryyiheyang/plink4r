@@ -9,8 +9,8 @@
 //   B = Z'R2 Z - M2'M - M'M2 + M'(V'R2 V)M,  M2 = V'R2 Z, R2 = diag(r^2)          (robust, linear only)
 // and every n-long sum is an entry of L1'G or L2'(G o G), G the centred genotypes of a block (missing call = mean,
 // i.e. 0 after centring), L1 = [wV e_j | r2 V e_j | r e_j], L2 = [w e_j e_l | r2 e_j e_l]_{j <= l}. G is expanded
-// to doubles kRowChunk rows at a time from the 2-bit codes (hard calls) or 1/16384 dosages, so a thread holds
-// b variants as n/4 (or 2n) bytes each plus 2 x kRowChunk x b doubles. A variant whose A_jj lost more than
+// to doubles kScanRowChunk rows at a time from the 2-bit codes (hard calls) or 0.01 dosages, so a thread holds
+// b variants as n/4 (or 2n) bytes each plus 2 x kScanRowChunk x b doubles. A variant whose A_jj lost more than
 // 1 - 1/kKappaMax of Z_j'W Z_j to the subtraction (strong collinearity with the covariates) is recomputed by
 // explicit projection. The block size b follows from mem_gb (shared L1, L2, V, outputs; then per thread).
 // Products: la().dgemm_tn (SIMD dispatch of la_kernel.cpp); small S x S algebra: Eigen.
@@ -25,16 +25,14 @@
 #include <omp.h>
 #endif
 #include "la_dispatch.h"
-#include "pgen_reader.h"
+#include "scan_block.h"
 #include "resources.h"
 
 namespace {
 
-constexpr int kRowChunk = 2048;          // rows of G expanded at a time (multiple of 4)
-constexpr int kBlockMax = 4096;          // largest automatic block per thread
+using plink4r::kScanRowChunk;
 constexpr double kKappaMax = 1e4;        // explicit projection when Z_j'WZ_j / A_jj exceeds this
 constexpr double kRankTol = 1.4901161193847656e-08;  // sqrt(DBL_EPSILON), as mgcv
-constexpr std::uint16_t kDosMiss = plink4r::PgenFile::kMissing;
 
 
 inline int pair_index(int S, int j, int l) {
@@ -134,40 +132,15 @@ void build_pre(Pre& pre, const Rcpp::NumericMatrix& X, int S, const Rcpp::Numeri
   }
 }
 
-// Variants of one thread: compact genotypes over the analysis samples and the block products.
-struct Worker {
-  int cap = 0, n = 0;
-  bool dosage = false;
-  std::size_t sb = 0;
-  std::vector<unsigned char> g8;   // cap x sb: 2-bit codes (0/1/2 = count, 3 = missing)
-  std::vector<std::uint16_t> g16;  // cap x n: dosage x 16384, kDosMiss = missing
-  std::vector<double> mean, G, G2, C1, C2, z, Z, Zt;
-  std::vector<int> mono;
+// Variants of one thread: their compact genotypes (scan_block.h) and the block products.
+struct Worker : plink4r::ScanBlock {
+  std::vector<double> G, G2, C1, C2, z, Z, Zt;
   void init(const Pre& pre, int capacity, bool dos) {
-    cap = capacity; n = pre.n; dosage = dos;
-    sb = (static_cast<std::size_t>(n) + 3) / 4;
-    if (dosage) g16.assign(static_cast<std::size_t>(cap) * n, 0); else g8.assign(cap * sb, 0);
-    mean.assign(cap, 0.0); mono.assign(cap, 0);
-    const std::size_t R = std::min(kRowChunk, n);
+    ScanBlock::init(capacity, pre.n, dos);
+    const std::size_t R = std::min(kScanRowChunk, n);
     G.assign(R * cap, 0.0); G2.assign(R * cap, 0.0);
     C1.assign(static_cast<std::size_t>(pre.m1) * cap, 0.0);
     C2.assign(static_cast<std::size_t>(pre.m2) * cap, 0.0);
-  }
-  void centred(int s, int row0, int rows, double* out) const {
-    const double mu = mean[s];
-    if (dosage) {
-      const std::uint16_t* d = &g16[static_cast<std::size_t>(s) * n + row0];
-      for (int i = 0; i < rows; ++i) out[i] = d[i] == kDosMiss ? 0.0 : d[i] * (1.0 / 16384.0) - mu;
-      return;
-    }
-    const double lut[4] = {-mu, 1.0 - mu, 2.0 - mu, 0.0};
-    const unsigned char* p = &g8[s * sb + (row0 >> 2)];
-    int i = 0;
-    for (; i + 4 <= rows; i += 4) {
-      const unsigned b = p[i >> 2];
-      out[i] = lut[b & 3]; out[i + 1] = lut[(b >> 2) & 3]; out[i + 2] = lut[(b >> 4) & 3]; out[i + 3] = lut[b >> 6];
-    }
-    for (; i < rows; ++i) out[i] = lut[(p[i >> 2] >> ((i & 3) << 1)) & 3];
   }
 };
 
@@ -210,8 +183,8 @@ void explicit_projection(const Pre& pre, Worker& wk, int s, double* c, double* A
 int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA, double* BB) {
   const int n = pre.n, k = pre.k, S = pre.S, m1 = pre.m1, m2 = pre.m2, kS = k * S;
   const plink4r::LaFns& LA = plink4r::la();
-  for (int row0 = 0; row0 < n; row0 += kRowChunk) {
-    const int rows = std::min(kRowChunk, n - row0);
+  for (int row0 = 0; row0 < n; row0 += kScanRowChunk) {
+    const int rows = std::min(kScanRowChunk, n - row0);
     for (int s = 0; s < nb; ++s) {
       double* g = &wk.G[static_cast<std::size_t>(s) * rows];
       double* g2 = &wk.G2[static_cast<std::size_t>(s) * rows];
@@ -272,15 +245,8 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   if (S < 1 || S > X.ncol()) Rcpp::stop("S out of range");
   if (n_exp < 0 || n_exp > S - 1) Rcpp::stop("n_exp out of range");
   if (robust && w.size()) Rcpp::stop("robust standard errors are for the linear model only");
-  const std::vector<int> vi(var_idx.begin(), var_idx.end()), si(sample_idx.begin(), sample_idx.end());
-  const bool ident = plink4r::identity_samples(si.data(), ns, n_raw);
-
-  std::unique_ptr<plink4r::PgenFile> pf;
-  std::unique_ptr<plink4r::BedFile> bf;
-  if (bed) bf.reset(new plink4r::BedFile(path, n_raw, allele_ct.size(), T));  // allele_ct: one entry per .bim row
-  else pf.reset(new plink4r::PgenFile(path, n_raw, std::vector<int>(allele_ct.begin(), allele_ct.end()), T));
-  const bool dos = pf && pf->dosage();
-  const std::size_t rawb = (static_cast<std::size_t>(n_raw) + 3) / 4;
+  plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
+  const bool dos = F.dosage;
 
   Pre pre;
   build_pre(pre, X, S, resid, w, robust);
@@ -289,24 +255,13 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   for (double v : pre.r) rr += v * v;
 
   // block size from the memory budget
-  const double GiB = 1073741824.0;
   const std::size_t N = ns;
   const double shared = 8.0 * N * (pre.m1 + pre.m2 + k + S + 4) + 8.0 * p * (4 * S + 2 * S * S + 12) +
                         8.0 * N * X.ncol() * 2;
-  const double per_var = (dos ? 2.0 * N : (N + 3) / 4.0) + 16.0 * std::min<int>(kRowChunk, ns) +
+  const double per_var = plink4r::ScanBlock::var_bytes(ns, dos) + 16.0 * std::min<int>(kScanRowChunk, ns) +
                          8.0 * (pre.m1 + pre.m2) + 8.0 * (S + 2 * S * S + 4);
-  const double per_thread = 8.0 * N * (1 + 2 * S) + (bed ? rawb : (dos ? 3.0 * n_raw : rawb)) + 1048576.0;
-  const double budget = mem_gb * GiB * 0.95 - 268435456.0 - shared;
-  const int per_thread_max = (p + T - 1) / T;
-  int b = block;
-  if (b <= 0) {
-    const double room = budget / T - per_thread;
-    if (room < per_var)
-      Rcpp::stop("mem_gb = %.2f is too small: about %.2f GB are needed for %d samples and %d threads.", mem_gb,
-                 (shared + T * (per_thread + per_var) + 268435456.0) / 0.95 / GiB, ns, T);
-    b = static_cast<int>(std::min<double>(kBlockMax, std::floor(room / per_var)));
-  }
-  b = std::max(1, std::min(b, std::max(1, per_thread_max)));
+  const double per_thread = 8.0 * N * (1 + 2 * S) + F.thread_bytes();
+  const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
   // outputs
   Rcpp::NumericVector nobs(p), asum(p);
@@ -328,6 +283,8 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
     if (robust) bbuf[t].resize(static_cast<std::size_t>(b) * S * S);
   }
   std::vector<int> bad(T, -1);
+  double* n_obs = nobs.begin();
+  double* a1_sum = asum.begin();
   int nexp = 0;
 
   for (long long c0 = 0; c0 < p; c0 += static_cast<long long>(b) * T) {
@@ -340,39 +297,8 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
       const long long j0 = c0 + static_cast<long long>(t) * b;
       if (j0 >= p) continue;
       const int nb = static_cast<int>(std::min<long long>(b, p - j0));
-      // read and compact
-      for (int s = 0; s < nb; ++s) {
-        const long long j = j0 + s;
-        double no = 0, sum = 0, sq = 0;
-        if (dos) {
-          const std::uint16_t* d = pf->read_dosage(static_cast<std::size_t>(vi[j]), th);
-          if (!d) { bad[th] = static_cast<int>(j); W.mono[s] = 1; continue; }
-          std::uint16_t* o = &W.g16[static_cast<std::size_t>(s) * ns];
-          for (int i = 0; i < ns; ++i) {
-            const std::uint16_t v = d[si[i]];
-            o[i] = v;
-            if (v == kDosMiss) continue;
-            const double x = v * (1.0 / 16384.0);
-            no += 1; sum += x; sq += x * x;
-          }
-        } else {
-          const unsigned char* gv;
-          gv = bed ? bf->read_counts(static_cast<std::size_t>(vi[j]), th) : pf->read(static_cast<std::size_t>(vi[j]), th);
-          if (!gv) { bad[th] = static_cast<int>(j); W.mono[s] = 1; continue; }
-          unsigned char* dst = &W.g8[s * W.sb];
-          plink4r::compact_genovec(gv, si.data(), ns, ident, dst);
-          long long cnt[4];
-          plink4r::count_codes(dst, W.sb, cnt);
-          cnt[0] -= static_cast<long long>(W.sb * 4 - ns);  // padding is code 0
-          no = static_cast<double>(cnt[0] + cnt[1] + cnt[2]);
-          sum = static_cast<double>(cnt[1] + 2 * cnt[2]);
-          sq = static_cast<double>(cnt[1] + 4 * cnt[2]);
-        }
-        nobs[j] = no; asum[j] = sum;
-        const double mu = no > 0 ? sum / no : 0.0, v = no > 0 ? sq / no - mu * mu : 0.0;
-        W.mean[s] = mu;
-        W.mono[s] = (no < 2 || !(v > 1e-12 * std::max(1.0, sq / std::max(no, 1.0)))) ? 1 : 0;
-      }
+      const long long failed = W.read(F, j0, nb, th, n_obs, a1_sum);
+      if (failed >= 0) bad[th] = static_cast<int>(failed);
       double* cc = cbuf[th].data();
       double* AA = abuf[th].data();
       double* BB = robust ? bbuf[th].data() : nullptr;

@@ -529,8 +529,8 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // converge are never chosen)
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
-                    bool resid_all, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
-  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
+                    bool resid_all, const std::vector<std::string>& files, double thresh, const ViprsControl& c, int threads) {
+  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
   const std::vector<double> grid = F.pi_grid();
@@ -590,7 +590,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 // stored pair), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]
-Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep,
+Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
                            const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all,
                            double thresh,
@@ -636,8 +636,8 @@ Rcpp::List viprs_annot_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks
         off += m;
       }
     }
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, ld_dir, thresh, c, T)
-                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, ld_dir, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, files, thresh, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, files, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }

@@ -18,7 +18,8 @@
 #' out of the M-step. Without binary annotation columns nothing is suppressed.
 #'
 #' @inheritParams viprs
-#' @param annot data.frame with ID and one numeric column per annotation (binary 0/1 or continuous score >= 0);
+#' @param annot annotations keyed by Block and Index (or CHR and BP37 / BP38), one numeric column per annotation
+#'   (binary 0/1 or continuous score >= 0);
 #'   SNPs not in `annot` get 0.
 #' @param resid_all residual annotation A_R = 1 for every SNP (TRUE) or only for SNPs without annotation (FALSE).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin; must exist).
@@ -34,19 +35,14 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
   ctl <- do.call(viprs_annot_control, control)
-  an <- data.table::as.data.table(annot)
-  if (!"ID" %in% names(an)) stop("annot needs an ID column", call. = FALSE)
-  cols <- setdiff(names(an), "ID")
+  A <- .prs_annot(annot, d$x)
+  cols <- colnames(A)
   if ("residual" %in% cols) stop("the annotation name 'residual' is reserved", call. = FALSE)
-  A <- if (length(cols)) as.matrix(an[d$x[, .(ID)], on = "ID", ..cols]) else matrix(0, nrow(d$x), 0)
-  A[is.na(A)] <- 0
-  storage.mode(A) <- "double"
   if (any(A < 0)) stop("annotations must be >= 0", call. = FALSE)
-  message(length(cols), " annotation columns; ", sum(!d$x$ID %in% an$ID), " SNPs without annotation (set to 0)")
   if (is.null(bin_file)) bin_file <- file.path(ld_dir, paste0("ldbin", ctl$bin_r2, ".bin"))
   if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   t0 <- Sys.time()
-  res <- viprs_annot_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, bin_file, d$start, d$n_panel,
+  res <- viprs_annot_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, A, bin_file, d$start, d$n_panel,
                          resid_all = resid_all, thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
   n_sup <- sum(res$extra$suppressed)
   hyp <- res$hyp
@@ -54,7 +50,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
                   as.integer(hyp$n_snps), n_sup, res$extra$n_bins, as.integer(hyp$sum_k), hyp$pi, hyp$h2, hyp$sigma,
                   as.integer(hyp$iters), hyp$message, as.numeric(difftime(Sys.time(), t0, units = "secs"))))
   nm <- c("residual", cols)
-  out <- d$x[, .(ID, chr, bp37, bp38, A1, A2, freq)]
+  out <- d$x[, .(CHR, BP37, BP38, A1, A2, A1Freq, Block, Index)]
   out[, `:=`(BETA = res$BETA, BETA_STD = res$BETA_STD, PIP = res$PIP, H2_SNP = res$H2_SNP,
              SUPPRESSED = res$extra$suppressed)]
   sc <- ifelse(res$BETA_STD != 0, res$BETA / res$BETA_STD, 0)  # 1 / sqrt(2 p (1 - p)) per SNP

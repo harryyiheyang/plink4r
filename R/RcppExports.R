@@ -5,115 +5,155 @@ assoc_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, X
     .Call(`_plink4r_assoc_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, X, S, n_exp, resid, w, robust, threads, mem_gb, block)
 }
 
-geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, mean, threads)
+cox_null_cpp <- function(time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_cox_null_cpp`, time, status, X, max_iter, mu_eps, f_tol, rank_tol, proj)
 }
 
-geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, mean, threads) {
-    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, mean, threads)
+geno_open_bed_cpp <- function(path, n_total, m_total, variants, samples, threads) {
+    .Call(`_plink4r_geno_open_bed_cpp`, path, n_total, m_total, variants, samples, threads)
+}
+
+geno_open_pgen_cpp <- function(path, n_total, allele_ct, variants, samples, threads) {
+    .Call(`_plink4r_geno_open_pgen_cpp`, path, n_total, allele_ct, variants, samples, threads)
 }
 
 geno_info_cpp <- function(ptr) {
     .Call(`_plink4r_geno_info_cpp`, ptr)
 }
 
-geno_xtx_cpp <- function(ptr, threads) {
-    .Call(`_plink4r_geno_xtx_cpp`, ptr, threads)
+geno_xtx_cpp <- function(ptr, scale, threads) {
+    .Call(`_plink4r_geno_xtx_cpp`, ptr, scale, threads)
 }
 
-geno_xtm_cpp <- function(ptr, M, threads) {
-    .Call(`_plink4r_geno_xtm_cpp`, ptr, M, threads)
+geno_xtm_cpp <- function(ptr, M, scale, threads) {
+    .Call(`_plink4r_geno_xtm_cpp`, ptr, M, scale, threads)
 }
 
-geno_mx_cpp <- function(ptr, B, threads) {
-    .Call(`_plink4r_geno_mx_cpp`, ptr, B, threads)
+geno_mx_cpp <- function(ptr, B, scale, threads) {
+    .Call(`_plink4r_geno_mx_cpp`, ptr, B, scale, threads)
 }
 
-geno_append_cpp <- function(ptr, M, threads) {
-    .Call(`_plink4r_geno_append_cpp`, ptr, M, threads)
+geno_miss_mx_cpp <- function(ptr, B, threads) {
+    .Call(`_plink4r_geno_miss_mx_cpp`, ptr, B, threads)
 }
 
-geno_cross_cpp <- function(ptr_a, ptr_b, threads) {
-    .Call(`_plink4r_geno_cross_cpp`, ptr_a, ptr_b, threads)
+geno_cor_cpp <- function(ptr_a, ptr_b, threads) {
+    .Call(`_plink4r_geno_cor_cpp`, ptr_a, ptr_b, threads)
 }
 
-geno_dense_cpp <- function(ptr, rows, cols, threads) {
-    .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, threads)
+geno_dense_cpp <- function(ptr, rows, cols, scale, threads) {
+    .Call(`_plink4r_geno_dense_cpp`, ptr, rows, cols, scale, threads)
 }
 
-geno_std_cpp <- function(K, u, v, s, da, db, threads) {
-    .Call(`_plink4r_geno_std_cpp`, K, u, v, s, da, db, threads)
+geno_xtwx_cpp <- function(ptr, w, scale, threads) {
+    .Call(`_plink4r_geno_xtwx_cpp`, ptr, w, scale, threads)
 }
 
-dense_xtx_cpp <- function(A, threads) {
-    .Call(`_plink4r_dense_xtx_cpp`, A, threads)
-}
-
-geno_xtwx_cpp <- function(ptr, w, center, div, threads) {
-    .Call(`_plink4r_geno_xtwx_cpp`, ptr, w, center, div, threads)
+geno_xtwx_bin_cpp <- function(ptr, w, scale, threads) {
+    .Call(`_plink4r_geno_xtwx_bin_cpp`, ptr, w, scale, threads)
 }
 
 geno_take_cpp <- function(ptr, rows, cols, flip, threads) {
     .Call(`_plink4r_geno_take_cpp`, ptr, rows, cols, flip, threads)
 }
 
-geno_fill_cpp <- function(ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads) {
-    .Call(`_plink4r_geno_fill_cpp`, ptr, fill_c, cell_ptr, cell_i, cell_g, inplace, threads)
+geno_merge_cpp <- function(ptrs, cols, rows, threads) {
+    .Call(`_plink4r_geno_merge_cpp`, ptrs, cols, rows, threads)
+}
+
+geno_fill_cpp <- function(ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads) {
+    .Call(`_plink4r_geno_fill_cpp`, ptr, use_mean, af, fill_const, cols, cell_ptr, cell_i, cell_g, inplace, threads)
 }
 
 geno_miss_cpp <- function(ptr) {
     .Call(`_plink4r_geno_miss_cpp`, ptr)
 }
 
-resources_cpp <- function(threads, mem_gb) {
-    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
-}
-
-score_stream_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk) {
-    .Call(`_plink4r_score_stream_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, W, flip, pfreq, ld_cand, impute_none, transform, threads, chunk)
-}
-
-score_ld_block_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_score_ld_block_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, B, threads, nb_people, mem_gb, rows)
-}
-
 simd_isa_cpp <- function() {
     .Call(`_plink4r_simd_isa_cpp`)
 }
 
-genotype_impute_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_genotype_impute_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+resources_cpp <- function(threads, mem_gb) {
+    .Call(`_plink4r_resources_cpp`, threads, mem_gb)
 }
 
-genotype_impute_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_genotype_impute_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+genotype_fill_ld_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step) {
+    invisible(.Call(`_plink4r_genotype_fill_ld_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows, dosage_step))
 }
 
-pgen_stats_cpp <- function(pgen, n_raw, allele_ct, var_idx, sample_idx, threads) {
-    .Call(`_plink4r_pgen_stats_cpp`, pgen, n_raw, allele_ct, var_idx, sample_idx, threads)
+gwas_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block) {
+    .Call(`_plink4r_gwas_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, threads, mem_gb, block)
 }
 
-genotype_fill_ld_geno_cpp <- function(ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows) {
-    .Call(`_plink4r_genotype_fill_ld_geno_cpp`, ptr, var_idx, eigen_file, af, sign, thresh, delta, anchor_min_miss, keep_row, threads, nb_people, mem_gb, rows)
+gxe_kin_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block) {
+    .Call(`_plink4r_gxe_kin_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, sample_idx, null, E, n_exp, threads, mem_gb, block)
 }
 
-mixpart_cpp <- function(ld_dir, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads) {
-    .Call(`_plink4r_mixpart_cpp`, ld_dir, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads)
+ld_score_cpp <- function(files, offset, A, thresh, chunk, threads) {
+    .Call(`_plink4r_ld_score_cpp`, files, offset, A, thresh, chunk, threads)
 }
 
-sbayesrc_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads) {
-    .Call(`_plink4r_sbayesrc_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads)
+ld_score_cross_cpp <- function(files1, files2, offset, i1, i2, sign, thresh1, thresh2, chunk, threads) {
+    .Call(`_plink4r_ld_score_cross_cpp`, files1, files2, offset, i1, i2, sign, thresh1, thresh2, chunk, threads)
 }
 
-sumstat_impute_cpp <- function(ld_dir, blocks, typed_index, z, thresh, delta, threads) {
-    .Call(`_plink4r_sumstat_impute_cpp`, ld_dir, blocks, typed_index, z, thresh, delta, threads)
+ldsc_bicov_cpp <- function(z1, z2, N1, N2, L2, h21, h22, nblock, counts, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_bicov_cpp`, z1, z2, N1, N2, L2, h21, h22, nblock, counts, n_reweight, tol)
 }
 
-viprs_cpp <- function(ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads) {
-    .Call(`_plink4r_viprs_cpp`, ld_dir, blocks, keep, z, n, af, thresh, fp16, control, threads)
+ldsc_groups_cpp <- function(M, nblock) {
+    .Call(`_plink4r_ldsc_groups_cpp`, M, nblock)
 }
 
-viprs_annot_cpp <- function(ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads) {
-    .Call(`_plink4r_viprs_annot_cpp`, ld_dir, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads)
+ldsc_strat_cpp <- function(z, N, L, A, block, intercept, lo, hi, z_max, w_init, n_reweight, ridge, lambda, lambda_grid, tol) {
+    .Call(`_plink4r_ldsc_strat_cpp`, z, N, L, A, block, intercept, lo, hi, z_max, w_init, n_reweight, ridge, lambda, lambda_grid, tol)
+}
+
+ldsc_trans_cpp <- function(z1, z2, N1, N2, L1, L2, L12, h21, h22, nblock, counts, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_trans_cpp`, z1, z2, N1, N2, L1, L2, L12, h21, h22, nblock, counts, n_reweight, tol)
+}
+
+ldsc_univ_cpp <- function(z, N, L2, nblock, counts, w_init, n_reweight, tol) {
+    .Call(`_plink4r_ldsc_univ_cpp`, z, N, L2, nblock, counts, w_init, n_reweight, tol)
+}
+
+mixpart_cpp <- function(files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads) {
+    .Call(`_plink4r_mixpart_cpp`, files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads)
+}
+
+reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
+}
+
+reml_tau_cox_cpp <- function(time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_cox_cpp`, time, status, X, ki, kj, kv, n_interval, h_max, tol, max_iter, max_eval, mu_eps, f_tol, rank_tol, proj)
+}
+
+reml_tau_gaussian_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj) {
+    .Call(`_plink4r_reml_tau_gaussian_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_eval, rank_tol, proj)
+}
+
+sbayesrc_cpp <- function(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads) {
+    .Call(`_plink4r_sbayesrc_cpp`, files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, control, replay, threads)
+}
+
+sumstat_impute_cpp <- function(files, blocks, typed_index, z, thresh, delta, threads) {
+    .Call(`_plink4r_sumstat_impute_cpp`, files, blocks, typed_index, z, thresh, delta, threads)
+}
+
+viprs_cpp <- function(files, blocks, keep, z, n, af, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_cpp`, files, blocks, keep, z, n, af, thresh, fp16, control, threads)
+}
+
+viprs_annot_cpp <- function(files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads) {
+    .Call(`_plink4r_viprs_annot_cpp`, files, blocks, keep, z, n, af, A, bin_file, bin_start, n_panel, resid_all, thresh, fp16, control, threads)
+}
+
+weight_condition_cpp <- function(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads) {
+    .Call(`_plink4r_weight_condition_cpp`, p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads)
+}
+
+xqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block) {
+    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block)
 }
 

@@ -390,8 +390,8 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // pi ascending with warm start, PUMAS pseudo-validation, early stop after stop_after consecutive drops of pseudo R2,
 // refit of the best converged point on all data (points that did not converge are never chosen)
 template <typename T>
-Rcpp::List fit_path(const Inputs& in, const std::string& ld_dir, double thresh, const ViprsControl& c, int threads) {
-  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(ld_dir, in.blocks, in.keep, in.bstd, thresh, threads);
+Rcpp::List fit_path(const Inputs& in, const std::vector<std::string>& files, double thresh, const ViprsControl& c, int threads) {
+  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
   const std::vector<double> grid = F.pi_grid();
@@ -441,14 +441,14 @@ Rcpp::List fit_path(const Inputs& in, const std::string& ld_dir, double thresh, 
 // thresh (eigen truncation, <= 0 = every stored pair), fp16 (store V as float16), control (viprs_control()).
 
 // [[Rcpp::export]]
-Rcpp::List viprs_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
+Rcpp::List viprs_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
                      Rcpp::NumericVector n, Rcpp::NumericVector af, double thresh, bool fp16, Rcpp::List control,
                      int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
   const Inputs in = read_inputs(blocks, keep, z, n, af);
   try {
-    return fp16 ? fit_path<uint16_t>(in, ld_dir, thresh, c, T) : fit_path<float>(in, ld_dir, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, files, thresh, c, T) : fit_path<float>(in, files, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }

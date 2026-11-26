@@ -9,10 +9,11 @@
 #' columns sum to BETA, so [geno_score()] on them gives annotation-specific scores that sum to the total score.
 #'
 #' @inheritParams viprs
-#' @param annot data.frame with ID and one numeric column per annotation (>= 0); SNPs not in `annot` get 0.
+#' @param annot annotations keyed by Block and Index (or CHR and BP37 / BP38), one numeric column per annotation (>= 0);
+#'   SNPs not in `annot` get 0.
 #' @param resid_all residual group on every SNP (TRUE) or only on SNPs without annotation.
 #' @param control [mixpart_control()].
-#' @return data.table: ID, chr, bp37, bp38, A1, A2, freq, BETA, BETA_STD, BETA_<annotation>, BETA_residual and the
+#' @return data.table: CHR, BP37, BP38, A1, A2, A1Freq, Block, Index, BETA, BETA_STD, BETA_<annotation>, BETA_residual and the
 #'   BETA_STD_<...> columns; attributes `h2_share` (posterior), `h2_share_prior`, `w` (groups x size classes),
 #'   `sigma2`, `iters`, `converged`.
 #' @export
@@ -21,22 +22,18 @@ mixpart <- function(sumstat, ld_dir, annot, ref = NULL, resid_all = TRUE, thresh
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
   ctl <- do.call(mixpart_control, control)
-  an <- data.table::as.data.table(annot)
-  if (!"ID" %in% names(an)) stop("annot needs an ID column", call. = FALSE)
-  cols <- setdiff(names(an), "ID")
+  A <- .prs_annot(annot, d$x)
+  cols <- colnames(A)
   if ("residual" %in% cols) stop("the annotation name 'residual' is reserved", call. = FALSE)
-  A <- if (length(cols)) as.matrix(an[d$x[, .(ID)], on = "ID", ..cols]) else matrix(0, nrow(d$x), 0)
-  A[is.na(A)] <- 0
-  storage.mode(A) <- "double"
   t0 <- Sys.time()
-  res <- mixpart_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, A, resid_all, thresh, fp16, ctl, threads)
+  res <- mixpart_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, A, resid_all, thresh, fp16, ctl, threads)
   message(sprintf("mixpart: %d SNPs, %d annotations, %d iterations (%s), %.1f s", nrow(d$x), length(cols),
                   as.integer(res$iters), if (res$converged) "converged" else "max_iter reached",
                   as.numeric(difftime(Sys.time(), t0, units = "secs"))))
   nm <- c(cols, "residual")
-  p <- pmin(pmax(d$x$freq, 1e-6), 1 - 1e-6)
+  p <- pmin(pmax(d$x$A1Freq, 1e-6), 1 - 1e-6)
   sc <- 1 / sqrt(2 * p * (1 - p))
-  out <- d$x[, .(ID, chr, bp37, bp38, A1, A2, freq)]
+  out <- d$x[, .(CHR, BP37, BP38, A1, A2, A1Freq, Block, Index)]
   out[, `:=`(BETA = res$BETA_STD * sc, BETA_STD = res$BETA_STD)]
   for (i in seq_along(nm)) out[, (paste0("BETA_", nm[i])) := res$PART_STD[, i] * sc]
   for (i in seq_along(nm)) out[, (paste0("BETA_STD_", nm[i])) := res$PART_STD[, i]]

@@ -1,4 +1,4 @@
-// block<N>.eigen.bin reader. Two layouts, told apart by file size:
+// eigen.bin reader (the file of a block is named by R: .ld_block_file). Two layouts, told apart by file size:
 //  SBayesRC : int32 m; int32 k; float32 sumLambda; float32 thresh; float32 lam[k]; float32 U[m*k] (col-major)
 //  plink4r  : int32 m; int32 k; float64 sumLambda; float32 thresh; float64 lam[k]; float32 scale[k]; int16 U[m*k] (col-major, u = q*scale)
 #ifndef PLINK4R_EIGEN_BIN_H
@@ -25,11 +25,6 @@ template <typename T>
 inline void read_n(std::ifstream& in, T* dst, std::size_t n, const std::string& path) {
   in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(sizeof(T) * n));
   if (!in) throw std::runtime_error("short read: " + path);
-}
-
-inline std::string block_path(const std::string& dir, int block) {
-  const char last = dir.empty() ? '\0' : dir.back();
-  return dir + ((last == '/' || last == '\\') ? "" : "/") + "block" + std::to_string(block) + ".eigen.bin";
 }
 
 // thresh <= 0 : keep every stored eigenpair; otherwise keep the smallest k reaching thresh * sumLambda.

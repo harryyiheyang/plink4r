@@ -1,8 +1,7 @@
 // Genotypes are held as two bit planes per variant, lo = [x == 1] and
 // hi = [x == 2], so that
 //   sum_k x_k y_k = pc(lo & lo') + 2 pc((lo & hi') | (hi & lo')) + 4 pc(hi & hi').
-// All sums are exact integers. Missing calls are filled with the variant's
-// lower median.
+// All sums are exact integers.
 #ifndef PLINK4R_GENO_KERNEL_H
 #define PLINK4R_GENO_KERNEL_H
 
@@ -41,85 +40,14 @@ inline std::size_t plane_words(std::size_t n) { return ((n + 63) / 64 + 3) / 4 *
 
 inline int popcount64(u64 x) { return __builtin_popcountll(x); }
 
-inline void fill_median(std::size_t n, std::size_t words, u64* lo, u64* hi,
-                        const u64* miss, std::int64_t& s, std::int64_t& v) {
-  std::int64_t c1 = 0, c2 = 0, cm = 0;
-  for (std::size_t w = 0; w < words; ++w) {
-    c1 += popcount64(lo[w]);
-    c2 += popcount64(hi[w]);
-    cm += popcount64(miss[w]);
-  }
-  const std::int64_t observed = static_cast<std::int64_t>(n) - cm;
-  const std::int64_t c0 = observed - c1 - c2;
-  if (cm && observed) {
-    u64* fill = 2 * c0 >= observed ? nullptr : (2 * (c0 + c1) >= observed ? lo : hi);
-    if (fill) {
-      for (std::size_t w = 0; w < words; ++w) fill[w] |= miss[w];
-      (fill == lo ? c1 : c2) += cm;
-    }
-  }
-  s = c1 + 2 * c2;
-  v = static_cast<std::int64_t>(n) * (c1 + 4 * c2) - s * s;
-}
-
-// Packed 2-bit genotypes, 4 samples per byte with the first sample in the low
-// bits (PLINK 1 BED columns and pgenlib genovecs). dosage[code] is the
-// genotype x in {0, 1, 2} for that code, or -1 for missing.
-struct NibbleTable {
-  std::array<unsigned char, 256> lo{}, hi{}, miss{};
-  explicit NibbleTable(const std::array<int, 4>& dosage) {
-    for (unsigned int b = 0; b < 256; ++b)
-      for (unsigned int k = 0; k < 4; ++k) {
-        const int x = dosage[(b >> (2 * k)) & 3u];
-        if (x == 2) hi[b] |= 1u << k;
-        else if (x == 1) lo[b] |= 1u << k;
-        else if (x < 0) miss[b] |= 1u << k;
-      }
-  }
-};
-
-// With miss_out, the missing plane is written there and left unfilled (s and
-// v then describe the observed calls only); otherwise missing calls are filled
-// with the variant's lower median.
-inline void encode_packed(const NibbleTable& table, const unsigned char* column,
-                          std::size_t n, std::size_t stride, std::size_t words,
-                          u64* lo, u64* hi, std::int64_t& s, std::int64_t& v,
-                          u64* miss_out = nullptr) {
-  std::vector<u64> miss_local(miss_out ? 0 : words, 0);
-  u64* miss = miss_out ? miss_out : miss_local.data();
-  for (std::size_t w = 0; w < words; ++w) {
-    u64 l = 0, h = 0, m = 0;
-    const std::size_t b0 = 16 * w, b1 = std::min(stride, b0 + 16);
-    for (std::size_t b = b0; b < b1; ++b) {
-      const unsigned char byte = column[b];
-      const unsigned int shift = 4 * (b - b0);
-      l |= static_cast<u64>(table.lo[byte]) << shift;
-      h |= static_cast<u64>(table.hi[byte]) << shift;
-      m |= static_cast<u64>(table.miss[byte]) << shift;
-    }
-    lo[w] = l;
-    hi[w] = h;
-    miss[w] = m;
-  }
-  const std::size_t full = n / 64;
-  if (n % 64) {
-    const u64 mask = (u64(1) << (n % 64)) - 1;
-    lo[full] &= mask;
-    hi[full] &= mask;
-    miss[full] &= mask;
-  }
-  if (miss_out) {
-    std::int64_t c1 = 0, c2 = 0;
-    for (std::size_t w = 0; w < words; ++w) {
-      c1 += popcount64(lo[w]);
-      c2 += popcount64(hi[w]);
-    }
-    s = c1 + 2 * c2;
-    v = c1 + 4 * c2;  // sum of squares of the observed calls
-    return;
-  }
-  fill_median(n, words, lo, hi, miss, s, v);
-}
+// Marks a function whose loops are popcounts: with GCC on x86-64 ELF it is built twice and the copy with the popcnt
+// instruction is chosen at load time when the CPU has it (R's default flags target x86-64 without popcnt, where
+// __builtin_popcountll is a library call). Elsewhere it is a plain function.
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__ELF__)
+#define PLINK4R_POPCNT __attribute__((target_clones("popcnt", "default")))
+#else
+#define PLINK4R_POPCNT
+#endif
 
 inline void reset_planes(Planes& out, std::size_t n, std::size_t m) {
   out.words = plane_words(n);
@@ -253,6 +181,96 @@ void tile_avx2(const Planes& A, std::size_t i0, std::size_t ni,
 }
 #endif
 
+// Weighted cross products of one tile of a gathered plane buffer: variant v of buf has lo at buf + 2 v W and
+// hi at buf + (2 v + 1) W (W a multiple of 4); word k carries weight wb[k] (one bin of 64 rows).
+//   acc[a * kTile + b] += sum_k wb[k] dot_k(x_{i0+a}, x_{j0+b}).
+using WTileKernel = void (*)(const u64*, std::size_t, std::size_t, std::size_t, std::size_t, std::size_t,
+                             const double*, double*);
+
+void wtile_generic(const u64* buf, std::size_t W, std::size_t i0, std::size_t ni, std::size_t j0, std::size_t nj,
+                   const double* wb, double* acc) {
+  for (std::size_t a0 = 0; a0 < ni; a0 += 4)
+    for (std::size_t b0 = 0; b0 < nj; b0 += 4) {
+      const u64 *al[4], *ah[4], *bl[4], *bh[4];
+      for (std::size_t t = 0; t < 4; ++t) {
+        const std::size_t i = i0 + std::min(a0 + t, ni - 1);
+        const std::size_t j = j0 + std::min(b0 + t, nj - 1);
+        al[t] = buf + 2 * i * W; ah[t] = al[t] + W; bl[t] = buf + 2 * j * W; bh[t] = bl[t] + W;
+      }
+      double c[4][4] = {};
+      for (std::size_t w = 0; w < W; ++w) {
+        u64 xl[4], xh[4], yl[4], yh[4];
+        for (int t = 0; t < 4; ++t) {
+          xl[t] = al[t][w]; xh[t] = ah[t][w]; yl[t] = bl[t][w]; yh[t] = bh[t][w];
+        }
+        for (int a = 0; a < 4; ++a)
+          for (int b = 0; b < 4; ++b)
+            c[a][b] += wb[w] * (popcount64(xl[a] & yl[b]) +
+              2 * popcount64((xl[a] & yh[b]) | (xh[a] & yl[b])) +
+              4 * popcount64(xh[a] & yh[b]));
+      }
+      for (std::size_t a = 0; a < 4 && a0 + a < ni; ++a)
+        for (std::size_t b = 0; b < 4 && b0 + b < nj; ++b)
+          acc[(a0 + a) * kTile + b0 + b] += c[a][b];
+    }
+}
+
+#ifdef GENO_KERNEL_X86
+// One 256-bit vector holds 4 bins: the byte counts of one vector (at most 56 per byte) are summed per 64-bit
+// lane by _mm256_sad_epu8, converted to double and multiplied by the 4 bin weights.
+__attribute__((target("avx2,fma")))
+void wtile_avx2(const u64* buf, std::size_t W, std::size_t i0, std::size_t ni, std::size_t j0, std::size_t nj,
+                const double* wb, double* acc) {
+  const std::size_t V = W / 4;
+  const __m256i zero = _mm256_setzero_si256(), pick = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
+  for (std::size_t a0 = 0; a0 < ni; a0 += 2)
+    for (std::size_t b0 = 0; b0 < nj; b0 += 4) {
+      const __m256i *al[2], *ah[2], *bl[4], *bh[4];
+      #pragma GCC unroll 4
+      for (std::size_t t = 0; t < 2; ++t) {
+        const std::size_t i = i0 + std::min(a0 + t, ni - 1);
+        al[t] = reinterpret_cast<const __m256i*>(buf + 2 * i * W);
+        ah[t] = reinterpret_cast<const __m256i*>(buf + (2 * i + 1) * W);
+      }
+      #pragma GCC unroll 4
+      for (std::size_t t = 0; t < 4; ++t) {
+        const std::size_t j = j0 + std::min(b0 + t, nj - 1);
+        bl[t] = reinterpret_cast<const __m256i*>(buf + 2 * j * W);
+        bh[t] = reinterpret_cast<const __m256i*>(buf + (2 * j + 1) * W);
+      }
+      __m256d total[2][4];
+      #pragma GCC unroll 4
+      for (int a = 0; a < 2; ++a)
+        #pragma GCC unroll 4
+        for (int b = 0; b < 4; ++b) total[a][b] = _mm256_setzero_pd();
+      for (std::size_t v = 0; v < V; ++v) {
+        const __m256i xl0 = _mm256_loadu_si256(al[0] + v);
+        const __m256i xh0 = _mm256_loadu_si256(ah[0] + v);
+        const __m256i xl1 = _mm256_loadu_si256(al[1] + v);
+        const __m256i xh1 = _mm256_loadu_si256(ah[1] + v);
+        const __m256d w = _mm256_loadu_pd(wb + 4 * v);
+        #pragma GCC unroll 4
+        for (int b = 0; b < 4; ++b) {
+          const __m256i yl = _mm256_loadu_si256(bl[b] + v);
+          const __m256i yh = _mm256_loadu_si256(bh[b] + v);
+          const __m256i s0 = _mm256_sad_epu8(dot_avx2(xl0, xh0, yl, yh), zero);
+          const __m256i s1 = _mm256_sad_epu8(dot_avx2(xl1, xh1, yl, yh), zero);
+          total[0][b] = _mm256_fmadd_pd(
+            w, _mm256_cvtepi32_pd(_mm256_castsi256_si128(_mm256_permutevar8x32_epi32(s0, pick))), total[0][b]);
+          total[1][b] = _mm256_fmadd_pd(
+            w, _mm256_cvtepi32_pd(_mm256_castsi256_si128(_mm256_permutevar8x32_epi32(s1, pick))), total[1][b]);
+        }
+      }
+      for (std::size_t a = 0; a < 2 && a0 + a < ni; ++a)
+        for (std::size_t b = 0; b < 4 && b0 + b < nj; ++b) {
+          double lanes[4];
+          _mm256_storeu_pd(lanes, total[a][b]);
+          acc[(a0 + a) * kTile + b0 + b] += lanes[0] + lanes[1] + lanes[2] + lanes[3];
+        }
+    }
+}
+#endif
+
 // Chosen with the dense kernels (la_dispatch.h): the AVX2 tile whenever la() picked avx2 or avx512, so
 // PLINK4R_SIMD is the one switch of the package.
 TileKernel select_kernel() {
@@ -260,6 +278,14 @@ TileKernel select_kernel() {
   if (std::strcmp(plink4r::la().isa, "generic") != 0) return tile_avx2;
 #endif
   return tile_generic;
+}
+
+// The weighted tile, chosen as select_kernel() (la() checks FMA with AVX2).
+WTileKernel select_wkernel() {
+#ifdef GENO_KERNEL_X86
+  if (std::strcmp(plink4r::la().isa, "generic") != 0) return wtile_avx2;
+#endif
+  return wtile_generic;
 }
 
 void dot_block(const Planes& L, std::size_t ib, std::size_t pb,

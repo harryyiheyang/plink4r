@@ -602,7 +602,7 @@ Ctl read_ctl(const Rcpp::List& x) {
 // suppression), bin_start: first panel row of each block in it, n_panel: panel SNPs; control: sbayesrc_control();
 // replay: NULL, or list(normal, seed (character), chisq) of recorded draws (validation against the original only).
 // [[Rcpp::export]]
-Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
+Rcpp::List sbayesrc_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
                         Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A, const std::string& bin_file,
                         Rcpp::NumericVector bin_start, double n_panel, Rcpp::List control,
                         Rcpp::Nullable<Rcpp::List> replay, int threads) {
@@ -652,7 +652,7 @@ Rcpp::List sbayesrc_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, R
 #pragma omp parallel for schedule(dynamic, 1) num_threads(T)
 #endif
     for (int b = 0; b < nb; ++b) {
-      try { P[b] = plink4r::read_block16(plink4r::block_path(ld_dir, blocks[b]), kv[b]); }
+      try { P[b] = plink4r::read_block16(files[b], kv[b]); }
       catch (const std::exception& e) { err[b] = e.what(); }
     }
     for (int b = 0; b < nb; ++b) if (!err[b].empty()) Rcpp::stop("block %d: %s", blocks[b], err[b].c_str());

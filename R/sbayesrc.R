@@ -23,19 +23,19 @@
 #' 4. Main fit on bhat at the chosen cutoff, warm from that level: `main_iter` iterations, posterior mean over the
 #'    iterations after `main_burn`.
 #'
-#' @param sumstat output of [summarystat_impute()] (or [summarystat_tidy()]): ID, A1, A2, Z, N (r2 optional; rows with
+#' @param sumstat output of [sumstat_impute()] (or [summarystat_tidy()]) with this panel: A1, A2, Z, N, Block, Index (r2 optional; rows with
 #'   r2 <= 0 are dropped). bhat = Z / sqrt(N + Z^2); N = median N. The original fits every panel SNP, so the input
 #'   should cover the panel (the output of [summarystat_impute()]); otherwise only the panel rows with data are used.
-#' @param ld_dir directory with block<N>.eigen.bin (plink4r int16 layout, or SBayesRC layout quantized to int16 on
-#'   reading) and the panel SNP .parquet.
-#' @param ref panel SNP table in place of the .parquet in `ld_dir`.
-#' @param annot NULL, or a data.frame with ID and one numeric column per annotation (continuous columns as given);
-#'   panel SNPs absent from it get 0.
+#' @param ld_dir the LD panel folder: block<N>.eigen.bin (plink4r int16 layout, or SBayesRC layout quantized to int16
+#'   on reading) and snpinfo.parquet.
+#' @param ref panel SNP table in place of snpinfo.parquet of `ld_dir`.
+#' @param annot NULL, or annotations keyed by Block and Index (or CHR and BP37 / BP38), one numeric column per
+#'   annotation (continuous columns as given); panel SNPs absent from it get 0.
 #' @param bin_file LD-bin list used with `annot` (default `ld_dir`/ldbin<bin_r2>.bin, see above).
 #' @param control [sbayesrc_control()].
 #' @param threads OpenMP threads (0: [plink4r_resources()]).
 #' @param output optional output path (.parquet or text).
-#' @return data.table: ID, chr, bp37, bp38, A1, A2, freq, BETA (per A1 allele), BETA_STD; attributes `chain` (one row
+#' @return data.table: CHR, BP37, BP38, A1, A2, A1Freq, Block, Index, BETA (per A1 allele), BETA_STD; attributes `chain` (one row
 #'   per cutoff), `cutoff` (chosen), `theta` (levels x (intercept, annotations)), `sigma2`, `nnz` (mean number of
 #'   nonzero effects after burn-in), `trace` of the main fit, `n_bins` and `n_suppressed` (LD-bin suppression), and
 #'   column SUPPRESSED (TRUE: held at 0 by the suppression).
@@ -47,26 +47,20 @@ sbayesrc <- function(sumstat, ld_dir, ref = NULL, annot = NULL, bin_file = NULL,
   ctl <- do.call(sbayesrc_control, control)
   A <- matrix(0, nrow(d$x), 0)
   if (!is.null(annot)) {
-    an <- data.table::as.data.table(annot)
-    if (!"ID" %in% names(an)) stop("annot needs an ID column", call. = FALSE)
-    cols <- setdiff(names(an), "ID")
-    A <- as.matrix(an[d$x[, .(ID)], on = "ID", ..cols])
-    A[is.na(A)] <- 0
-    storage.mode(A) <- "double"
-    message(length(cols), " annotation columns; ", sum(!d$x$ID %in% an$ID), " SNPs without annotation (set to 0)")
+    A <- .prs_annot(annot, d$x)
   }
   if (is.null(annot)) bin_file <- "" else {
     if (is.null(bin_file)) bin_file <- file.path(ld_dir, paste0("ldbin", ctl$bin_r2, ".bin"))
     if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   }
   t0 <- Sys.time()
-  res <- sbayesrc_cpp(ld_dir, d$blocks, d$keep, d$x$Z, d$x$N, d$x$freq, A, bin_file, d$start, d$n_panel,
+  res <- sbayesrc_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, A, bin_file, d$start, d$n_panel,
                       control = ctl, replay = ctl$replay, threads = threads)
   n_sup <- sum(res$suppressed)
   message(sprintf("sbayesrc: %d SNPs (%d suppressed in %.0f LD bins), cutoff %g, sigma2 %.3g, %.0f nonzero effects, %.1f s",
                   nrow(d$x), n_sup, res$n_bins, res$cutoff, res$sigma2, res$nnz,
                   as.numeric(difftime(Sys.time(), t0, units = "secs"))))
-  out <- d$x[, .(ID, chr, bp37, bp38, A1, A2, freq)]
+  out <- d$x[, .(CHR, BP37, BP38, A1, A2, A1Freq, Block, Index)]
   out[, `:=`(BETA = res$BETA, BETA_STD = res$BETA_STD,
              SUPPRESSED = if (length(res$suppressed)) res$suppressed else FALSE)]
   th <- res$theta

@@ -84,11 +84,12 @@ inline void eigen_block_dims(const std::string& path, double thresh, int& m, int
 // SNP, blocks concatenated in the same order. thresh: eigen truncation of read_eigen_block (<= 0 keeps every stored
 // pair). Errors name the block.
 template <typename T>
-EigenPanel<T> load_eigen_panel(const std::string& ld_dir, const std::vector<int>& blocks,
+EigenPanel<T> load_eigen_panel(const std::vector<std::string>& files, const std::vector<int>& blocks,
                                const std::vector<std::vector<int>>& keep, const std::vector<float>& bstd,
                                double thresh, int threads) {
   EigenPanel<T> P;
   const int nb = static_cast<int>(blocks.size());
+  if (files.size() != blocks.size()) throw std::runtime_error("one eigen.bin file per block needed");
   P.nb = nb;
   P.snp_off.assign(nb + 1, 0);
   for (int b = 0; b < nb; ++b) P.snp_off[b + 1] = P.snp_off[b] + static_cast<int64_t>(keep[b].size());
@@ -99,7 +100,7 @@ EigenPanel<T> load_eigen_panel(const std::string& ld_dir, const std::vector<int>
   std::vector<std::string> err(nb);
   for (int b = 0; b < nb; ++b) {
     try {
-      eigen_block_dims(block_path(ld_dir, blocks[b]), thresh, mdim[b], kdim[b]);
+      eigen_block_dims(files[b], thresh, mdim[b], kdim[b]);
       for (std::size_t r = 0; r < keep[b].size(); ++r)
         if (keep[b][r] < 0 || keep[b][r] >= mdim[b] || (r && keep[b][r] <= keep[b][r - 1]))
           throw std::runtime_error("ld_index outside the block or not increasing");
@@ -139,7 +140,7 @@ EigenPanel<T> load_eigen_panel(const std::string& ld_dir, const std::vector<int>
     const int b = P.order[o];
     EigenBlock E;
     try {
-      E = read_eigen_block(block_path(ld_dir, blocks[b]), thresh);
+      E = read_eigen_block(files[b], thresh);
       if (E.k != P.k[b]) throw std::runtime_error("eigen dimension changed between reads");
     } catch (const std::exception& e) {
       err[b] = e.what();

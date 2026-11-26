@@ -170,7 +170,7 @@ Rcpp::List fit(const EigenPanel<T>& P, const std::vector<float>& n, const std::v
 // x annotations, >= 0), resid_all (residual group on every SNP, else only on SNPs without annotation), thresh, fp16,
 // control (mixpart_control()).
 // [[Rcpp::export]]
-Rcpp::List mixpart_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
+Rcpp::List mixpart_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z,
                        Rcpp::NumericVector n, Rcpp::NumericMatrix A, bool resid_all, double thresh, bool fp16,
                        Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
@@ -212,10 +212,10 @@ Rcpp::List mixpart_cpp(const std::string& ld_dir, Rcpp::IntegerVector blocks, Rc
   c.penalty = Rcpp::as<bool>(control["penalty"]);
   try {
     if (fp16) {
-      const EigenPanel<uint16_t> P = plink4r::load_eigen_panel<uint16_t>(ld_dir, bl, kp, bstd, thresh, T);
+      const EigenPanel<uint16_t> P = plink4r::load_eigen_panel<uint16_t>(files, bl, kp, bstd, thresh, T);
       return fit(P, nf, Ae, G, Kann, c, T);
     }
-    const EigenPanel<float> P = plink4r::load_eigen_panel<float>(ld_dir, bl, kp, bstd, thresh, T);
+    const EigenPanel<float> P = plink4r::load_eigen_panel<float>(files, bl, kp, bstd, thresh, T);
     return fit(P, nf, Ae, G, Kann, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());

@@ -1,7 +1,8 @@
 // PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
-// (read) and, for files whose header flags dosages, 1/16384 fixed-point ALT dosages (read_dosage).
-// The one PgenFile of the package (geno objects, imputation, scoring, correlations).
-// compact_genovec / count_genovec: the sample subset of a genovec, and its observed calls and ALT sum.
+// (read), for files whose header flags dosages 1/16384 fixed-point ALT dosages of every sample (read_dosage), and
+// the file's own sparse form over a sample subset that pgenlib takes word by word (set_samples, read_sparse).
+// The one PgenFile of the package (geno objects and the association scans).
+// compact_genovec / count_codes: the sample subset of a genovec, and the calls of each code.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
 
@@ -18,6 +19,12 @@
 #include "pgenlib/pgenlib_read.h"
 
 namespace plink4r {
+
+// A file dosage (1/16384 steps, 0..32768) taken to the nearest 0.01: steps of 0.01, 0..200. PI 2026-11-18: the
+// package holds dosages at 0.01, the precision imputation writes; 0.05 is 819/16384 in the file and gives 5.
+inline unsigned int dosage_grid(std::uint16_t v) {
+  return (static_cast<unsigned int>(v) * 100u + 8192u) >> 14;
+}
 
 // OpenMP thread number inside a parallel region (0 without OpenMP): the package's one copy.
 inline int thread_id() {
@@ -139,6 +146,55 @@ public:
   }
 
   bool dosage() const { return dosage_; }
+
+  // The samples read_sparse() returns: rows (0-based .psam rows, ascending, distinct); empty or every row keeps
+  // all samples. pgenlib subsets the genovec and the dosages word by word.
+  void set_samples(const std::vector<int>& rows) {
+    const std::size_t n = samples();
+    include_.clear();
+    cumpop_.clear();
+    sample_ct_ = static_cast<uint32_t>(rows.empty() ? n : rows.size());
+    if (rows.empty() || rows.size() == n) {
+      for (auto& r : readers_) plink2::PgrClearSampleSubsetIndex(&r->pgr, &r->pssi);
+      return;
+    }
+    const uint32_t wc = static_cast<uint32_t>(plink2::BitCtToWordCt(n));
+    include_.assign(wc, 0);
+    for (int i : rows) include_[i / plink2::kBitsPerWord] |= uintptr_t(1) << (i % plink2::kBitsPerWord);
+    cumpop_.assign(wc, 0);
+    plink2::FillCumulativePopcounts(include_.data(), wc, cumpop_.data());
+    for (auto& r : readers_) plink2::PgrSetSampleSubsetIndex(cumpop_.data(), &r->pgr, &r->pssi);
+  }
+
+  // One variant over the samples of set_samples() in the file's sparse form: genovec (codes 0/1/2 = ALT count,
+  // 3 = missing, 32 samples per word) and, for a dosage file, the bit of each sample with an explicit dosage
+  // (present) and those dosages in sample order (main, 1/16384 steps; dosage_ct of them). An explicit dosage
+  // overrides the sample's genovec code. False on a read error.
+  struct Sparse {
+    const std::uint64_t* genovec = nullptr;
+    const std::uint64_t* present = nullptr;
+    const std::uint16_t* main = nullptr;
+    uint32_t dosage_ct = 0;
+  };
+  bool read_sparse(std::size_t variant, int thread, Sparse& out) {
+    ThreadReader& r = *readers_[thread];
+    const uintptr_t* inc = include_.empty() ? nullptr : include_.data();
+    const uint32_t n = sample_ct_ ? sample_ct_ : static_cast<uint32_t>(samples());
+    out.dosage_ct = 0;
+    if (dosage_) {
+      if (plink2::PgrGetD(inc, r.pssi, n, static_cast<uint32_t>(variant), &r.pgr,
+                          reinterpret_cast<uintptr_t*>(r.genovec), reinterpret_cast<uintptr_t*>(r.dosage_present),
+                          reinterpret_cast<std::uint16_t*>(r.dosage_main), &out.dosage_ct) != plink2::kPglRetSuccess)
+        return false;
+    } else if (plink2::PgrGet(inc, r.pssi, n, static_cast<uint32_t>(variant), &r.pgr,
+                              reinterpret_cast<uintptr_t*>(r.genovec)) != plink2::kPglRetSuccess) {
+      return false;
+    }
+    out.genovec = reinterpret_cast<const std::uint64_t*>(r.genovec);
+    out.present = reinterpret_cast<const std::uint64_t*>(r.dosage_present);
+    out.main = reinterpret_cast<const std::uint16_t*>(r.dosage_main);
+    return true;
+  }
   // ALT dosage of every sample (file order) in 1/16384 units (0..32768), kMissing for a missing call;
   // explicit dosages override hardcalls (adapted from SuSiE4I pgen_file.h).
   static constexpr std::uint16_t kMissing = 65535;
@@ -172,6 +228,9 @@ private:
     Rcpp::stop("Could not open PGEN file " + path_ + (msg.empty() ? "" : ": " + msg));
   }
   bool dosage_ = false;
+  uint32_t sample_ct_ = 0;
+  std::vector<uintptr_t> include_;
+  std::vector<uint32_t> cumpop_;
   std::string path_;
   uintptr_t genovec_bytes_ = 0;
   PgenHeader header_;
@@ -212,13 +271,6 @@ inline void count_codes(const unsigned char* g, std::size_t sb, long long cnt[4]
   }
 }
 
-// Missing calls and ALT sum of a compacted genovec of sb bytes (padding is code 0).
-inline void count_genovec(const unsigned char* g, std::size_t sb, long long* miss, long long* alt) {
-  long long cnt[4];
-  count_codes(g, sb, cnt);
-  *miss = cnt[3]; *alt = cnt[1] + 2 * cnt[2];
-}
-
 // PLINK 1 SNP-major .bed: header and size checked on opening, one stream per thread. read() returns the row of
 // a variant (all samples, file order) in the .bed coding (00 two A1, 01 missing, 10 one A1, 11 no A1);
 // read_counts() the same row recoded as a genovec counting A1 (codes 0/1/2, 3 missing), so the PGEN helpers
@@ -244,16 +296,20 @@ public:
   std::size_t stride() const { return stride_; }
   const unsigned char* read(std::size_t variant, int thread) { return load(variant, thread); }
   const unsigned char* read_counts(std::size_t variant, int thread) {
+    unsigned char* r = load(variant, thread);
+    if (!r) return nullptr;
+    to_counts(r, stride_);
+    return r;
+  }
+  // A .bed row recoded in place as a genovec counting A1 (codes 0/1/2, 3 missing).
+  static void to_counts(unsigned char* row, std::size_t stride) {
     struct Tab { unsigned char t[256];
       Tab() { static const unsigned char m[4] = {2, 3, 1, 0};
         for (int b = 0; b < 256; ++b) { unsigned v = 0;
           for (int k = 0; k < 4; ++k) v |= static_cast<unsigned>(m[(b >> (2 * k)) & 3]) << (2 * k);
           t[b] = static_cast<unsigned char>(v); } } };
     static const Tab T;
-    unsigned char* r = load(variant, thread);
-    if (!r) return nullptr;
-    for (std::size_t y = 0; y < stride_; ++y) r[y] = T.t[r[y]];
-    return r;
+    for (std::size_t y = 0; y < stride; ++y) row[y] = T.t[row[y]];
   }
 private:
   unsigned char* load(std::size_t variant, int thread) {
