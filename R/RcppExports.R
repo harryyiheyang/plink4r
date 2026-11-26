@@ -109,7 +109,7 @@ weight_condition_cpp <- function(p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_bl
     .Call(`_plink4r_weight_condition_cpp`, p_chr, p_bp37, p_bp38, p_a1, p_a2, p_freq, p_block, p_index, blocks, files, t_chr, t_bp, t_a1, t_a2, w_chr, w_bp, w_a1, w_a2, W, thresh, delta, slice, dup, threads)
 }
 
-xqtl_stream_cpp <- function(path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block) {
-    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block)
+xqtl_stream_cpp <- function(path, bed, n_raw, variant_text, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block) {
+    .Call(`_plink4r_xqtl_stream_cpp`, path, bed, n_raw, variant_text, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block)
 }
 

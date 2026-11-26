@@ -178,6 +178,29 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
   out[]
 }
 
+# The files of an association run: the genotype file (path; bed = whether a BED), its variant text, which the compiled
+# code reads (text: the .bim, or the .pvar; a .pvar.zst is expanded into a temporary file, tmp, which the caller
+# removes), and the sample IDs in file order (iid). R reads no line of the variant text.
+.geno_files <- function(pfile, bfile) {
+  if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
+  if (!is.null(bfile)) {
+    bed <- .geno_bed_path(bfile)
+    base <- sub("\\.bed$", "", bed)
+    for (f in paste0(base, c(".bim", ".fam"))) if (!file.exists(f)) stop("File not found: ", f, call. = FALSE)
+    fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, select = 2L, colClasses = "character")
+    return(list(path = bed, bed = TRUE, text = paste0(base, ".bim"), tmp = NULL, iid = fam[[1L]]))
+  }
+  files <- .geno_pgen_files(pfile)
+  pvar <- paste0(files$prefix, ".pvar")
+  tmp <- NULL
+  if (!file.exists(pvar)) {
+    if (!file.exists(paste0(pvar, ".zst"))) stop("no .pvar or .pvar.zst for ", files$prefix, call. = FALSE)
+    pvar <- tmp <- .zst_expand(paste0(pvar, ".zst"))
+  }
+  list(path = files$pgen, bed = FALSE, text = normalizePath(pvar, winslash = "/"), tmp = tmp,
+       iid = .psam_ids(files$prefix))
+}
+
 # The genotype file of an association run, from geno_file(): its variants (var, the table of geno_file() itself with
 # the columns CHR, POS, A1, A2, allele_ct; the variant IDs are not read), sample IDs (iid), path, the file rows of the
 # biallelic variants, which are the ones tested (vrow), and the CHR and POS of the multiallelic ones left out (skipped).

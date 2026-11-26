@@ -96,8 +96,9 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
 
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile)
-  var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
+  gf <- .geno_files(pfile, bfile)
+  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
+  iid <- gf$iid
 
   # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.
   # .pheno_samples takes its samples with a phenotype: here a column of zeros under a name that covariate does not have
@@ -120,10 +121,9 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   X <- stats::model.matrix(eval(call("~", rhs)), d)
   attr(X, "assign") <- NULL; attr(X, "contrasts") <- NULL
 
-  # ---- the tables go to C++ as they are: it puts the variants in position order, places the windows among them and
-  # reads the outcomes of the analysed samples from the columns of outcome
-  res <- xqtl_stream_cpp(gv$path, is.null(pfile), length(iid), as.integer(var$allele_ct), as.integer(vrow - 1L),
-                         as.integer(var$CHR), as.integer(var$POS), var$A2, var$A1, as.integer(srow - 1L), X,
+  # ---- the tables go to C++ as they are: it reads the .bim / .pvar itself, puts the variants in position order,
+  # places the windows among them and reads the outcomes of the analysed samples from the columns of outcome
+  res <- xqtl_stream_cpp(gf$path, gf$bed, length(iid), gf$text, as.integer(srow - 1L), X,
                          outcome, match(d[[id_col]], oid) - 1L, match(a$Outcome, oname), a$Outcome, a$CHR,
                          as.numeric(a$Start), as.numeric(a$End), window, path.expand(out),
                          paste("plink4r version", utils::packageVersion("plink4r")), threads, mem_gb,
@@ -134,5 +134,5 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
                  active = res$active, products = res$products, waiting_most = res$waiting_most,
                  explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
                  outcomes_not_tested = setdiff(oname, a$Outcome[res$tested]),
-                 skipped_multiallelic = data.table::setnames(gv$skipped, "POS", "BP")))
+                 skipped_multiallelic = data.table::data.table(CHR = res$skipped_chr, BP = res$skipped_bp)))
 }

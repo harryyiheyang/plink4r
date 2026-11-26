@@ -145,7 +145,8 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcp
   const int p = var_idx.size(), ns = sample_idx.size(), k = NM.p;
   if (NM.n != ns || NM.L1.size() != static_cast<std::size_t>(ns) * (k + 1))
     Rcpp::stop("the null model does not match the samples");
-  plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
+  plink4r::ScanFile F(path, bed, n_raw, allele_ct.size(), std::vector<int>(allele_ct.begin(), allele_ct.end()),
+                      std::vector<int>(var_idx.begin(), var_idx.end()), sample_idx, T);
   const bool dos = F.dosage;
 
   const std::size_t N = ns;

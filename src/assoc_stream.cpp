@@ -245,7 +245,8 @@ Rcpp::List assoc_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::
   if (S < 1 || S > X.ncol()) Rcpp::stop("S out of range");
   if (n_exp < 0 || n_exp > S - 1) Rcpp::stop("n_exp out of range");
   if (robust && w.size()) Rcpp::stop("robust standard errors are for the linear model only");
-  plink4r::ScanFile F(path, bed, n_raw, allele_ct, var_idx, sample_idx, T);
+  plink4r::ScanFile F(path, bed, n_raw, allele_ct.size(), std::vector<int>(allele_ct.begin(), allele_ct.end()),
+                      std::vector<int>(var_idx.begin(), var_idx.end()), sample_idx, T);
   const bool dos = F.dosage;
 
   Pre pre;

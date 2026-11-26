@@ -478,20 +478,15 @@ BEGIN_RCPP
 END_RCPP
 }
 // xqtl_stream_cpp
-Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct, Rcpp::IntegerVector var_idx, Rcpp::IntegerVector v_chr, Rcpp::IntegerVector v_bp, Rcpp::CharacterVector v_ref, Rcpp::CharacterVector v_alt, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::List table, Rcpp::IntegerVector row, Rcpp::IntegerVector col, Rcpp::CharacterVector outcome, Rcpp::IntegerVector o_chr, Rcpp::NumericVector o_start, Rcpp::NumericVector o_end, double window, const std::string& out, const std::string& created_by, int threads, double mem_gb, int block);
-RcppExport SEXP _plink4r_xqtl_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP allele_ctSEXP, SEXP var_idxSEXP, SEXP v_chrSEXP, SEXP v_bpSEXP, SEXP v_refSEXP, SEXP v_altSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP tableSEXP, SEXP rowSEXP, SEXP colSEXP, SEXP outcomeSEXP, SEXP o_chrSEXP, SEXP o_startSEXP, SEXP o_endSEXP, SEXP windowSEXP, SEXP outSEXP, SEXP created_bySEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
+Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::List table, Rcpp::IntegerVector row, Rcpp::IntegerVector col, Rcpp::CharacterVector outcome, Rcpp::IntegerVector o_chr, Rcpp::NumericVector o_start, Rcpp::NumericVector o_end, double window, const std::string& out, const std::string& created_by, int threads, double mem_gb, int block);
+RcppExport SEXP _plink4r_xqtl_stream_cpp(SEXP pathSEXP, SEXP bedSEXP, SEXP n_rawSEXP, SEXP variant_textSEXP, SEXP sample_idxSEXP, SEXP XSEXP, SEXP tableSEXP, SEXP rowSEXP, SEXP colSEXP, SEXP outcomeSEXP, SEXP o_chrSEXP, SEXP o_startSEXP, SEXP o_endSEXP, SEXP windowSEXP, SEXP outSEXP, SEXP created_bySEXP, SEXP threadsSEXP, SEXP mem_gbSEXP, SEXP blockSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< const std::string& >::type path(pathSEXP);
     Rcpp::traits::input_parameter< bool >::type bed(bedSEXP);
     Rcpp::traits::input_parameter< int >::type n_raw(n_rawSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type allele_ct(allele_ctSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type var_idx(var_idxSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type v_chr(v_chrSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type v_bp(v_bpSEXP);
-    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type v_ref(v_refSEXP);
-    Rcpp::traits::input_parameter< Rcpp::CharacterVector >::type v_alt(v_altSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type variant_text(variant_textSEXP);
     Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type sample_idx(sample_idxSEXP);
     Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type X(XSEXP);
     Rcpp::traits::input_parameter< Rcpp::List >::type table(tableSEXP);
@@ -507,7 +502,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
     Rcpp::traits::input_parameter< double >::type mem_gb(mem_gbSEXP);
     Rcpp::traits::input_parameter< int >::type block(blockSEXP);
-    rcpp_result_gen = Rcpp::wrap(xqtl_stream_cpp(path, bed, n_raw, allele_ct, var_idx, v_chr, v_bp, v_ref, v_alt, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block));
+    rcpp_result_gen = Rcpp::wrap(xqtl_stream_cpp(path, bed, n_raw, variant_text, sample_idx, X, table, row, col, outcome, o_chr, o_start, o_end, window, out, created_by, threads, mem_gb, block));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -540,7 +535,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
     {"_plink4r_sumstat_impute_cpp", (DL_FUNC) &_plink4r_sumstat_impute_cpp, 7},
     {"_plink4r_weight_condition_cpp", (DL_FUNC) &_plink4r_weight_condition_cpp, 24},
-    {"_plink4r_xqtl_stream_cpp", (DL_FUNC) &_plink4r_xqtl_stream_cpp, 24},
+    {"_plink4r_xqtl_stream_cpp", (DL_FUNC) &_plink4r_xqtl_stream_cpp, 19},
     {NULL, NULL, 0}
 };
 
