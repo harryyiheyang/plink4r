@@ -3,20 +3,25 @@
 // functional unit, built on vi_panel.h / vi_store.h / ld_bins.h; copied from viprs.cpp and edited.
 // Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
 // residual annotation A_R: 1 for every SNP, or only for SNPs without annotation), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
-// spike and slab with fixed pi, slab variance h2_j / pi (tau_j = pi / h2_j). Coordinate update as viprs.cpp with
-// tau_j in place of tau:
-//   vt_j = n_j d_j / sigma + tau_j,  gamma_j = sigmoid(.5 vt_j mu_j^2 + logit(pi) + .5 (log tau_j - log vt_j))
+// spike and slab with fixed pi; the slab is a mixture of C classes with fixed shares p_c (mix_prop, default small /
+// medium / large = 5 : 3 : 2) and variances kap_c h2_j / pi (mix_var relative, normalized to sum_c p_c kap_c = 1),
+// so Var(beta_j) = h2_j. Coordinate update (D_j = n_j r_j / sigma; tau_j = pi / h2_j):
+//   vt_jc = n_j d_j / sigma + tau_j / kap_c,  u_c = log p_c + .5 D_j^2 / vt_jc + .5 (log tau_j - log kap_c - log vt_jc)
+//   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc
+// (one class: the VIPRS update with tau_j in place of tau).
 // M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
-// zeta_j = E[beta_j^2] = gamma_j (mu_j^2 + 1 / vt_j), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
-// S_k = sum_j E[(beta_j^(k))^2]. With the residual annotation only and a0 = -1, b0 = 0 this is the VIPRS 0.1.5 tau
-// update (tau = pi M / sum zeta), i.e. viprs().
+// zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j: the EM
+// statistic of the scale of a Gaussian scale mixture), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
+// S_k = sum_j E[(beta_j^(k))^2]. With one slab class, the residual annotation only and a0 = -1, b0 = 0 this is the
+// VIPRS 0.1.5 tau update (tau = pi M / sum zeta), i.e. viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, cut at 0)
+// or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
 // Output: posterior mean eta_j and its MMSE allocation eta_j^(k) = w_jk eta_j (sum_k eta_j^(k) = eta_j), the
 // weights of the annotation-specific PRS.
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (any nonzero
 // binary 0/1 annotation column), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
 // Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted); the
-// sigma2_k (variance of beta) are carried over when pi moves.
+// sigma2_k (variance of beta) are carried over when pi moves (the start sets those of the first grid point).
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -46,6 +51,8 @@ struct ViprsControl {
       pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
+  // slab mixture: class c has prior share mix_prop[c] and variance kap[c] h2_j / pi (sum_c mix_prop[c] kap[c] = 1)
+  std::vector<float> lprop, kap, lkap;
 };
 
 ViprsControl read_control(const Rcpp::List& c) {
@@ -77,6 +84,20 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
+  const std::vector<double> mp = Rcpp::as<std::vector<double>>(c["mix_prop"]), mv = Rcpp::as<std::vector<double>>(c["mix_var"]);
+  if (mp.empty() || mp.size() != mv.size() || mp.size() > 16)
+    Rcpp::stop("mix_prop and mix_var need the same length, 1 to 16");
+  double sp = 0, spv = 0;
+  for (std::size_t i = 0; i < mp.size(); ++i) {
+    if (!(mp[i] > 0) || !(mv[i] > 0)) Rcpp::stop("mix_prop and mix_var must be > 0");
+    sp += mp[i];
+  }
+  for (std::size_t i = 0; i < mp.size(); ++i) spv += mp[i] / sp * mv[i];
+  for (std::size_t i = 0; i < mp.size(); ++i) {
+    x.lprop.push_back((float)std::log(mp[i] / sp));
+    x.kap.push_back((float)(mv[i] / spv));
+    x.lkap.push_back((float)std::log(mv[i] / spv));
+  }
   return x;
 }
 
@@ -89,9 +110,31 @@ struct State {
 
 // ---- kernels on the panel
 
+// Posterior of one SNP under the slab mixture, from the data term D = n r / sigma and base = n d / sigma:
+// class c: vt_c = base + tau / kap_c, u_c = log prop_c + .5 D^2 / vt_c + .5 (log tau - log kap_c - log vt_c);
+// logit gamma = lp + logsumexp(u), psi_c = softmax(u), slab mean sum_c psi_c D / vt_c. With one class this is the
+// VIPRS update. psi (C entries) and vt are written when non-null.
+inline float mix_post(float D, float base, float tau, float ltau, float lp, const ViprsControl& c, float& slab_mean,
+                      float* psi, float* vt) {
+  const int C = (int)c.kap.size();
+  float u[16], v[16], umax = -INFINITY;
+  for (int i = 0; i < C; ++i) {
+    v[i] = base + tau / c.kap[i];
+    u[i] = c.lprop[i] + .5f * D * D / v[i] + .5f * (ltau - c.lkap[i] - std::log(v[i]));
+    umax = std::max(umax, u[i]);
+  }
+  float se = 0.f, m = 0.f;
+  for (int i = 0; i < C; ++i) { u[i] = std::exp(u[i] - umax); se += u[i]; m += u[i] * D / v[i]; }
+  slab_mean = m / se;
+  if (psi) for (int i = 0; i < C; ++i) { psi[i] = u[i] / se; vt[i] = v[i]; }
+  const float x = lp + umax + std::log(se);
+  return x < 0 ? std::exp(x) / (1.f + std::exp(x)) : 1.f / (1.f + std::exp(-x));
+}
+
+// st.mu holds the data term D_j = n_j r_j / sigma of the last update (the class means are D_j / vt_jc)
 template <typename T>
 void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, const float* tau, const float* ltau,
-           const char* sup,
+           const char* sup, const ViprsControl& c,
            float sigma, State& st, bool active_only, float act_tol, std::vector<float>& bmax, std::vector<int64_t>& nvis, int threads) {
   const float eps = std::max(std::numeric_limits<float>::epsilon(), 1e-8f);
   const float lp = std::log(pi) - std::log1p(-pi);
@@ -110,21 +153,18 @@ void sweep(const EigenPanel<T>& P, const float* n, const float* bt, float pi, co
     for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j) {
       if (sup[j]) continue;  // suppressed: gamma = eta = 0 throughout
       const T* vj = P.row(b, j);
-      const float vt = n[j] * d[j] / sigma + tau[j];
-      const float mm = n[j] / (vt * sigma);
       const bool lazy = active_only && !active[j];
       if (!lazy) {
         ++cnt;
         r[j] = bt[j] - (RowStore<T>::dot(vj, sb, k) - d[j] * eta[j]);
       }
-      const float m_ = mm * r[j];
-      const float u = std::sqrt(.5f * vt) * m_;
-      const float x = u * u + lp + .5f * (ltau[j] - std::log(vt));
-      const float g = x < 0 ? std::exp(x) / (1.f + std::exp(x)) : 1.f / (1.f + std::exp(-x));
+      const float D = n[j] * r[j] / sigma;
+      float m_;
+      const float g = mix_post(D, n[j] * d[j] / sigma, tau[j], ltau[j], lp, c, m_, nullptr, nullptr);
       const float de = g * m_ - eta[j];
       const float ad = std::fabs(de);
       if (ad >= eps) {
-        mu[j] = m_;
+        mu[j] = D;
         gamma[j] = g;
         if (!lazy || ad > act_tol) {
           RowStore<T>::axpy(sb, vj, de, k);
@@ -169,32 +209,46 @@ void vz(const EigenPanel<T>& P, const float* z, float* y, int threads) {
     for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j) y[j] = RowStore<T>::dot(P.row(b, j), z + P.s_off[b], P.k[b]);
 }
 
-// Sums for the M-step and the ELBO with vt from (tau, sigma) of the last sweep:
-// [0] sum gamma, [1] sum zeta, [2] sum d zeta, [3] eta'bt, [4] sum d eta^2, [5] s's, [6] sum gamma log gamma,
-// [7] sum (1-gamma) log(1-gamma), [8] sum gamma log vt, [9] eta'bv (bv may be null); zeta = gamma (mu^2 + 1/vt),
-// also returned per SNP
+// Sums for the M-step and the ELBO with (tau, sigma) of the last sweep, the class means D_j / vt_jc:
+// [0] sum gamma, [1] sum zeta, [2] sum d E[beta^2], [3] eta'bt, [4] sum d eta^2, [5] s's, [6] sum gamma log gamma,
+// [7] sum (1-gamma) log(1-gamma), [8] sum gamma sum_c psi_c (log vt_c + log kap_c - 2 log prop_c + 2 log psi_c),
+// [9] eta'bv (bv may be null). zeta_j = gamma sum_c psi_c (mu_c^2 + 1/vt_c) / kap_c (E[beta^2] on the scale of
+// h2_j, prior mean h2_j; the M-step statistic), also returned per SNP. One class: zeta = E[beta^2], [8] = sum gamma
+// log vt (VIPRS).
 void stats(int64_t M, const float* d, const float* n, const float* bt, const float* bv, const State& st, int64_t S,
-           const float* tau, float sigma, double* out, double* zeta, int threads) {
+           const float* tau, const float* ltau, const ViprsControl& c, float sigma, double* out, double* zeta,
+           int threads) {
   double a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0, a8 = 0, a9 = 0;
   const double lo = 1e-12;
+  const int C = (int)c.kap.size();
   const float* gamma = st.gamma.data(); const float* mu = st.mu.data(); const float* eta = st.eta.data();
   const float* s = st.s.data();
 #ifdef _OPENMP
 #pragma omp parallel for reduction(+ : a0, a1, a2, a3, a4, a6, a7, a8, a9) num_threads(threads)
 #endif
   for (int64_t j = 0; j < M; ++j) {
-    const double vt = (double)n[j] * d[j] / sigma + tau[j];
+    float psi[16], vt[16], m_;
+    const float D = mu[j];
+    mix_post(D, n[j] * d[j] / sigma, tau[j], ltau[j], 0.f, c, m_, psi, vt);
+    double e2 = 0, zs = 0, lv = 0;
+    for (int i = 0; i < C; ++i) {
+      const double mc = (double)D / vt[i], q = (double)mc * mc + 1. / vt[i];
+      e2 += psi[i] * q;
+      zs += psi[i] * q / c.kap[i];
+      lv += psi[i] * (std::log((double)vt[i]) + c.lkap[i] - 2. * c.lprop[i] +
+                      (psi[i] > 0 ? 2. * std::log((double)psi[i]) : 0.));
+    }
     const double g = std::min(std::max((double)gamma[j], lo), 1. - lo);
-    const double z = gamma[j] * ((double)mu[j] * mu[j] + 1. / vt);
+    const double z = gamma[j] * zs;
     a0 += gamma[j];
     a1 += z;
     zeta[j] = z;
-    a2 += d[j] * z;
+    a2 += d[j] * gamma[j] * e2;
     a3 += (double)eta[j] * bt[j];
     a4 += (double)d[j] * eta[j] * eta[j];
     a6 += g * std::log(g);
     a7 += (1. - g) * std::log(1. - g);
-    a8 += gamma[j] * std::log(vt);
+    a8 += gamma[j] * lv;
     if (bv) a9 += (double)eta[j] * bv[j];
   }
 #ifdef _OPENMP
@@ -256,6 +310,25 @@ struct VarModel {
     }
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
+  }
+  // start from given sigma2_k (truncated at 0; e.g. stratified LDSC tau_k); returns sum_j h2_j over the SNPs not
+  // suppressed, 0 when every h2_j would be 0 (then nothing is set)
+  double start_at(const std::vector<double>& s2, double pi_) {
+    std::vector<double> p(K);
+    for (int k = 0; k < K; ++k) p[k] = std::max(s2[k], 0.);
+    double tot = 0;
+    bool zero = false;
+    for (int64_t j = 0; j < M; ++j) {
+      double h = aR[j] * p[0];
+      const double* r = row(j);
+      for (int k = 1; k < K; ++k) h += r[k - 1] * p[k];
+      if (!(h > 0)) zero = true;
+      if (!sup[j]) tot += h;
+    }
+    if (zero || !(tot > 0)) return 0.;
+    par = p; pi = pi_;
+    set_all();
+    return tot;
   }
   // pi moves: sigma2_k (variance of beta) kept, the slab variance h2_j / pi follows
   void pi_move(double pi_) { pi = pi_; set_all(); }
@@ -372,12 +445,12 @@ struct Fitter {
     std::string msg = "max_iter reached";
     for (it = 1; it <= max_iter; ++it) {
       const bool full = !c.use_active || force_full || (it % c.full_every == 0);
-      sweep(P, nv, bt, (float)pi, vm.tau.data(), vm.ltau.data(), vm.sup.data(), (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
+      sweep(P, nv, bt, (float)pi, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, st, !full, (float)c.act_tol, bmax, nvis, threads);
       for (int b = 0; b < P.nb; ++b) snp_visits += nvis[b];
       if (full) ++sweeps_full; else ++sweeps_part;
       force_full = false;
       if (it % c.refresh_every == 0) vtx(P, st.eta.data(), st.s.data(), threads);
-      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), (float)sigma, out, zeta.data(), threads);
+      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
       vm.mstep(zeta.data(), c.a0, c.b0);
@@ -529,7 +602,8 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // converge are never chosen)
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
-                    bool resid_all, const std::vector<std::string>& files, double thresh, const ViprsControl& c, int threads) {
+                    bool resid_all, const std::vector<double>& s2_init, const std::vector<std::string>& files,
+                    double thresh, const ViprsControl& c, int threads) {
   const EigenPanel<T> P = plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, thresh, threads);
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
@@ -546,8 +620,14 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
   vm.set_residual(resid_all); bvm.set_residual(resid_all);
   bool have_best = false;
-  vm.start(h2_0, grid[0]);
-  double sigma = 1. - h2_0;
+  double h2_start = h2_0;
+  if (!s2_init.empty()) {
+    const double tot = vm.start_at(s2_init, grid[0]);
+    if (tot > 0) h2_start = std::min(std::max(tot, c.h2_min), c.h2_max);
+    else Rcpp::warning("sigma2_init gives h2_j = 0 for some SNP: the LDSC start is used");
+    if (!(tot > 0)) vm.start(h2_0, grid[0]);
+  } else vm.start(h2_0, grid[0]);
+  double sigma = 1. - h2_start;
   int drops = 0;
   for (double pi : grid) {
     vm.pi_move(pi);
@@ -583,24 +663,28 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 
 }  // namespace
 
-// Entry: blocks (ids), keep (0-based eigen rows with data per block, increasing), z / n / af per kept SNP (blocks
+// Entry: files (eigen.bin of each block), blocks (ids), keep (0-based eigen rows with data per block, increasing), z / n / af per kept SNP (blocks
 // concatenated in that order; af = frequency of the effect allele, for BETA = BETA_STD / sqrt(2 af (1 - af))),
 // A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no suppression),
-// bin_start (first panel row of each kept block), n_panel (SNPs of the panel), thresh (eigen truncation, <= 0 = every
-// stored pair), fp16 (store V as float16), control (viprs_annot_control()).
+// bin_start (first panel row of each kept block), n_panel (SNPs of the panel), sigma2_init (empty, or sigma2_k of the
+// first grid point, residual first; negative values are set to 0), thresh (eigen truncation, <= 0 = every stored
+// pair), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]
 Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
                            const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel, bool resid_all,
-                           double thresh,
-                           bool fp16, Rcpp::List control, int threads) {
+                           Rcpp::NumericVector sigma2_init, double thresh, bool fp16, Rcpp::List control,
+                           int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
   const Inputs in = read_inputs(blocks, keep, z, n, af);
   const int64_t M = in.z.size();
   if (A.nrow() != M) Rcpp::stop("A must have one row per kept SNP");
   const int K = A.ncol() + 1;
+  const std::vector<double> s2(sigma2_init.begin(), sigma2_init.end());
+  if (!s2.empty() && (int)s2.size() != K) Rcpp::stop("sigma2_init needs one value per annotation plus the residual");
+  for (double x : s2) if (!std::isfinite(x)) Rcpp::stop("sigma2_init must be finite");
   std::vector<double> Ar(M * (K - 1));
   for (int64_t j = 0; j < M; ++j)
     for (int k = 0; k < K - 1; ++k) {
@@ -636,8 +720,8 @@ Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerV
         off += m;
       }
     }
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, files, thresh, c, T)
-                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, files, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, resid_all, s2, files, thresh, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, resid_all, s2, files, thresh, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }
