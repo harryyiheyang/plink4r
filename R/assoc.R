@@ -20,7 +20,8 @@
 #' Common variants: every test here is a large-sample test (normal or chi-square reference), meant for variants
 #' with a minor allele frequency above 0.01. For the logistic and Cox models the reference also needs minor
 #' alleles among the cases (events), about `2 x cases x MAF >= 30`, which MAF > 0.01 gives from 1,500 cases on.
-#' Variants are not filtered here: give the variants to test in `snp_vec`.
+#' Variants are not filtered here: every biallelic variant of the file is tested, in file order. To test a part of
+#' them, write that part to a file of its own first (e.g. with PLINK).
 #'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
@@ -42,8 +43,6 @@
 #'   intercepts as the baseline, the kinship correlation between the records of relatives; see [reml_tau()]), and
 #'   a variant is tested in that model of the records.
 #' @param id_col Column of `data` with the sample IDs (.psam / .fam IID).
-#' @param snp_vec Variant IDs to test (`NULL` = all biallelic variants), tested in file order. The ID column of the
-#'   `.bim` / `.pvar` is read only when `snp_vec` is given.
 #' @param robust Linear only: add sandwich standard errors (not with `kinship`).
 #' @param kinship `NULL` (default: the samples are taken as unrelated), or the related pairs as a three-column
 #'   data.frame: ID, ID, kinship coefficient (see [reml_tau()]). With `kinship` the null model accounts for the
@@ -73,19 +72,18 @@
 #'   left out for having more than two alleles.
 #' @export
 gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
-                 id_col = "IID", snp_vec = NULL, robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
+                 id_col = "IID", robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
                  kinship = NULL, para = list()) {
   family <- match.arg(family)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (robust) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gwas_kinship(formula, data, pfile, bfile, kinship, family, id_col, snp_vec, threads, mem_gb, block,
-                         para))
+    return(.gwas_kinship(formula, data, pfile, bfile, kinship, family, id_col, threads, mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
-  r <- .assoc_run(formula, data, pfile, bfile, exposure = NULL, int_covar = NULL, family, id_col, snp_vec,
-                  robust, center = FALSE, threads, mem_gb, block)
+  r <- .assoc_run(formula, data, pfile, bfile, exposure = NULL, int_covar = NULL, family, id_col, robust,
+                  center = FALSE, threads, mem_gb, block)
   res <- r$res; out <- r$out
   stat <- if (family == "gaussian") "T" else "Z"
   out[, `:=`(BETA = res$beta[, 1L], SE = res$se[, 1L])]
@@ -141,20 +139,20 @@ gwas <- function(formula, data, pfile = NULL, bfile = NULL, family = c("gaussian
 #' @export
 gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile = NULL,
                 family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
-                snp_vec = NULL, threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
+                threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
   family <- match.arg(family)
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (isTRUE(robust)) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gxe_kinship(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center, snp_vec,
-                        threads, mem_gb, block, para))
+    return(.gxe_kinship(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center, threads,
+                        mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   if (is.null(robust)) robust <- family == "gaussian"
-  r <- .assoc_run(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust, center,
-                  threads, mem_gb, block)
+  r <- .assoc_run(formula, data, pfile, bfile, exposure, int_covar, family, id_col, robust, center, threads, mem_gb,
+                  block)
   res <- r$res; out <- r$out; terms <- r$terms; ne <- r$n_exp
   lin <- family == "gaussian"
   pz <- function(b, s) if (lin) 2 * stats::pt(-abs(b / s), res$df_marginal) else 2 * stats::pnorm(-abs(b / s))
@@ -181,26 +179,15 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 }
 
 # The genotype file of an association run, from geno_file(): its variants (var, the table of geno_file() itself with
-# the columns CHR, POS, A1, A2, allele_ct), sample IDs (iid), path, the file rows of the biallelic variants to test
-# (vrow), and the CHR and POS of the multiallelic ones left out (skipped). The variant IDs are read only to find
-# snp_vec.
-.geno_variants <- function(pfile, bfile, snp_vec) {
+# the columns CHR, POS, A1, A2, allele_ct; the variant IDs are not read), sample IDs (iid), path, the file rows of the
+# biallelic variants, which are the ones tested (vrow), and the CHR and POS of the multiallelic ones left out (skipped).
+.geno_variants <- function(pfile, bfile) {
   if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = !is.null(snp_vec))
+  gf <- geno_file(bedfile = bfile, pgenfile = pfile, id = FALSE)
   var <- data.table::setnames(gf$variants, c("chr", "pos", "a1", "a2"), c("CHR", "POS", "A1", "A2"))
-  vrow <- if (is.null(snp_vec)) seq_len(nrow(var)) else {
-    sv <- as.character(snp_vec)
-    i <- match(sv, var$id)
-    if (anyNA(i))
-      warning(sum(is.na(i)), " of snp_vec not in the genotype file; dropped: ",
-              paste(utils::head(unique(sv[is.na(i)]), 5L), collapse = ", "), if (sum(is.na(i)) > 5L) ", ...",
-              call. = FALSE)
-    sort(unique(i[!is.na(i)]))
-  }
-  multi <- vrow[var$allele_ct[vrow] > 2L]
-  vrow <- vrow[var$allele_ct[vrow] <= 2L]
+  vrow <- which(var$allele_ct <= 2L)
   if (!length(vrow)) stop("No biallelic variant to test.", call. = FALSE)
-  list(var = var, iid = gf$samples$iid, path = gf$path, vrow = vrow, skipped = var[multi, list(CHR, POS)])
+  list(var = var, iid = gf$samples$iid, path = gf$path, vrow = vrow, skipped = var[allele_ct > 2L, list(CHR, POS)])
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing
@@ -270,11 +257,11 @@ gxe <- function(formula, data, exposure, int_covar = NULL, pfile = NULL, bfile =
 }
 
 # Shared part of gwas() and gxe(): samples, design, null model, variants, and the C++ stream.
-.assoc_run <- function(formula, data, pfile, bfile, exposure, int_covar, family, id_col, snp_vec, robust,
+.assoc_run <- function(formula, data, pfile, bfile, exposure, int_covar, family, id_col, robust,
                        center, threads, mem_gb, block) {
   if (robust && family == "binomial") stop("Robust standard errors are for the linear model only.", call. = FALSE)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
+  gv <- .geno_variants(pfile, bfile)
   var <- gv$var; iid <- gv$iid; path <- gv$path; vrow <- gv$vrow; skipped <- gv$skipped
   sm <- .pheno_samples(as.data.frame(data), formula, family, id_col, iid)
   d <- sm$d; srow <- sm$srow; y <- sm$y

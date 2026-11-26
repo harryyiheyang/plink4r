@@ -53,8 +53,8 @@
 #'   singular variants, outcomes not tested, and `skipped_multiallelic`: the `CHR` and `BP` of the variants left out
 #'   for having more than two alleles.
 #' @export
-xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, snp_vec = NULL,
-                 threads = 0L, mem_gb = 0, block = 256L) {
+xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile = NULL, window = 1e6, threads = 0L,
+                 mem_gb = 0, block = 256L) {
   some <- function(x) paste0(paste(utils::head(x, 5L), collapse = ", "),
                              if (length(x) > 5L) sprintf(", ... (%d in all)", length(x)))
   if (!is.data.frame(outcome) || ncol(outcome) < 2L)
@@ -96,7 +96,7 @@ xqtl <- function(outcome, position, covariate = NULL, out, pfile = NULL, bfile =
   if (any(a$Start > a$End)) stop("Start after End in position: ", some(a$Outcome[a$Start > a$End]), call. = FALSE)
 
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
+  gv <- .geno_variants(pfile, bfile)
   var <- gv$var; iid <- gv$iid; vrow <- gv$vrow
 
   # ---- samples and covariates: the rules of gwas() (.pheno_samples), every column of covariate a term of the model.

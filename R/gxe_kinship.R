@@ -6,11 +6,11 @@
 # c_1, A_11 (that of gwas()), and beta = A^-1 c with covariance A^-1 gives the main effect, the interactions and
 # their Wald tests (generalised least squares; one step from the null model for the logistic and Cox models).
 .gxe_kinship <- function(formula, data, exposure, int_covar, pfile, bfile, kinship, family, id_col, center,
-                         snp_vec, threads, mem_gb, block, para) {
+                         threads, mem_gb, block, para) {
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
+  gv <- .geno_variants(pfile, bfile)
   D <- .mm_design(formula, data, family, id_col, gv$iid)
   lab <- gsub("`", "", D$labels)
   nt <- setdiff(gsub("`", "", c(exposure, int_covar)), lab)

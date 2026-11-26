@@ -87,12 +87,11 @@ reml_tau_para <- function() {
 # BETA = g' P y / g' P g and SE = (g' P g)^-1/2 (generalised least squares; for the logistic model on the working
 # response, one step from the null model). g' P g is exact (no GRAMMAR-GAMMA approximation). Same columns as the
 # route without kinship.
-.gwas_kinship <- function(formula, data, pfile, bfile, kinship, family, id_col, snp_vec, threads, mem_gb, block,
-                          para) {
+.gwas_kinship <- function(formula, data, pfile, bfile, kinship, family, id_col, threads, mem_gb, block, para) {
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gv <- .geno_variants(pfile, bfile, snp_vec)
+  gv <- .geno_variants(pfile, bfile)
   D <- .mm_design(formula, data, family, id_col, gv$iid)
   nl <- .reml_null(D, kinship, family, P, proj = TRUE)
   t1 <- proc.time()[["elapsed"]]
