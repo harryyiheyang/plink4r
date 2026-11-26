@@ -4,7 +4,7 @@
 // Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
 // residual annotation A_R: 1 for every SNP, or only for SNPs without annotation), so h2_j = Var(beta_j) = sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
 // spike and slab with fixed pi; the slab is a mixture of C classes with fixed shares p_c (mix_prop, default small /
-// medium / large = 5 : 3 : 2) and variances kap_c h2_j / pi (mix_var relative, normalized to sum_c p_c kap_c = 1),
+// medium / large = 6 : 3 : 1) and variances kap_c h2_j / pi (mix_var relative, normalized to sum_c p_c kap_c = 1),
 // so Var(beta_j) = h2_j. Coordinate update (D_j = n_j r_j / sigma; tau_j = pi / h2_j):
 //   vt_jc = n_j d_j / sigma + tau_j / kap_c,  u_c = log p_c + .5 D_j^2 / vt_jc + .5 (log tau_j - log kap_c - log vt_jc)
 //   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc

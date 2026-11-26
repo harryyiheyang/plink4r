@@ -5,7 +5,7 @@
 #' beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0), so
 #' h2_j = Var(beta_j) = sum_k A_jk sigma2_k; a residual annotation A_R = 1 for every SNP is added. Prior on beta_j:
 #' VIPRS spike and slab with pi fixed on the grid; the slab is a mixture of small / medium / large effects with fixed
-#' shares (`mix_prop`, default 5 : 3 : 2) and variances `mix_var` (relative, default 0.01 : 0.1 : 1) times
+#' shares (`mix_prop`, default 6 : 3 : 1) and variances `mix_var` (relative, default 0.01 : 0.1 : 1) times
 #' h2_j / pi, scaled so that Var(beta_j) = h2_j. M-step (D.1.2): with
 #' w_jk = A_jk sigma2_k / h2_j and E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j (zeta_j the posterior
 #' second moment of beta_j on the scale of h2_j),
@@ -16,7 +16,7 @@
 #' Search, PUMAS pseudo-validation and refit as [viprs()] (pi grid ascending, each point warm-started from the last);
 #' `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #'
-#' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, see
+#' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, default 0.98, see
 #' [sbayesrc()] for the format) with at least one annotated member (any nonzero binary 0/1 annotation column), the
 #' members without annotation are fixed at beta = 0 (never updated, so they never change the residual) and are left
 #' out of the M-step. Without binary annotation columns nothing is suppressed.
@@ -98,7 +98,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @return a list.
 #' @export
-viprs_annot_control <- function(..., bin_r2 = 0.95, mix_prop = c(0.5, 0.3, 0.2), mix_var = c(0.01, 0.1, 1),
+viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
                                 init_floor = 0.01, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), init_floor = as.numeric(init_floor), a0 = as.numeric(a0), b0 = as.numeric(b0)))

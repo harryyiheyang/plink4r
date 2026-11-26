@@ -5,13 +5,13 @@
 # b_hat = X (X' beta) + X z / sqrt(n), z ~ N(0, I_k), X = U Lambda^{1/2}; R is never formed.
 # usage: python gen_ideal.py <ld_dir> <snp_table: tsv/parquet with ID, block, ld_index, A1, A2, freq> <out_dir> <seed>
 #        env: NGWAS (300000), H2 (0.3), PCAUSAL (0.01), K (3), PT (0.1 per tissue), BLOCKS ("1-100" or "" = all),
-#             ENRICH (1), MIX ("0.5,0.3,0.2"), MIXVAR ("0.01,0.1,1")
+#             ENRICH (1), MIX ("0.6,0.3,0.1"), MIXVAR ("0.01,0.1,1")
 import os, sys, numpy as np, pandas as pd
 ld, tab, out, seed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 n = float(os.environ.get("NGWAS", "300000")); h2 = float(os.environ.get("H2", "0.3"))
 pc = float(os.environ.get("PCAUSAL", "0.01")); K = int(os.environ.get("K", "3")); pt = float(os.environ.get("PT", "0.1"))
 en = float(os.environ.get("ENRICH", "1"))
-mix = np.array([float(x) for x in os.environ.get("MIX", "0.5,0.3,0.2").split(",")]); mix /= mix.sum()
+mix = np.array([float(x) for x in os.environ.get("MIX", "0.6,0.3,0.1").split(",")]); mix /= mix.sum()
 mv = np.array([float(x) for x in os.environ.get("MIXVAR", "0.01,0.1,1").split(",")])
 rng = np.random.default_rng(seed); os.makedirs(out, exist_ok=True)
 

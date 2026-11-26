@@ -1,5 +1,5 @@
 # usage: Rscript run_ideal.R <ld_dir> <snp_table> <sim_dir>  -> sim_dir/{V,A1,AM,AML}.tsv
-# V viprs; A1 viprs_annot with one Gaussian slab; AM viprs_annot with the 5:3:2 slab mixture; AML AM started at
+# V viprs; A1 viprs_annot with one Gaussian slab; AM viprs_annot with the 6:3:1 slab mixture; AML AM started at
 # ldsc_strat(). Residual annotation only on unannotated SNPs (RESID_ALL=1: on every SNP).
 a <- commandArgs(TRUE); suppressPackageStartupMessages({library(plink4r); library(data.table)})
 RA <- Sys.getenv("RESID_ALL", "0") == "1"
