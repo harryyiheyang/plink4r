@@ -123,6 +123,9 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) searched jointly with pi; one value fixes the
 #'   cutoff; a value at or above the panel's stored cutoff keeps every stored pair.
 #' @param rel_r_min a smaller cutoff is taken when its r / r_largest exceeds this.
+#' @param start_lift,start_scale with `sigma2_init`: each annotation sigma2_k raised to at least the equal start
+#'   (all sigma2_k equal, sum_j h2_j = the LDSC h2), then times `start_scale`, so that no annotation starts near 0
+#'   (sigma2_k = 0 is a fixed point of the M-step).
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
@@ -131,10 +134,12 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
                                 cutoffs = c(0.995, 0.999), rel_r_min = 1.25,
+                                start_lift = TRUE, start_scale = 2,
                                 gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
-                             rel_r_min = as.numeric(rel_r_min), gibbs_burn = as.integer(gibbs_burn),
+                             rel_r_min = as.numeric(rel_r_min), start_lift = isTRUE(start_lift),
+                             start_scale = as.numeric(start_scale), gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }

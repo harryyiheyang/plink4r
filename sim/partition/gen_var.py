@@ -1,7 +1,7 @@
 # Partition truth by the variance route (the model of viprs_annot): one causal set of proportion PI over all SNPs,
 # annotated or not, raised inside small categories to at least MIN_CAUSAL expected causal SNPs; a causal SNP's
 # effect is the sum of independent components: the intercept beta_j^(0), t(RESID_DF) with unit variance, on every
-# causal SNP, and beta_j^(c) ~ N(0, A_jc sigma2_c) for each category (A_jc = membership
+# causal SNP of the base set (rate PI), and beta_j^(c) ~ N(0, A_jc sigma2_c) for each category (A_jc = membership
 # of category c, the largest of its annotation columns / 100) with the slab class (shares MIX, relative variances
 # MIXVAR) common to the categories of the SNP. Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
 # then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised component
@@ -64,9 +64,10 @@ if share_r < 0: raise SystemExit("DESIGN shares sum above 1")
 memb = np.stack([A[:, [cols.index(c) for c in cc]].max(1) for _, cc, _ in cats], 1)   # M x C membership
 
 causal = rng.random(M) < pi
+causal0 = causal.copy()   # base causal set (rate PI everywhere): carries the intercept, so sigma2_0 is the same per SNP
 # coverage-stratified causal set: each category gets at least MIN_CAUSAL expected causal SNPs among its members
 # (extra causal SNPs drawn there with p = (MIN_CAUSAL - PI m_c) / (m_c (1 - PI)), m_c = members), so that sigma2_c is
-# estimable; 0 turns it off
+# estimable (the extra SNPs carry the category components only, not the intercept); 0 turns it off
 for i in range(memb.shape[1]):
     mem = memb[:, i] > 0; mc = int(mem.sum())
     if mc == 0: continue
@@ -76,7 +77,7 @@ cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
 for i in range(len(cats)): C[:, i] = sc * np.sqrt(memb[:, i]) * rng.standard_normal(M)
-C[:, -1] = np.where(causal, rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
+C[:, -1] = np.where(causal0, rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
 
 def gram(V):
     # V' R V over the blocks (one pass, X not kept), plus the X' V per block for later

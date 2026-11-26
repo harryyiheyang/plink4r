@@ -56,6 +56,8 @@ struct ViprsControl {
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
   double rel_r_min;
+  bool start_lift;     // given start (sigma2_init): each annotation sigma2_k at least that of the equal start
+  double start_scale;  // given start: annotation sigma2_k times this (after the lift)
   std::vector<double> cutoffs;  // eigen cutoffs searched jointly with pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0;
@@ -96,6 +98,8 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
   x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
   x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
+  x.start_lift = Rcpp::as<bool>(c["start_lift"]);
+  x.start_scale = Rcpp::as<double>(c["start_scale"]);
   if (x.cutoffs.empty()) Rcpp::stop("cutoffs: at least one eigen cutoff");
   for (double v : x.cutoffs) if (!(v > 0 && v <= 1)) Rcpp::stop("cutoffs must be in (0, 1]");
   std::sort(x.cutoffs.begin(), x.cutoffs.end());
@@ -326,11 +330,12 @@ struct VarModel {
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k): annotation values cut at 0; returns sum_j h2_j over the
   // SNPs not suppressed, or 0 when the intercept is not positive (then nothing is set)
-  double start_at(const std::vector<double>& s2, double pi_) {
+  // lift > 0 (start_lift): each annotation sigma2_k at least lift, then times scale (start_scale)
+  double start_at(const std::vector<double>& s2, double pi_, double lift = 0., double scale = 1.) {
     if (!(s2[0] > 0)) return 0.;
     std::vector<double> p(K);
     p[0] = s2[0];
-    for (int k = 1; k < K; ++k) p[k] = std::max(s2[k], 0.);
+    for (int k = 1; k < K; ++k) p[k] = scale * std::max(std::max(s2[k], 0.), lift);
     double tot = 0;
     for (int64_t j = 0; j < M; ++j) {
       if (sup[j]) continue;
@@ -638,7 +643,17 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // start h2 (sigma = 1 - it)
 double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0, double pi, const ViprsControl& c) {
   if (!s2_init.empty()) {
-    const double tot = vm.start_at(s2_init, pi);
+    double lift = 0.;
+    if (c.start_lift) {  // the sigma2 of the equal start (all sigma2_k equal, sum_j h2_j = the LDSC h2)
+      double sa = 0;
+      for (int64_t j = 0; j < vm.M; ++j) {
+        sa += 1.;
+        const double* r = vm.row(j);
+        for (int k = 1; k < vm.K; ++k) sa += r[k - 1];
+      }
+      lift = h2_0 / sa;
+    }
+    const double tot = vm.start_at(s2_init, pi, lift, c.start_scale);
     if (tot > 0) return std::min(std::max(tot, c.h2_min), c.h2_max);
     Rcpp::warning("sigma2_init: the intercept is not positive, the LDSC start is used");
   }
