@@ -106,15 +106,19 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #'   slab of [viprs()].
 #' @param exact_em M-step of sigma2_k: TRUE the maximizer of the ELBO at fixed pi (sigma2_k <- pi S_k /
 #'   sum_j gamma_j A_jk), FALSE the moment form of VIPRS 0.1.5 (sigma2_k <- S_k / sum_j A_jk, as [viprs()]).
+#' @param var_floor lower bound of every sigma2_k and h2_j, as a fraction of the mean h2_j of the (naive LDSC) start; a
+#'   sigma2_k at 0 would stay 0 and an h2_j at 0 is an infinite slab precision.
 #' @param init_floor smallest start value of a sigma2_k given by `sigma2_init`, as a fraction of the mean h2_j.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
-                                exact_em = TRUE, init_floor = 0.01, a0 = 0, b0 = 0) {
+                                exact_em = TRUE, var_floor = 1e-3, init_floor = 0.01, a0 = 0,
+                                b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var), exact_em = isTRUE(exact_em), init_floor = as.numeric(init_floor),
+                             mix_var = as.numeric(mix_var), exact_em = isTRUE(exact_em), var_floor = as.numeric(var_floor),
+                             init_floor = as.numeric(init_floor),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
 

@@ -12,7 +12,7 @@
 // M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
 // zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j: the EM
 // statistic of the scale of a Gaussian scale mixture), sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)),
-// S_k = sum_j E[(beta_j^(k))^2] (exact_em: sigma2_k <- (pi S~_k + 2 b0) / (sum_j gamma_j A_jk + 2 (a0 + 1)), S~_k with
+// sigma2_k and h2_j are kept >= var_floor * (LDSC h2) / M. S_k = sum_j E[(beta_j^(k))^2] (exact_em: sigma2_k <- (pi S~_k + 2 b0) / (sum_j gamma_j A_jk + 2 (a0 + 1)), S~_k with
 // the conditional term gamma_j w (1 - w) h2_j / pi, the ELBO maximizer at fixed pi). With one slab class, the residual annotation only and a0 = -1, b0 = 0 this is the
 // VIPRS 0.1.5 tau update (tau = pi M / sum zeta), i.e. viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, cut at 0)
 // or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
@@ -49,7 +49,7 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
-      pi_hi_max, pi_cap, a0, b0, init_floor;
+      pi_hi_max, pi_cap, a0, b0, init_floor, var_floor;
   bool exact_em;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
@@ -84,6 +84,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.a0 = Rcpp::as<double>(c["a0"]);
   x.b0 = Rcpp::as<double>(c["b0"]);
   x.init_floor = Rcpp::as<double>(c["init_floor"]);
+  x.var_floor = Rcpp::as<double>(c["var_floor"]);
   x.exact_em = Rcpp::as<bool>(c["exact_em"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
@@ -220,8 +221,8 @@ void vz(const EigenPanel<T>& P, const float* z, float* y, int threads) {
 // h2_j, prior mean h2_j; the M-step statistic), also returned per SNP. One class: zeta = E[beta^2], [8] = sum gamma
 // log vt (VIPRS).
 void stats(int64_t M, const float* d, const float* n, const float* bt, const float* bv, const State& st, int64_t S,
-           const float* tau, const float* ltau, const ViprsControl& c, float sigma, double* out, double* zeta,
-           int threads) {
+           const float* tau, const float* ltau, const char* sup, const ViprsControl& c, float sigma, double* out,
+           double* zeta, int threads) {
   double a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0, a8 = 0, a9 = 0;
   const double lo = 1e-12;
   const int C = (int)c.kap.size();
@@ -231,6 +232,7 @@ void stats(int64_t M, const float* d, const float* n, const float* bt, const flo
 #pragma omp parallel for reduction(+ : a0, a1, a2, a3, a4, a6, a7, a8, a9) num_threads(threads)
 #endif
   for (int64_t j = 0; j < M; ++j) {
+    if (sup[j]) { zeta[j] = 0; continue; }  // beta_j = 0 throughout: no term
     float psi[16], vt[16], m_;
     const float D = mu[j];
     mix_post(D, n[j] * d[j] / sigma, tau[j], ltau[j], 0.f, c, m_, psi, vt);
@@ -275,6 +277,8 @@ struct VarModel {
   std::vector<double> h2;        // h2_j
   std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
   double pi = 1;
+  double vfloor = 0;             // lower bound of every sigma2_k and h2_j (sigma2_k = 0 would be a fixed point, h2_j = 0
+                                 // an infinite precision)
   int threads;
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
@@ -298,6 +302,7 @@ struct VarModel {
       double h = aR[j] * par[0];
       const double* r = row(j);
       for (int k = 1; k < K; ++k) h += r[k - 1] * par[k];
+      h = std::max(h, vfloor);
       h2[j] = h;
       const double t = pi / h;
       tau[j] = (float)t; ltau[j] = (float)std::log(t);
@@ -379,7 +384,7 @@ struct VarModel {
     }
     for (int k = 0; k < K; ++k) {
       const double den = SN[K + k] + 2. * (a0 + 1.);
-      par[k] = den > 0 ? std::max((SN[k] + 2. * b0) / den, 0.) : 0.;
+      par[k] = den > 0 ? std::max((SN[k] + 2. * b0) / den, vfloor) : vfloor;
     }
     (void)K1;
     set_all();
@@ -465,7 +470,7 @@ struct Fitter {
       if (full) ++sweeps_full; else ++sweeps_part;
       force_full = false;
       if (it % c.refresh_every == 0) vtx(P, st.eta.data(), st.s.data(), threads);
-      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), c, (float)sigma, out, zeta.data(), threads);
+      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
       vm.mstep(zeta.data(), st.gamma.data(), c.exact_em, c.a0, c.b0);
@@ -675,6 +680,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
   vm.set_residual(resid_all); bvm.set_residual(resid_all);
+  vm.vfloor = bvm.vfloor = c.var_floor * h2_0 / (double)P.M;
   bool have_best = false;
   double h2_start = h2_0;
   if (!s2_init.empty()) {
