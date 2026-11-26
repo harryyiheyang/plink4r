@@ -40,8 +40,9 @@ struct EigenPanel {
   const T* row(int b, int64_t j) const { return V.data() + v_off[b] + (j - snp_off[b]) * (int64_t)k[b]; }
 };
 
-// m and the eigen dimension k kept by read_eigen_block(path, thresh), from the header and eigenvalues only.
-inline void eigen_block_dims(const std::string& path, double thresh, int& m, int& k) {
+// m and the eigen dimension k kept by read_eigen_block(path, thresh), from the header and eigenvalues only. clamp: a
+// thresh at or above the file cutoff keeps every stored pair instead of failing.
+inline void eigen_block_dims(const std::string& path, double thresh, int& m, int& k, bool clamp = false) {
   std::ifstream in(path.c_str(), std::ios::binary | std::ios::ate);
   if (!in) throw std::runtime_error("cannot open " + path);
   const std::uint64_t size = static_cast<std::uint64_t>(in.tellg());
@@ -70,6 +71,7 @@ inline void eigen_block_dims(const std::string& path, double thresh, int& m, int
   }
   m = mm;
   k = kf;
+  if (clamp && thresh >= file_thresh - 1e-6) thresh = 0;
   if (thresh > 0) {
     if (thresh > file_thresh + 1e-6) throw std::runtime_error("thresh exceeds the file cutoff: " + path);
     double cum = 0;
@@ -177,6 +179,51 @@ EigenPanel<T> load_eigen_panel(const std::vector<std::string>& files, const std:
   for (int b = 0; b < nb; ++b)
     if (!err[b].empty()) throw std::runtime_error("block " + std::to_string(blocks[b]) + ": " + err[b]);
   return P;
+}
+
+// The panel at fewer leading eigen components per block (ks[b] <= P.k[b]): rows, d, l, lambda, w and bt of the kept
+// components (w is per component, so its leading entries are unchanged).
+template <typename T>
+EigenPanel<T> truncate_eigen_panel(const EigenPanel<T>& P, const std::vector<int>& ks, int threads) {
+  EigenPanel<T> Q;
+  const int nb = P.nb;
+  Q.nb = nb; Q.M = P.M; Q.snp_off = P.snp_off; Q.k = ks;
+  Q.v_off.resize(nb); Q.s_off.assign(nb + 1, 0);
+  int64_t tot = 0;
+  for (int b = 0; b < nb; ++b) {
+    if (ks[b] < 1 || ks[b] > P.k[b]) throw std::runtime_error("truncate_eigen_panel: k outside the stored range");
+    Q.v_off[b] = tot;
+    tot += (P.snp_off[b + 1] - P.snp_off[b]) * (int64_t)ks[b];
+    Q.s_off[b + 1] = Q.s_off[b] + ks[b];
+  }
+  Q.S = Q.s_off[nb];
+  Q.V.resize(tot); Q.d.resize(Q.M); Q.ldscore.resize(Q.M); Q.lam.resize(Q.S); Q.w.resize(Q.S); Q.bt.resize(Q.M);
+  Q.order.resize(nb);
+  for (int b = 0; b < nb; ++b) Q.order[b] = b;
+  std::stable_sort(Q.order.begin(), Q.order.end(), [&](int a, int c) {
+    return (Q.snp_off[a + 1] - Q.snp_off[a]) * (int64_t)Q.k[a] > (Q.snp_off[c + 1] - Q.snp_off[c]) * (int64_t)Q.k[c];
+  });
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
+#endif
+  for (int b = 0; b < nb; ++b) {
+    const int kb = ks[b];
+    for (int i = 0; i < kb; ++i) { Q.lam[Q.s_off[b] + i] = P.lam[P.s_off[b] + i]; Q.w[Q.s_off[b] + i] = P.w[P.s_off[b] + i]; }
+    for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j) {
+      const T* src = P.row(b, j);
+      T* dst = Q.V.data() + Q.v_off[b] + (j - Q.snp_off[b]) * (int64_t)kb;
+      double dd = 0., ll = 0.;
+      for (int i = 0; i < kb; ++i) {
+        dst[i] = src[i];
+        const double v = RowStore<T>::get(src, i);
+        dd += v * v;
+        ll += (double)Q.lam[Q.s_off[b] + i] * v * v;
+      }
+      Q.d[j] = (float)dd; Q.ldscore[j] = (float)ll;
+      Q.bt[j] = RowStore<T>::dot(dst, Q.w.data() + Q.s_off[b], kb);
+    }
+  }
+  return Q;
 }
 
 }  // namespace plink4r

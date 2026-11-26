@@ -23,6 +23,7 @@
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
+// Eigen cutoff (cutoffs, SBayesRC rule) by VI at pi = cut_pi (choose_cutoff). Then, on the panel at that cutoff,
 // Hyperparameter search as viprs.cpp (pi grid ascending with warm start, PUMAS, best converged point refitted); the
 // sigma2_k (variance of beta) are carried over when pi moves (the start sets those of the first grid point).
 // [[Rcpp::depends(RcppEigen)]]
@@ -32,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -51,6 +53,8 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
+  double cut_pi, rel_r_min;
+  std::vector<double> cutoffs;  // eigen cutoffs compared by VI at cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
@@ -88,6 +92,13 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   x.gibbs_burn = Rcpp::as<int>(c["gibbs_burn"]);
   x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
+  x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
+  x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
+  x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
+  if (x.cutoffs.empty()) Rcpp::stop("cutoffs: at least one eigen cutoff");
+  for (double v : x.cutoffs) if (!(v > 0 && v <= 1)) Rcpp::stop("cutoffs must be in (0, 1]");
+  std::sort(x.cutoffs.begin(), x.cutoffs.end());
+  if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
   if (x.gibbs_burn < 0 || x.gibbs_draws < 0) Rcpp::stop("gibbs_burn and gibbs_draws must be >= 0");
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -496,12 +507,16 @@ struct Fitter {
     return RunResult{pi, sigma, sigma_g / (sigma_g + sigma), elbo, it, ok, fixed_sigma, msg};
   }
 
-  // PUMAS split (magenpy / VIPRS): training half bt + sqrt(c) V xi, xi ~ N(0, I_S), c = 1/(prop_train N) - 1/N
+  // PUMAS split (magenpy / VIPRS): training half bt + sqrt(c) V xi, xi ~ N(0, I_S), c = 1/(prop_train N) - 1/N.
+  // xi of block b from its own stream (seed, b), so the panel at fewer eigen components uses the leading entries of the
+  // same draws (one split across eigen cutoffs).
   void pumas(std::vector<float>& train, std::vector<float>& valid, std::vector<float>& n_tr, std::vector<double>& xi) {
-    std::mt19937_64 eng(c.seed);
     std::normal_distribution<double> N01;
     xi.resize(P.S);
-    for (auto& x : xi) x = N01(eng);
+    for (int b = 0; b < P.nb; ++b) {
+      std::mt19937_64 eng(c.seed + 0x9E3779B97F4A7C15ull * (unsigned long long)(b + 1));
+      for (int i = 0; i < P.k[b]; ++i) xi[P.s_off[b] + i] = N01(eng);
+    }
     const double cc = 1. / (c.prop_train * n_max) - 1. / n_max, sc = std::sqrt(cc);
     std::vector<float> xf(xi.begin(), xi.end()), y(P.M);
     vz(P, xf.data(), y.data(), threads);
@@ -629,11 +644,105 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // pi ascending with warm start (state and variance model carried over), PUMAS pseudo-validation, early stop after
 // stop_after consecutive drops of pseudo R2, refit of the best converged point on all data (points that did not
 // converge are never chosen)
+// variance model start: sigma2_init (intercept > 0) or all sigma2_k equal with sum_j h2_j = the LDSC h2; returns the
+// start h2 (sigma = 1 - it)
+double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0, double pi, const ViprsControl& c) {
+  if (!s2_init.empty()) {
+    const double tot = vm.start_at(s2_init, pi);
+    if (tot > 0) return std::min(std::max(tot, c.h2_min), c.h2_max);
+    Rcpp::warning("sigma2_init: the intercept is not positive, the LDSC start is used");
+  }
+  vm.start(h2_0, pi);
+  return h2_0;
+}
+
+// Eigen cutoff (SBayesRC rule, VI): the panel is read once with every stored pair; at each cutoff (ascending, effects
+// and sigma2_k warm-started from the last) one VI fit at pi = cut_pi on the PUMAS training half (the same xi draws at
+// every cutoff), scored by r = b' valid / sqrt(b' R b) with the validation half and R of the full panel. Base: the
+// largest cutoff; a smaller one is taken when its |r / r_base| is the largest and above rel_r_min (or r_base < 0).
+// Returns the index of the chosen cutoff and its panel (null: the full panel).
+template <typename T>
+int choose_cutoff(const EigenPanel<T>& P0, const Inputs& in, const std::vector<double>& A, int K,
+                  const std::vector<char>& sup, const std::vector<double>& s2_init, const std::vector<std::string>& files,
+                  const ViprsControl& c, int threads, std::unique_ptr<EigenPanel<T>>& chosen, Rcpp::DataFrame& tab) {
+  const int nc = (int)c.cutoffs.size();
+  std::vector<std::vector<int>> ks(nc, std::vector<int>(P0.nb));
+  for (int i = 0; i < nc; ++i)
+    for (int b = 0; b < P0.nb; ++b) {
+      int m = 0;
+      plink4r::eigen_block_dims(files[b], c.cutoffs[i], m, ks[i][b], true);
+      ks[i][b] = std::min(ks[i][b], P0.k[b]);
+    }
+  if (nc == 1) {
+    if (ks[0] != P0.k) chosen.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[0], threads)));
+    tab = Rcpp::DataFrame::create(Rcpp::_["cut"] = c.cutoffs[0]);
+    return 0;
+  }
+  Fitter<T> F0(P0, c, in.n, in.z, threads);
+  std::vector<float> tr0, valid0, ntr0;
+  std::vector<double> xi0;
+  F0.pumas(tr0, valid0, ntr0, xi0);
+  const double h2_0 = F0.h2_ldsc();
+  std::vector<double> rr(nc), sec(nc);
+  std::vector<int> ktot(nc), conv(nc);
+  std::vector<float> eta(P0.M, 0.f), gam(P0.M, (float)c.cut_pi), s0(P0.S);
+  for (int64_t j = 0; j < P0.M; ++j) if (sup[j]) gam[j] = 0.f;
+  VarModel vm(P0.M, K, A, sup, threads);
+  double sigma = 1. - start_model(vm, s2_init, h2_0, c.cut_pi, c);
+  for (int i = 0; i < nc; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unique_ptr<EigenPanel<T>> Pi;
+    if (ks[i] != P0.k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[i], threads)));
+    const EigenPanel<T>& P = Pi ? *Pi : P0;
+    Fitter<T> F(P, c, in.n, in.z, threads);
+    std::vector<float> train, valid, n_tr;
+    std::vector<double> xi;
+    F.pumas(train, valid, n_tr, xi);
+    State st(P.M, P.S, c.cut_pi);
+    st.eta = eta; st.gamma = gam;
+    vm.pi_move(c.cut_pi);
+    const RunResult r = F.run(st, n_tr.data(), train.data(), c.cut_pi, vm, sigma, c.grid_max_iter, nullptr);
+    sigma = r.sigma; eta = st.eta; gam = st.gamma;
+    double bv = 0, bb = 0;
+    for (int64_t j = 0; j < P0.M; ++j) bv += (double)eta[j] * valid0[j];
+    vtx(P0, eta.data(), s0.data(), threads);
+    for (float x : s0) bb += (double)x * x;
+    rr[i] = bb > 0 ? bv / std::sqrt(bb) : 0.;
+    conv[i] = r.converged;
+    ktot[i] = 0;
+    for (int k : ks[i]) ktot[i] += k;
+    sec[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    Rcpp::checkUserInterrupt();
+  }
+  const int ib = nc - 1;
+  std::vector<double> rel(nc);
+  int best = -1;
+  for (int i = 0; i < nc; ++i) {
+    rel[i] = rr[ib] != 0 ? std::fabs(rr[i] / rr[ib]) : 0.;
+    if (rr[i] > 0 && (best < 0 || rel[i] > rel[best])) best = i;
+  }
+  int ich = ib;
+  if (best >= 0 && best != ib && (rel[best] > c.rel_r_min || rr[ib] < 0)) ich = best;
+  tab = Rcpp::DataFrame::create(Rcpp::_["cut"] = c.cutoffs, Rcpp::_["k_total"] = ktot, Rcpp::_["r"] = rr,
+                                Rcpp::_["rel_r"] = rel, Rcpp::_["converged"] = conv, Rcpp::_["seconds"] = sec,
+                                Rcpp::_["chosen"] = Rcpp::LogicalVector(nc, false));
+  Rcpp::LogicalVector ch = tab["chosen"];
+  ch[ich] = true;
+  if (ks[ich] != P0.k) chosen.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(P0, ks[ich], threads)));
+  return ich;
+}
+
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
                     const std::vector<double>& s2_init, const std::vector<std::string>& files,
-                    double thresh, const ViprsControl& c, int threads) {
-  const EigenPanel<T> P = plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, thresh, threads);
+                    const ViprsControl& c, int threads) {
+  std::unique_ptr<EigenPanel<T>> P0(
+      new EigenPanel<T>(plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, 0., threads)));
+  std::unique_ptr<EigenPanel<T>> Pc;
+  Rcpp::DataFrame cut_tab;
+  const int ich = choose_cutoff(*P0, in, A, K, sup, s2_init, files, c, threads, Pc, cut_tab);
+  if (Pc) P0.reset();  // the chosen panel is a truncated copy: the full one is no longer needed
+  const EigenPanel<T>& P = Pc ? *Pc : *P0;
   Fitter<T> F(P, c, in.n, in.z, threads);
   const double h2_0 = F.h2_ldsc();
   const std::vector<double> grid = F.pi_grid();
@@ -648,14 +757,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
   VarModel vm(P.M, K, A, sup, threads), bvm(P.M, K, A, sup, threads);
   bool have_best = false;
-  double h2_start = h2_0;
-  if (!s2_init.empty()) {
-    const double tot = vm.start_at(s2_init, grid[0]);
-    if (tot > 0) h2_start = std::min(std::max(tot, c.h2_min), c.h2_max);
-    else Rcpp::warning("sigma2_init: the intercept is not positive, the LDSC start is used");
-    if (!(tot > 0)) vm.start(h2_0, grid[0]);
-  } else vm.start(h2_0, grid[0]);
-  double sigma = 1. - h2_start;
+  double sigma = 1. - start_model(vm, s2_init, h2_0, grid[0], c);
   int drops = 0;
   for (double pi : grid) {
     vm.pi_move(pi);
@@ -687,6 +789,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   return pack(F, best, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef(Rcpp::Range(0, ng - 1), Rcpp::_),
                                  Rcpp::_["best_pseudo_r2"] = best_r2, Rcpp::_["n_bins"] = n_bins,
+                                 Rcpp::_["cutoff"] = c.cutoffs[ich], Rcpp::_["cutoff_table"] = cut_tab,
                                  Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
                                  Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi.begin(), xi.end())));
 }
@@ -698,14 +801,13 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 // A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no
 // suppression), skip_cols (0-based columns of A that make a SNP annotated for the suppression),
 // bin_start (first panel row of each kept block), n_panel (SNPs of the panel), sigma2_init (empty, or sigma2_k of the
-// first grid point, intercept first; annotation values cut at 0), thresh (eigen truncation, <= 0 = every stored
-// pair), fp16 (store V as float16), control (viprs_annot_control()).
+// first grid point, intercept first; annotation values cut at 0), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]
 Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep,
                            Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericVector af, Rcpp::NumericMatrix A,
                            const std::string& bin_file, Rcpp::NumericVector bin_start, double n_panel,
-                           Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, double thresh, bool fp16,
+                           Rcpp::NumericVector sigma2_init, Rcpp::IntegerVector skip_cols, bool fp16,
                            Rcpp::List control, int threads) {
   const int T = plink4r::resolve_threads(threads);
   const ViprsControl c = read_control(control);
@@ -747,8 +849,8 @@ Rcpp::List viprs_annot_cpp(const std::vector<std::string>& files, Rcpp::IntegerV
         off += m;
       }
     }
-    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, s2, files, thresh, c, T)
-                : fit_path<float>(in, Ar, K, sup, n_bins, s2, files, thresh, c, T);
+    return fp16 ? fit_path<uint16_t>(in, Ar, K, sup, n_bins, s2, files, c, T)
+                : fit_path<float>(in, Ar, K, sup, n_bins, s2, files, c, T);
   } catch (const std::exception& e) {
     Rcpp::stop(e.what());
   }

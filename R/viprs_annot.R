@@ -15,7 +15,10 @@
 #' back on the intercept.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
-#' Search, PUMAS pseudo-validation and refit by VI as [viprs()] (pi grid ascending, each point warm-started from the
+#' Eigen cutoff: with more than one value in `cutoffs` (default 0.995, 0.999), one VI fit per cutoff at
+#' pi = `cut_pi` on the PUMAS training half (the same split at every cutoff, warm start across cutoffs), scored by the
+#' correlation with the validation half; the largest cutoff unless a smaller one has |r / r_largest| > `rel_r_min`
+#' (SBayesRC rule). Then search, PUMAS pseudo-validation and refit by VI as [viprs()] (pi grid ascending, each point warm-started from the
 #' last); `sigma2_init` sets the sigma2_k of the first grid point, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
 #' with Rao-Blackwell means; sigma2_k and sigma by stochastic approximation of the same M-step. BETA is the mean of
@@ -49,7 +52,7 @@
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
 viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, sigma2_init = NULL,
-                        thresh = 0, fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {
+                        fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {
   threads <- .threads(threads)
   d <- .prs_inputs(sumstat, ref, ld_dir)
   ctl <- do.call(viprs_annot_control, control)
@@ -69,7 +72,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   t0 <- Sys.time()
   res <- viprs_annot_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, A, bin_file, d$start, d$n_panel,
                          sigma2_init = s2, skip_cols = match(skip_annot, cols) - 1L,
-                         thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
+                         fp16 = fp16, control = ctl, threads = threads)
   n_sup <- sum(res$extra$suppressed)
   hyp <- res$hyp
   message(sprintf("viprs_annot: %d SNPs (%d suppressed in %.0f LD bins), sum k %d; pi %.4g, h2 %.4f, sigma %.4f, %d iterations (%s), %.1f s",
@@ -100,6 +103,8 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   colnames(gs) <- nm
   attr(out, "grid_sigma2") <- gs
   attr(out, "best_pseudo_r2") <- res$extra$best_pseudo_r2
+  attr(out, "cutoff") <- res$extra$cutoff
+  attr(out, "cutoff_table") <- data.table::as.data.table(res$extra$cutoff_table)
   attr(out, "pumas_xi") <- res$extra$pumas_xi
   .prs_write(out, output)
   out[]
@@ -113,6 +118,10 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
+#' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) compared by VI; one value fixes the cutoff; a
+#'   value at or above the panel's stored cutoff keeps every stored pair.
+#' @param cut_pi pi of the VI fits that compare the cutoffs.
+#' @param rel_r_min a smaller cutoff is taken when its |r / r_largest| exceeds this.
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
@@ -120,9 +129,11 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
+                                cutoffs = c(0.995, 0.999), cut_pi = 0.01, rel_r_min = 1.25,
                                 gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var), gibbs_burn = as.integer(gibbs_burn),
+                             mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs), cut_pi = as.numeric(cut_pi),
+                             rel_r_min = as.numeric(rel_r_min), gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
