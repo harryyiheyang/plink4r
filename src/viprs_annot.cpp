@@ -48,7 +48,7 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend;
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
-      pi_hi_max, pi_cap, a0, b0;
+      pi_hi_max, pi_cap, a0, b0, init_floor;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
   // slab mixture: class c has prior share mix_prop[c] and variance kap[c] h2_j / pi (sum_c mix_prop[c] kap[c] = 1)
@@ -81,6 +81,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.pi_cap = Rcpp::as<double>(c["pi_cap"]);
   x.a0 = Rcpp::as<double>(c["a0"]);
   x.b0 = Rcpp::as<double>(c["b0"]);
+  x.init_floor = Rcpp::as<double>(c["init_floor"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   if (!Rf_isNull(c["pi_grid"])) x.pi_grid_user = Rcpp::as<std::vector<double>>(c["pi_grid"]);
   std::sort(x.pi_grid_user.begin(), x.pi_grid_user.end());
@@ -311,24 +312,32 @@ struct VarModel {
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // start from given sigma2_k (truncated at 0; e.g. stratified LDSC tau_k); returns sum_j h2_j over the SNPs not
-  // suppressed, 0 when every h2_j would be 0 (then nothing is set)
-  double start_at(const std::vector<double>& s2, double pi_) {
+  // start from given sigma2_k (e.g. stratified LDSC tau_k): values below floor * (mean h2_j of the values cut at 0)
+  // are raised to it, so no sigma2_k starts at 0 (0 is a fixed point of the M-step); returns sum_j h2_j over the
+  // SNPs not suppressed, 0 when the values cut at 0 give no positive h2_j (then nothing is set)
+  double start_at(const std::vector<double>& s2, double floor, double pi_) {
     std::vector<double> p(K);
     for (int k = 0; k < K; ++k) p[k] = std::max(s2[k], 0.);
-    double tot = 0;
-    bool zero = false;
-    for (int64_t j = 0; j < M; ++j) {
-      double h = aR[j] * p[0];
-      const double* r = row(j);
-      for (int k = 1; k < K; ++k) h += r[k - 1] * p[k];
-      if (!(h > 0)) zero = true;
-      if (!sup[j]) tot += h;
-    }
-    if (zero || !(tot > 0)) return 0.;
+    auto total = [&](const std::vector<double>& q) {
+      double tot = 0;
+      for (int64_t j = 0; j < M; ++j) {
+        if (sup[j]) continue;
+        double h = aR[j] * q[0];
+        const double* r = row(j);
+        for (int k = 1; k < K; ++k) h += r[k - 1] * q[k];
+        tot += h;
+      }
+      return tot;
+    };
+    int64_t m = 0;
+    for (int64_t j = 0; j < M; ++j) m += !sup[j];
+    const double t0 = total(p);
+    if (!(t0 > 0) || m == 0) return 0.;
+    const double lo = floor * t0 / m;
+    for (int k = 0; k < K; ++k) p[k] = std::max(p[k], lo);
     par = p; pi = pi_;
     set_all();
-    return tot;
+    return total(p);
   }
   // pi moves: sigma2_k (variance of beta) kept, the slab variance h2_j / pi follows
   void pi_move(double pi_) { pi = pi_; set_all(); }
@@ -622,9 +631,9 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   bool have_best = false;
   double h2_start = h2_0;
   if (!s2_init.empty()) {
-    const double tot = vm.start_at(s2_init, grid[0]);
+    const double tot = vm.start_at(s2_init, c.init_floor, grid[0]);
     if (tot > 0) h2_start = std::min(std::max(tot, c.h2_min), c.h2_max);
-    else Rcpp::warning("sigma2_init gives h2_j = 0 for some SNP: the LDSC start is used");
+    else Rcpp::warning("sigma2_init has no positive value: the LDSC start is used");
     if (!(tot > 0)) vm.start(h2_0, grid[0]);
   } else vm.start(h2_0, grid[0]);
   double sigma = 1. - h2_start;
@@ -667,7 +676,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
 // concatenated in that order; af = frequency of the effect allele, for BETA = BETA_STD / sqrt(2 af (1 - af))),
 // A (kept SNPs x annotations, same order; the intercept is added here), bin_file (LD-bin list, "" = no suppression),
 // bin_start (first panel row of each kept block), n_panel (SNPs of the panel), sigma2_init (empty, or sigma2_k of the
-// first grid point, residual first; negative values are set to 0), thresh (eigen truncation, <= 0 = every stored
+// first grid point, residual first; raised to at least init_floor times the mean h2_j), thresh (eigen truncation, <= 0 = every stored
 // pair), fp16 (store V as float16), control (viprs_annot_control()).
 
 // [[Rcpp::export]]

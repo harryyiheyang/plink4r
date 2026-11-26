@@ -28,8 +28,8 @@
 #' @param resid_all residual annotation A_R = 1 for every SNP (TRUE) or only for SNPs without annotation (FALSE).
 #' @param sigma2_init NULL (all sigma2_k equal, sum_j h2_j = the naive LDSC h2), the output of [ldsc_strat()] with the
 #'   same annotations (tau_c; with `resid_all = FALSE` the annotation values are tau_0 + tau_k, exact for
-#'   non-overlapping 0/1 annotations), or a numeric vector named `residual` and the annotation names. Negative values
-#'   are set to 0 (a sigma2_k at 0 stays 0).
+#'   non-overlapping 0/1 annotations), or a numeric vector named `residual` and the annotation names. Values are cut
+#'   at 0 and then raised to at least `init_floor` times the mean h2_j (a sigma2_k at 0 would stay 0).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin; must exist).
 #' @param control [viprs_annot_control()].
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
@@ -93,14 +93,15 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, res
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
+#' @param init_floor smallest start value of a sigma2_k given by `sigma2_init`, as a fraction of the mean h2_j.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @return a list.
 #' @export
-viprs_annot_control <- function(..., bin_r2 = 0.95, mix_prop = c(0.5, 0.3, 0.2), mix_var = c(0.01, 0.1, 1), a0 = 0,
-                                b0 = 0) {
+viprs_annot_control <- function(..., bin_r2 = 0.95, mix_prop = c(0.5, 0.3, 0.2), mix_var = c(0.01, 0.1, 1),
+                                init_floor = 0.01, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
-                             mix_var = as.numeric(mix_var), a0 = as.numeric(a0), b0 = as.numeric(b0)))
+                             mix_var = as.numeric(mix_var), init_floor = as.numeric(init_floor), a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
 
 # sigma2_k of the first grid point (residual first, then cols), or numeric(0) for the LDSC start
