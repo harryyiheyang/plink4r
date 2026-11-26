@@ -3,7 +3,7 @@
 #' [viprs()] with an additive annotation model of the per-SNP effect variance, and the partition of each effect into
 #' annotation-specific components (tissue-CRE-specific PRS weights; Research Design D.1.2). Model:
 #' beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0), so
-#' h2_j = Var(beta_j) = sum_k A_jk sigma2_k; a residual annotation A_R = 1 for every SNP is added. Prior on beta_j:
+#' h2_j = Var(beta_j) = sum_k A_jk sigma2_k; an intercept (A = 1 for every SNP; its component is the residual PRS, BETA_residual) is added. Prior on beta_j:
 #' VIPRS spike and slab with pi fixed on the grid; the slab is a mixture of small / medium / large effects with fixed
 #' shares (`mix_prop`, default 6 : 3 : 1) and variances `mix_var` (relative, default 0.01 : 0.1 : 1) times
 #' h2_j / pi, scaled so that Var(beta_j) = h2_j. M-step (D.1.2): with
@@ -25,10 +25,9 @@
 #' @param annot annotations keyed by Block and Index (or CHR and BP37 / BP38), one numeric column per annotation
 #'   (binary 0/1 or continuous score >= 0);
 #'   SNPs not in `annot` get 0.
-#' @param resid_all residual annotation A_R = 1 for every SNP (TRUE) or only for SNPs without annotation (FALSE).
 #' @param sigma2_init NULL (all sigma2_k equal, sum_j h2_j = the naive LDSC h2), the output of [ldsc_strat()] with the
-#'   same annotations (tau_c; with `resid_all = FALSE` the annotation values are tau_0 + tau_k, exact for
-#'   non-overlapping 0/1 annotations), or a numeric vector named `residual` and the annotation names. Values are cut
+#'   same annotations (tau_c, its Residual = the intercept), or a numeric vector named `residual` (the intercept)
+#'   and the annotation names. Values are cut
 #'   at 0 and then raised to at least `init_floor` times the mean h2_j (a sigma2_k at 0 would stay 0).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin, from [ld_bins()]; must exist).
 #' @param skip_annot annotation columns that make a SNP annotated for the LD-bin suppression: NULL (default) every
@@ -43,7 +42,7 @@
 #'   `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
-viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, resid_all = TRUE,
+viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL,
                         sigma2_init = NULL,
                         thresh = 0, fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {
   threads <- .threads(threads)
@@ -53,7 +52,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   cols <- colnames(A)
   if ("residual" %in% cols) stop("the annotation name 'residual' is reserved", call. = FALSE)
   if (any(A < 0)) stop("annotations must be >= 0", call. = FALSE)
-  s2 <- .sigma2_init(sigma2_init, cols, resid_all)
+  s2 <- .sigma2_init(sigma2_init, cols)
   if (is.null(skip_annot)) skip_annot <- cols[vapply(seq_along(cols), function(k) all(A[, k] %in% c(0, 1)), logical(1))]
   miss <- setdiff(skip_annot, cols)
   if (length(miss)) stop("skip_annot names no annotation column: ", paste(miss, collapse = ", "), call. = FALSE)
@@ -61,7 +60,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   if (!file.exists(bin_file)) stop("LD-bin list not found: ", bin_file, call. = FALSE)
   t0 <- Sys.time()
   res <- viprs_annot_cpp(.ld_block_file(ld_dir, d$blocks), d$blocks, d$keep, d$x$Z, d$x$N, d$x$A1Freq, A, bin_file, d$start, d$n_panel,
-                         resid_all = resid_all, sigma2_init = s2, skip_cols = match(skip_annot, cols) - 1L,
+                         sigma2_init = s2, skip_cols = match(skip_annot, cols) - 1L,
                          thresh = thresh, fp16 = fp16, control = ctl, threads = threads)
   n_sup <- sum(res$extra$suppressed)
   hyp <- res$hyp
@@ -122,16 +121,15 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }
 
-# sigma2_k of the first grid point (residual first, then cols), or numeric(0) for the LDSC start
-.sigma2_init <- function(x, cols, resid_all) {
+# sigma2_k of the first grid point (intercept first, then cols), or numeric(0) for the LDSC start
+.sigma2_init <- function(x, cols) {
   if (is.null(x)) return(numeric(0))
   if (is.list(x) && !is.null(x$Parameter_summary)) {
     p <- x$Parameter_summary
     tau <- stats::setNames(p$Estimate, p$Parameter)
     miss <- setdiff(c("Residual", cols), names(tau))
     if (length(miss)) stop("ldsc_strat() result lacks ", paste(miss, collapse = ", "), call. = FALSE)
-    t0 <- tau[["Residual"]]
-    return(c(t0, unname(tau[cols]) + if (resid_all) 0 else t0))
+    return(c(tau[["Residual"]], unname(tau[cols])))
   }
   if (!is.numeric(x) || is.null(names(x))) stop("sigma2_init: NULL, a ldsc_strat() result or a named numeric vector",
                                                 call. = FALSE)

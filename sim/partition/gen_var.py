@@ -1,8 +1,8 @@
 # Partition truth by the variance route (the model of viprs_annot): one causal proportion PI for every SNP; a causal
 # SNP's effect is the sum of independent components beta_j^(c) with variance A_jc sigma2_c (A_jc = membership of
 # category c, the largest of its annotation columns / 100), the slab class (shares MIX, relative variances MIXVAR)
-# common to the components of the SNP. Residual: SNPs with no annotation at all (every annotation column 0), effects
-# t(3) (unit variance). Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
+# common to the components of the SNP. Residual = the intercept: every causal SNP (annotated or not) has an intercept
+# component, t(3) with unit variance (no slab-class scale). Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
 # then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised component
 # h2 differ slightly from the design; they are printed and saved).
 # b_hat = X (X' beta) + X z / sqrt(n), z ~ N(0, I_k), X = U Lambda^{1/2}; R is never formed.
@@ -68,7 +68,7 @@ cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
 for i in range(len(cats)): C[:, i] = sc * np.sqrt(memb[:, i]) * rng.standard_normal(M)
-C[:, -1] = np.where(resid, sc * rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
+C[:, -1] = np.where(causal, rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
 
 def gram(V):
     # V' R V over the blocks (one pass, X not kept), plus the X' V per block for later
@@ -102,6 +102,6 @@ ann.insert(0, "ID", snp.ID.values); ann.to_csv(f"{out}/annot.tsv", sep="\t", ind
 np.save(f"{out}/beta_comp.npy", C); snp[["ID", "block", "ld_index"]].to_csv(f"{out}/snps.tsv", sep="\t", index=False)
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
-print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; residual SNPs", int(resid.sum()))
+print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int(resid.sum()))
 print("h2 design  ", dict(zip(names, np.round(target, 4))))
 print("h2 realised", dict(zip(names, np.round(own, 4))), "(beta_c' R beta_c; total", h2, "exactly)")

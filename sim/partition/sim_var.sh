@@ -5,8 +5,8 @@
 #SBATCH -t 12:00:00
 #SBATCH -o partvar_%j.log
 # Variance-route partition simulation on PanUKB_EUR_ld blocks 1-100 with the real annotations (run from
-# ~/partition_sim2; plink4r in ./lib; scripts of sim/partition here). Two designs (h2 shares; residual = unannotated
-# SNPs, 20%, t(3) effects), 3 seeds each; PI = 0.01 causal, 6:3:1 slab mixture, N = 300000, h2 = 0.3.
+# ~/partition_sim2; plink4r in ./lib; scripts of sim/partition here). Two designs (h2 shares; residual = intercept on
+# every causal SNP, 20%, t(3) effects), 3 seeds each; PI = 0.01 causal, 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 set -euo pipefail
 LD=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/PanUKB_EUR_ld
 AN=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/Annotation

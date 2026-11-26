@@ -1,14 +1,13 @@
 # usage: Rscript run_var.R <ld_dir> <snp_table> <sim_dir>  -> sim_dir/<method>.tsv (ID, BETA_STD, BETA_STD_<annot>)
 #   and sim_dir/<method>_h2.tsv (annotation, h2_post = E[beta^(k)' R beta^(k)], h2_share = prior share)
 # Methods: V viprs; A1 viprs_annot, one Gaussian slab; AMm 6:3:1 slab mixture, moment M-step; AM mixture, exact EM;
-# AML AM started at ldsc_strat(). Residual annotation only on unannotated SNPs (RESID_ALL=1: on every SNP).
+# AML AM started at ldsc_strat(). The intercept (residual PRS) is on every SNP.
 # env: BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
 #      L2 / L_base / base / baseL2 and one column per annotation named L_<annot>, L2_<annot>, <annot>L2 or <annot>;
 #      unset: ld_score()).
 a <- commandArgs(TRUE); suppressPackageStartupMessages({library(plink4r); library(data.table)})
-RA <- Sys.getenv("RESID_ALL", "0") == "1"
 tab <- fread(a[2])
 rf <- tab[, .(CHR = chr, BP37 = bp37, A1, A2, A1Freq = freq, Block = block, Index = ld_index)]
 ids <- tab[, .(ID, Block = block, Index = ld_index)]
@@ -44,12 +43,12 @@ if ("AML" %in% meth) {
 }
 fit <- function(k) switch(k,
   V = viprs(ss, a[1], ref = rf, threads = 4),
-  A1 = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, resid_all = RA,
+  A1 = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                    control = viprs_annot_control(mix_prop = 1, mix_var = 1, exact_em = FALSE), threads = 4),
-  AMm = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, resid_all = RA,
+  AMm = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                     control = viprs_annot_control(exact_em = FALSE), threads = 4),
-  AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, resid_all = RA, threads = 4),
-  AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, resid_all = RA,
+  AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, threads = 4),
+  AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                     sigma2_init = ls, threads = 4))
 for (k in meth) {
   f <- tm(fit(k)); r <- ids[f[[1]], on = .(Block, Index)]
