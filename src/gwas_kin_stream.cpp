@@ -1,6 +1,8 @@
-// gwas_kin_stream_cpp: the kinship route of gwas(): mixed-model association of every selected variant of a PGEN or
-// BED with a sparse kinship
-// (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed.
+// gwas_kin_stream_cpp: the kinship route of gwas(): mixed-model association of every biallelic variant of a PGEN or
+// BED with a sparse kinship (fastGWA; Jiang et al. 2019), streamed in blocks; the genotype matrix is never formed
+// and no table of the results either: the rows of a group of blocks are written to the result file as soon as they
+// are computed, each one the line of the variant in the .bim / .pvar followed by its statistics (ResultText,
+// variant_text.h).
 //
 // Null model: the plink4r::KinNull left by reml_tau_gaussian.cpp / reml_tau_binomial.cpp / reml_tau_cox.cpp /
 // cox_null.cpp (kin_sparse.h), used as
@@ -16,7 +18,7 @@
 // L2 = [om] (0 at related samples), as in assoc_stream.cpp, from which the reading and blocking are taken. A
 // variant whose A lost more than 1 - 1 / kKappaMax of g' Omega g to the subtraction is recomputed from
 // g - Vb Q' g. The life-table Cox model has no Vb (its columns vary within a sample): there A is kept, and taken
-// as 0 (status 2) below kSingular of g' Omega g.
+// as 0 (the variant has no statistics) below kSingular of g' Omega g.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -29,6 +31,7 @@
 #endif
 #include "kin_sparse.h"
 #include "la_dispatch.h"
+#include "p_value.h"
 #include "scan_block.h"
 #include "resources.h"
 
@@ -37,6 +40,7 @@ namespace {
 using plink4r::kScanRowChunk;
 constexpr double kKappaMax = 1e4;        // explicit projection when g' Omega g / A exceeds this
 constexpr double kSingular = 1e-9;       // without Vb: A below this share of g' Omega g is taken as 0
+constexpr double kRowBytes = 512.0;      // text of a variant while its block is written, for the memory budget
 
 inline double dot(const double* a, const double* b, int len) {
   double s = 0.0;
@@ -129,25 +133,28 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 
 }  // namespace
 
-// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted).
-// var_idx, sample_idx: 0-based file rows. null: external pointer to the plink4r::KinNull of the analysis samples
-// (in the order of sample_idx), projected. block: variants per thread (0 = from mem_gb).
-// Returns per variant n_obs, a1_sum, beta, se, status (0 ok, 1 monomorphic / all missing, 2 A <= 0).
+// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
+// .bim / .pvar. out: the text file to write: after each line of the .bim / .pvar N, A1_FREQ, BETA, SE, the statistic
+// BETA / SE under the name `statistic` (T or Z) and its normal P; NA for a variant without statistics (no variation
+// among the samples, or A <= 0) and for a line with more than two alleles, which is not scanned. sample_idx: 0-based
+// file rows of the analysed samples. null: external pointer to the plink4r::KinNull of the analysis samples (in the
+// order of sample_idx), projected. block: variants per thread (0 = from mem_gb).
 // [[Rcpp::export]]
-Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcpp::IntegerVector allele_ct,
-                              Rcpp::IntegerVector var_idx, Rcpp::IntegerVector sample_idx,
+Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
+                              const std::string& out, const std::string& statistic, Rcpp::IntegerVector sample_idx,
                               SEXP null, int threads, double mem_gb, int block) {
   const int T = plink4r::resolve_threads(threads);
   mem_gb = plink4r::resolve_mem_gb(mem_gb, T);
   const Rcpp::XPtr<plink4r::KinNull> np(null);
   const plink4r::KinNull& NM = *np;
   const plink4r::Kin& K = NM.K;
-  const int p = var_idx.size(), ns = sample_idx.size(), k = NM.p;
+  const int ns = sample_idx.size(), k = NM.p;
   if (NM.n != ns || NM.L1.size() != static_cast<std::size_t>(ns) * (k + 1))
     Rcpp::stop("the null model does not match the samples");
-  plink4r::ScanFile F(path, bed, n_raw, allele_ct.size(), std::vector<int>(allele_ct.begin(), allele_ct.end()),
-                      std::vector<int>(var_idx.begin(), var_idx.end()), sample_idx, T);
+  const plink4r::FileVariants fv = plink4r::file_variants(path, bed, n_raw, variant_text);
+  plink4r::ScanFile F(path, bed, n_raw, fv.m, fv.allele_ct, fv.rows, sample_idx, T);
   const bool dos = F.dosage;
+  const int p = static_cast<int>(F.vi.size());
 
   const std::size_t N = ns;
   Pre pre;
@@ -155,58 +162,76 @@ Rcpp::List gwas_kin_stream_cpp(const std::string& path, bool bed, int n_raw, Rcp
   pre.L1 = NM.L1.data(); pre.Vb = NM.Vb.empty() ? nullptr : NM.Vb.data(); pre.om = NM.om.data();
 
   // block size from the memory budget
-  const double shared = 8.0 * N * (pre.m1 + k + 1.0) + 8.0 * p * 6.0 + 16.0 * (2.0 * K.pairs + K.nr) * 3;
+  const double shared = 8.0 * N * (pre.m1 + k + 1.0) + 16.0 * (2.0 * K.pairs + K.nr) * 3;
   const double per_var = plink4r::ScanBlock::var_bytes(ns, dos) + 16.0 * std::min<int>(kScanRowChunk, ns) +
-                         8.0 * (pre.m1 + 1) + 8.0 * 4;
+                         8.0 * (pre.m1 + 1) + 8.0 * 4 + kRowBytes;
   const double per_thread = 8.0 * N + 8.0 * K.nr + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
-  Rcpp::NumericVector nobs(p), asum(p), beta(p, NA_REAL), se(p, NA_REAL);
-  Rcpp::IntegerVector status(p);
+  plink4r::ResultText text(variant_text, bed, out, {"N", "A1_FREQ", "BETA", "SE", statistic, "P"});
   std::vector<Worker> wk(T);
-  std::vector<std::vector<double>> cbuf(T), abuf(T);
+  std::vector<std::vector<double>> cbuf(T), abuf(T), nbuf(T), sbuf(T);
+  std::vector<std::string> rows(T);
   for (int t = 0; t < T; ++t) {
     wk[t].init(pre, b, dos);
     cbuf[t].resize(b);
     abuf[t].resize(b);
+    nbuf[t].resize(b); sbuf[t].resize(b);
   }
   std::vector<int> bad(T, -1);
-  double* n_obs = nobs.begin();
-  double* a1_sum = asum.begin();
   int nexp = 0;
+  long long n_mono = 0, n_sing = 0;
 
   for (long long c0 = 0; c0 < p; c0 += static_cast<long long>(b) * T) {
+    const long long c1 = std::min<long long>(p, c0 + static_cast<long long>(b) * T);
+    text.load(static_cast<long long>(F.vi[c1 - 1]) + 1);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp)
+#pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp, n_mono, n_sing)
 #endif
     for (int t = 0; t < T; ++t) {
+      std::string& o = rows[t];
+      o.clear();
       const int th = plink4r::thread_id();
       Worker& W = wk[th];
       const long long j0 = c0 + static_cast<long long>(t) * b;
       if (j0 >= p) continue;
       const int nb = static_cast<int>(std::min<long long>(b, p - j0));
+      double* n_obs = nbuf[th].data();
+      double* a1_sum = sbuf[th].data();
       const long long failed = W.read(F, j0, nb, th, n_obs, a1_sum);
       if (failed >= 0) bad[th] = static_cast<int>(failed);
       double* cc = cbuf[th].data();
       double* AA = abuf[th].data();
       nexp += block_stats(pre, W, nb, cc, AA);
+      long long r = j0 == c0 ? text.first() : static_cast<long long>(F.vi[j0 - 1]) + 1;  // the next file row to write
       for (int s = 0; s < nb; ++s) {
         const long long j = j0 + s;
-        if (W.mono[s]) { status[j] = 1; continue; }
-        if (!(AA[s] > 0)) { status[j] = 2; continue; }
-        beta[j] = cc[s] / AA[s];
-        se[j] = std::sqrt(1.0 / AA[s]);
+        for (; r < F.vi[j]; ++r) text.row(o, r, 0, nullptr);  // lines with more than two alleles: not scanned
+        double v[5] = {a1_sum[s] / (2 * n_obs[s]), NA_REAL, NA_REAL, NA_REAL, NA_REAL};  // A1_FREQ BETA SE T|Z P
+        if (W.mono[s]) ++n_mono;
+        else if (!(AA[s] > 0)) ++n_sing;
+        else {
+          v[1] = cc[s] / AA[s];
+          v[2] = std::sqrt(1.0 / AA[s]);
+          v[3] = v[1] / v[2];
+          v[4] = plink4r::p_z(v[3]);
+        }
+        text.row(o, r, static_cast<long long>(n_obs[s]), v);
+        ++r;
       }
     }
     for (int t = 0; t < T; ++t)
       if (bad[t] >= 0) Rcpp::stop("Genotype read failed at variant %d of %s", bad[t] + 1, path.c_str());
+    for (int t = 0; t < T; ++t) text.write(rows[t]);
     Rcpp::checkUserInterrupt();
   }
+  text.finish(static_cast<long long>(fv.m));
 
-  Rcpp::List out;
-  out["n_obs"] = nobs; out["a1_sum"] = asum; out["status"] = status; out["beta"] = beta; out["se"] = se;
-  out["explicit"] = nexp; out["block"] = b; out["threads"] = T; out["mem_gb"] = mem_gb; out["dosage"] = dos;
-  out["simd"] = std::string(plink4r::la().isa); out["n_related"] = K.nr;
-  out["pairs"] = static_cast<double>(K.pairs);
-  return out;
+  Rcpp::List res;
+  res["variants"] = static_cast<double>(fv.m); res["tested"] = p; res["bytes"] = text.bytes();
+  res["monomorphic"] = static_cast<double>(n_mono); res["singular"] = static_cast<double>(n_sing);
+  res["explicit"] = nexp; res["block"] = b; res["threads"] = T; res["mem_gb"] = mem_gb; res["dosage"] = dos;
+  res["simd"] = std::string(plink4r::la().isa); res["n_related"] = K.nr;
+  res["pairs"] = static_cast<double>(K.pairs);
+  return res;
 }

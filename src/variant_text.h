@@ -326,7 +326,7 @@ class ResultText {
     return false;
   }
   void append_line(std::string& o, const char* s, std::size_t len) const {
-    if (!bim_) { o.append(s, len); return; }
+    if (!bim_ || !std::memchr(s, ' ', len)) { o.append(s, len); return; }  // tab-separated already
     const char* p = s; const char* const e = s + len;
     bool any = false;
     while (p < e) {

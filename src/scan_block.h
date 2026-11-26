@@ -125,8 +125,8 @@ struct ScanBlock {
     const unsigned code = (g8[s * sb + (i >> 2)] >> ((i & 3) << 1)) & 3;
     return code == 3 ? 0.0 : static_cast<double>(code) - mu;
   }
-  // Reads variants j0 .. j0 + nb - 1 of the scan (thread th) into slots 0 .. nb - 1 and writes their observed count and
-  // sum to n_obs[j] and a1_sum[j]. Returns the last variant whose read failed, or -1.
+  // Reads variants j0 .. j0 + nb - 1 of the scan (thread th) into slots 0 .. nb - 1 and writes the observed count and
+  // sum of slot s to n_obs[s] and a1_sum[s]. Returns the last variant whose read failed, or -1.
   long long read(ScanFile& F, long long j0, int nb, int th, double* n_obs, double* a1_sum) {
     long long bad = -1;
     for (int s = 0; s < nb; ++s) {
@@ -157,7 +157,7 @@ struct ScanBlock {
         sum = static_cast<double>(cnt[1] + 2 * cnt[2]);
         sq = static_cast<double>(cnt[1] + 4 * cnt[2]);
       }
-      n_obs[j] = no; a1_sum[j] = sum;
+      n_obs[s] = no; a1_sum[s] = sum;
       const double mu = no > 0 ? sum / no : 0.0, v = no > 0 ? sq / no - mu * mu : 0.0;
       mean[s] = mu;
       mono[s] = (no < 2 || !(v > 1e-12 * std::max(1.0, sq / std::max(no, 1.0)))) ? 1 : 0;

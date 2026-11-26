@@ -487,7 +487,7 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const s
       win.active(j0, j0 + nb, first, last);
       active[j0 / b] = last - first;
       if (first == last) continue;
-      const long long failed = W.read(F, j0, nb, th, nobs.data(), asum.data());
+      const long long failed = W.read(F, j0, nb, th, &nobs[j0], &asum[j0]);
       if (failed >= 0) bad[th] = static_cast<int>(failed);
       block_products(pre, W, nb, first, last);
       const int qa = last - first;
