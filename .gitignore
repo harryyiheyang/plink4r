@@ -4,3 +4,4 @@ src/*.dll
 src/pgenlib/*.o
 .Rhistory
 .Rproj.user
+__pycache__/

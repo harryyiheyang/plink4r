@@ -1,10 +1,10 @@
 # Per category (categories.tsv of gen_var.py): prediction R2 of the category's partitioned PRS (the sum of the
 # BETA_STD_<col> of its columns) for the true category genetic value, _var = b_c' R b_c / beta_c' R beta_c (posterior
-# means only), and _h2 = estimated h2 (h2_post of <method>_h2.tsv, posterior variance included; summed over the
-# columns of a category, which leaves out their cross terms) / true beta_c' R beta_c.
+# means only), and, for a category of one column, _h2 = estimated h2 (h2_post of <method>_h2.tsv, posterior variance
+# included) / true beta_c' R beta_c (a sum over several columns would leave out their cross terms: not reported).
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...
 import sys, os, numpy as np, pandas as pd
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from gen_ideal_io import read_X
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from sim_io import read_X
 ld, sim = sys.argv[1], sys.argv[2]
 snp = pd.read_csv(f"{sim}/snps.tsv", sep="\t"); C = np.load(f"{sim}/beta_comp.npy")
 cat = pd.read_csv(f"{sim}/categories.tsv", sep="\t", keep_default_na=False)
@@ -32,7 +32,7 @@ for m in sys.argv[3:]:
         if (m, nm) not in L: continue
         i, j = L[(m, nm)], L[("true", nm)]
         out[nm] = round(float(r2(i, j)), 3); out[nm + "_var"] = round(float(Q[i, i] / Q[j, j]), 3)
-        if h is not None: out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / cat.h2[names.index(nm)]), 3)
+        if h is not None and len(cc) == 1: out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / cat.h2[names.index(nm)]), 3)
     if h is not None:
         used = set(sum(cols, [])); out["other_h2"] = round(float(h[[k for k in h.index if k not in used]].sum()), 4)
     print(m, out)

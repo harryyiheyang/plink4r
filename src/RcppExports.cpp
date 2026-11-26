@@ -505,27 +505,6 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-// mixpart_cpp
-Rcpp::List mixpart_cpp(const std::vector<std::string>& files, Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVector z, Rcpp::NumericVector n, Rcpp::NumericMatrix A, bool resid_all, double thresh, bool fp16, Rcpp::List control, int threads);
-RcppExport SEXP _plink4r_mixpart_cpp(SEXP filesSEXP, SEXP blocksSEXP, SEXP keepSEXP, SEXP zSEXP, SEXP nSEXP, SEXP ASEXP, SEXP resid_allSEXP, SEXP threshSEXP, SEXP fp16SEXP, SEXP controlSEXP, SEXP threadsSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< const std::vector<std::string>& >::type files(filesSEXP);
-    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type blocks(blocksSEXP);
-    Rcpp::traits::input_parameter< Rcpp::List >::type keep(keepSEXP);
-    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type z(zSEXP);
-    Rcpp::traits::input_parameter< Rcpp::NumericVector >::type n(nSEXP);
-    Rcpp::traits::input_parameter< Rcpp::NumericMatrix >::type A(ASEXP);
-    Rcpp::traits::input_parameter< bool >::type resid_all(resid_allSEXP);
-    Rcpp::traits::input_parameter< double >::type thresh(threshSEXP);
-    Rcpp::traits::input_parameter< bool >::type fp16(fp16SEXP);
-    Rcpp::traits::input_parameter< Rcpp::List >::type control(controlSEXP);
-    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
-    rcpp_result_gen = Rcpp::wrap(mixpart_cpp(files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads));
-    return rcpp_result_gen;
-END_RCPP
-}
 // reml_tau_binomial_cpp
 Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_iter, int max_eval, double mu_eps, int start_iter, double h_window, double f_tol, double rank_tol, bool proj);
 RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP start_iterSEXP, SEXP h_windowSEXP, SEXP f_tolSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
@@ -784,7 +763,6 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_ldsc_strat_cpp", (DL_FUNC) &_plink4r_ldsc_strat_cpp, 15},
     {"_plink4r_ldsc_trans_cpp", (DL_FUNC) &_plink4r_ldsc_trans_cpp, 13},
     {"_plink4r_ldsc_univ_cpp", (DL_FUNC) &_plink4r_ldsc_univ_cpp, 8},
-    {"_plink4r_mixpart_cpp", (DL_FUNC) &_plink4r_mixpart_cpp, 11},
     {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 16},
     {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},

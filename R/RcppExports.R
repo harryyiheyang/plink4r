@@ -121,10 +121,6 @@ ldsc_univ_cpp <- function(z, N, L2, nblock, counts, w_init, n_reweight, tol) {
     .Call(`_plink4r_ldsc_univ_cpp`, z, N, L2, nblock, counts, w_init, n_reweight, tol)
 }
 
-mixpart_cpp <- function(files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads) {
-    .Call(`_plink4r_mixpart_cpp`, files, blocks, keep, z, n, A, resid_all, thresh, fp16, control, threads)
-}
-
 reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }

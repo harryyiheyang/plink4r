@@ -31,8 +31,8 @@
 #'   same annotations (tau_c; its Base row, named Residual, is the intercept), or a numeric vector named `intercept`
 #'   and the annotation names. Annotation values are cut at 0; the intercept must be > 0 (else the LDSC start).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin, from [ld_bins()]; must exist).
-#' @param skip_annot annotation columns that make a SNP annotated for the LD-bin suppression: NULL (default) every
-#'   binary 0/1 column, character(0) no suppression.
+#' @param skip_annot annotation columns that make a SNP annotated (any nonzero value) for the LD-bin suppression:
+#'   NULL (default) every column, character(0) no suppression.
 #' @param control [viprs_annot_control()].
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
 #'   BETA_<annotation> per annotation and BETA_intercept (BETA_STD scale: BETA_STD_<annotation>, ...); per SNP the
@@ -52,8 +52,11 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   cols <- colnames(A)
   if ("intercept" %in% cols) stop("the annotation name 'intercept' is reserved", call. = FALSE)
   if (any(A < 0)) stop("annotations must be >= 0", call. = FALSE)
+  big <- cols[apply(A, 2, max) > 1]
+  if (length(big)) warning("annotation values above 1 in ", paste(big, collapse = ", "),
+                           ": 0-100 scores are read as probabilities only after dividing by 100", call. = FALSE)
   s2 <- .sigma2_init(sigma2_init, cols)
-  if (is.null(skip_annot)) skip_annot <- cols[vapply(seq_along(cols), function(k) all(A[, k] %in% c(0, 1)), logical(1))]
+  if (is.null(skip_annot)) skip_annot <- cols
   miss <- setdiff(skip_annot, cols)
   if (length(miss)) stop("skip_annot names no annotation column: ", paste(miss, collapse = ", "), call. = FALSE)
   if (is.null(bin_file)) bin_file <- file.path(ld_dir, paste0("ldbin", ctl$bin_r2, ".bin"))

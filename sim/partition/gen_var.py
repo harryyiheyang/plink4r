@@ -18,7 +18,7 @@
 # categories, then intercept), categories.tsv (name, columns, design h2, realised h2 = beta_c' R beta_c), snps.tsv.
 import os, sys, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_ideal_io import read_X
+from sim_io import read_X
 ld, tab, out, seed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 env = os.environ.get
 n = float(env("NGWAS", "300000")); h2 = float(env("H2", "0.3")); pi = float(env("PI", "0.01"))
