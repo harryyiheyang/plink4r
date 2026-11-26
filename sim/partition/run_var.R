@@ -1,5 +1,5 @@
 # usage: Rscript run_var.R <ld_dir> <snp_table> <sim_dir>  -> sim_dir/<method>.tsv (ID, BETA_STD, BETA_STD_<annot>)
-#   and sim_dir/<method>_h2.tsv (annotation, h2_post, h2_share)
+#   and sim_dir/<method>_h2.tsv (annotation, h2_post = E[beta^(k)' R beta^(k)], h2_share = prior share)
 # Methods: V viprs; A1 viprs_annot, one Gaussian slab; AMm 6:3:1 slab mixture, moment M-step; AM mixture, exact EM;
 # AML AM started at ldsc_strat(). Residual annotation only on unannotated SNPs (RESID_ALL=1: on every SNP).
 # env: BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of

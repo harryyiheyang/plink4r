@@ -568,35 +568,43 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
     const double* r = vm.row(j);
     for (int k = 0; k < K; ++k) part(j, k) = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j] * st.eta[j];
   }
-  // posterior heritability allocation h2_k = eta^(k)' R eta + sum_j d_j w_jk (E[beta_j^2] - eta_j^2): additive over k
-  // (sum_k = E_q[beta' R beta], the fitted genetic variance) and with the posterior variance, not only the shrunk means
+  // heritability of each partitioned PRS: h2_k = E_q[beta^(k)' R beta^(k)] = eta^(k)' R eta^(k) + sum_j R_jj
+  // Var_q(beta_j^(k)), with E_q[(beta_j^(k))^2] = gamma_j sum_c psi_jc (w_jk^2 (mu_jc^2 + 1/vt_jc) +
+  // w_jk (1 - w_jk) kap_c h2_j / pi) (the split of beta_j given its class). Not additive over k (cross terms between
+  // the columns); the partitioned PRS are.
   Rcpp::NumericVector h2post(K);
   {
-    const float lp = 0.f;
-    std::vector<double> var(M, 0.);
+    const int C = (int)F.c.kap.size();
+    std::vector<float> e2(M, 0.f), cv(M, 0.f);  // E[beta_j^2], gamma_j sum_c psi_jc kap_c h2_j / pi
     for (int64_t j = 0; j < M; ++j) {
       if (vm.sup[j]) continue;
       float psi[16], vt[16], m_;
       const float D = st.mu[j];
-      mix_post(D, F.n[j] * F.P.d[j] / (float)res.sigma, vm.tau[j], vm.ltau[j], lp, F.c, m_, psi, vt);
-      double e2 = 0;
-      for (int i = 0; i < (int)F.c.kap.size(); ++i) {
+      mix_post(D, F.n[j] * F.P.d[j] / (float)res.sigma, vm.tau[j], vm.ltau[j], 0.f, F.c, m_, psi, vt);
+      double q = 0, v = 0;
+      for (int i = 0; i < C; ++i) {
         const double mc = (double)D / vt[i];
-        e2 += psi[i] * (mc * mc + 1. / vt[i]);
+        q += psi[i] * (mc * mc + 1. / vt[i]);
+        v += psi[i] * F.c.kap[i];
       }
-      var[j] = std::max((double)st.gamma[j] * e2 - (double)st.eta[j] * st.eta[j], 0.);
+      e2[j] = (float)(st.gamma[j] * q);
+      cv[j] = (float)(st.gamma[j] * v * vm.h2[j] / vm.pi);
     }
     std::vector<float> x(M), sk(F.P.S);
     for (int k = 0; k < K; ++k) {
       double dv = 0;
       for (int64_t j = 0; j < M; ++j) {
         x[j] = (float)part(j, k);
-        const double w = st.eta[j] != 0 ? part(j, k) / st.eta[j] : 0.;
-        dv += F.P.d[j] * w * var[j];
+        if (vm.sup[j]) continue;
+        const double* r = vm.row(j);
+        const double w = (k ? r[k - 1] : vm.aR[j]) * vm.par[k] / vm.h2[j];
+        if (w == 0.) continue;
+        const double m2 = w * w * e2[j] + w * (1. - w) * cv[j], mm = part(j, k);
+        dv += F.P.d[j] * std::max(m2 - mm * mm, 0.);
       }
       vtx(F.P, x.data(), sk.data(), F.threads);
       double q = 0;
-      for (int64_t i = 0; i < F.P.S; ++i) q += (double)sk[i] * st.s[i];
+      for (int64_t i = 0; i < F.P.S; ++i) q += (double)sk[i] * sk[i];
       h2post[k] = q + dv;
     }
   }

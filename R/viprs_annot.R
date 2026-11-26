@@ -37,8 +37,9 @@
 #' @return data.table as [viprs()] (BETA, BETA_STD, PIP), plus H2_SNP (h2_j), SUPPRESSED and one column
 #'   BETA_<annotation> per annotation and BETA_residual (BETA_STD scale: BETA_STD_<annotation>, ...); per SNP the
 #'   BETA_<...> columns sum to BETA. Attributes `sigma2` (sigma2_k), `h2_annot` (h2_k = (sum_j A_jk) sigma2_k over the
-#'   SNPs not suppressed) and `h2_share` (h2_k / sum_k h2_k), `h2_post` (posterior allocation h2_k =
-#'   Cov(PRS_k, PRS) + sum_j R_jj w_jk Var(beta_j), additive: sum_k h2_post = E[beta' R beta]) and `h2_post_share`,
+#'   SNPs not suppressed) and `h2_share` (h2_k / sum_k h2_k), `h2_post` (heritability of each partitioned PRS,
+#'   E[beta^(k)' R beta^(k)] = b_k' R b_k + sum_j R_jj Var(beta_j^(k)) with the posterior variance; the PRS add up,
+#'   these do not: the columns have cross terms),
 #'   `grid_sigma2` (sigma2_k at each grid point), `n_bins`,
 #'   `n_suppressed`, and those of [viprs()].
 #' @export
@@ -83,7 +84,6 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   attr(out, "h2_annot") <- stats::setNames(res$h2_annot, nm)
   attr(out, "h2_share") <- stats::setNames(res$h2_annot / sum(res$h2_annot), nm)
   attr(out, "h2_post") <- stats::setNames(res$h2_post, nm)
-  attr(out, "h2_post_share") <- stats::setNames(res$h2_post / sum(res$h2_post), nm)
   attr(out, "n_bins") <- res$extra$n_bins
   attr(out, "n_suppressed") <- n_sup
   attr(out, "grid") <- data.table::as.data.table(res$extra$grid)

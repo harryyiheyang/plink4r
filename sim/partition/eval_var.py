@@ -1,6 +1,7 @@
 # Per category (categories.tsv of gen_var.py): prediction R2 of the category's partitioned PRS (the sum of the
-# BETA_STD_<col> of its columns) for the true category genetic value, its variance ratio, and the estimated h2 share
-# (sum of h2_post of its columns / total, <method>_h2.tsv) against the realised share Cov(g_c, g) / h2.
+# BETA_STD_<col> of its columns) for the true category genetic value, _var = b_c' R b_c / beta_c' R beta_c (posterior
+# means only), and _h2 = estimated h2 (h2_post of <method>_h2.tsv, posterior variance included; summed over the
+# columns of a category, which leaves out their cross terms) / true beta_c' R beta_c.
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...
 import sys, os, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from gen_ideal_io import read_X
@@ -21,17 +22,17 @@ for b, g in snp.groupby("block", sort=True):
     T = X.T @ V[g.index.values]; Q += T.T @ T
 L = {lab: i for i, lab in enumerate(labels)}
 def r2(i, j): return Q[i, j] ** 2 / (Q[i, i] * Q[j, j]) if Q[i, i] * Q[j, j] > 0 else float("nan")
-print("realised share", dict(zip(names, np.round(cat.realised, 3))))
+print("true h2", dict(zip(names, np.round(cat.h2, 4))))
 for m in sys.argv[3:]:
     out = {"total": round(float(r2(L[(m, "total")], L[("true", "total")])), 3)}
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
-        h = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation").h2_post; h = h / h.sum()
+        h = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation").h2_post
     for nm, cc in zip(names, cols):
         if (m, nm) not in L: continue
         i, j = L[(m, nm)], L[("true", nm)]
         out[nm] = round(float(r2(i, j)), 3); out[nm + "_var"] = round(float(Q[i, i] / Q[j, j]), 3)
-        if h is not None: out[nm + "_share"] = round(float(h.reindex(cc).fillna(0).sum()), 3)
+        if h is not None: out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / cat.h2[names.index(nm)]), 3)
     if h is not None:
-        used = set(sum(cols, [])); out["other_share"] = round(float(h[[k for k in h.index if k not in used]].sum()), 3)
+        used = set(sum(cols, [])); out["other_h2"] = round(float(h[[k for k in h.index if k not in used]].sum()), 4)
     print(m, out)

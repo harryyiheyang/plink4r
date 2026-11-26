@@ -3,8 +3,8 @@
 # category c, the largest of its annotation columns / 100), the slab class (shares MIX, relative variances MIXVAR)
 # common to the components of the SNP. Residual: SNPs with no annotation at all (every annotation column 0), effects
 # t(3) (unit variance). Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
-# then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised shares
-# differ slightly from the design; they are printed and saved).
+# then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised component
+# h2 differ slightly from the design; they are printed and saved).
 # b_hat = X (X' beta) + X z / sqrt(n), z ~ N(0, I_k), X = U Lambda^{1/2}; R is never formed.
 # usage: python gen_var.py <ld_dir> <snp_table: tsv with ID, block, ld_index, A1, A2, freq> <out_dir> <seed>
 #   env: NGWAS (300000), H2 (0.3), PI (0.01), BLOCKS ("1-100" or "" = all), MIX ("0.6,0.3,0.1"),
@@ -15,7 +15,7 @@
 #               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every random column at
 #               (1 - RESID) / K, RESID (0.2).
 # writes trait.ma, annot.tsv (ID, Block, Index and the annotation columns / 100), beta_comp.npy (M x (C + 1): the
-# categories, then residual), categories.tsv (name, columns, design share, realised share), snps.tsv.
+# categories, then residual), categories.tsv (name, columns, design h2, realised h2 = beta_c' R beta_c), snps.tsv.
 import os, sys, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_ideal_io import read_X
@@ -86,7 +86,7 @@ for i in range(C.shape[1]):
 beta = C.sum(1)
 Q, T = gram(np.c_[C, beta])
 f = np.sqrt(h2 / Q[-1, -1]); C *= f; beta *= f
-cov = (Q[:-1, -1] * f * f)                                            # Cov(g_c, g): additive realised shares
+own = np.diag(Q)[:-1] * f * f                                         # beta_c' R beta_c: h2 of each component
 bh = np.empty(M)
 for b in blocks:
     X = read_X(os.path.join(ld, f"block{b}.eigen.bin"))
@@ -100,8 +100,8 @@ pd.DataFrame(dict(SNP=snp.ID, A1=snp[a1], A2=snp[a2], freq=fr, b=bh, se=1 / np.s
 ann = a.reset_index(drop=True).copy(); ann.insert(0, "Index", snp.ld_index.values); ann.insert(0, "Block", snp.block.values)
 ann.insert(0, "ID", snp.ID.values); ann.to_csv(f"{out}/annot.tsv", sep="\t", index=False)
 np.save(f"{out}/beta_comp.npy", C); snp[["ID", "block", "ld_index"]].to_csv(f"{out}/snps.tsv", sep="\t", index=False)
-pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target / h2,
-                  realised=cov / h2)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
+pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
+                  h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; residual SNPs", int(resid.sum()))
-print("share design  ", dict(zip(names, np.round(target / h2, 3))))
-print("share realised", dict(zip(names, np.round(cov / h2, 3))), "(Cov(g_c, g) / h2, additive)")
+print("h2 design  ", dict(zip(names, np.round(target, 4))))
+print("h2 realised", dict(zip(names, np.round(own, 4))), "(beta_c' R beta_c; total", h2, "exactly)")
