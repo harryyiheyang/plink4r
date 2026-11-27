@@ -24,7 +24,9 @@ cd /home/yxy1234/plink4r_test/partition_sim
 # plink4r installed per task on its own node (R compiles with -march=native: a build runs only on that CPU type),
 # into lib_<job id>, removed at the end
 LIB=/home/yxy1234/plink4r_test/lib_${SLURM_JOB_ID}; mkdir -p $LIB; trap 'rm -rf $LIB' EXIT
-R CMD INSTALL -l $LIB /home/yxy1234/plink4r_test/src > /dev/null; export R_LIBS=$LIB
+# a clean copy of the source (git archive: no object files of another node, no clash between parallel tasks)
+mkdir -p $LIB/pkg; git -C /home/yxy1234/plink4r_test/src archive HEAD | tar -x -C $LIB/pkg
+R CMD INSTALL -l $LIB $LIB/pkg > /dev/null; export R_LIBS=$LIB
 export SHARED=$PWD
 CASE=${CASE:-main}
 DS=(lipid bp); d=${DS[$((SLURM_ARRAY_TASK_ID / 3))]}; seed=$((SLURM_ARRAY_TASK_ID % 3 + 1))
