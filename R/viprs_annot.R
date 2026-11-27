@@ -138,7 +138,8 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param fix_sigma2 TRUE keeps sigma2_k at the start (no M-step; a diagnostic with the true values as `sigma2_init`,
 #'   `start_scale = 1`, `start_total_min = 0`).
 #' @param mstep update of sigma2_k: "moment" (above) or "elbo" (the stationarity condition of the ELBO in sigma2,
-#'   sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, by multiplicative MM steps; no Inverse-Gamma prior).
+#'   sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, by multiplicative fixed-point steps; in the Gibbs fit on the
+#'   stochastic-approximation averages of gamma_j and zeta_j; no Inverse-Gamma prior).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),

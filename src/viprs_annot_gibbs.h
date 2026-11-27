@@ -31,6 +31,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
   const float lp = (float)(std::log(vm.pi) - std::log1p(-vm.pi));
   std::vector<float> beta(st0.eta), m(M, 0.f), g(M, 0.f), s(P.S, 0.f);
   std::vector<double> zeta(M, 0.);
+  std::vector<double> gbar(M, 0.), zbar(M, 0.);  // mstep_elbo: stochastic approximation of gamma_j, zeta_j
   vtx(P, beta.data(), s.data(), threads);
   GibbsOut o;
   o.bmean.assign(M, 0.); o.pip.assign(M, 0.); o.part.assign((size_t)M * K, 0.);
@@ -103,11 +104,16 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
       o.sigma += sigma; o.h2 += ss / (ss + sigma);
       (void)t;
     }
-    const std::vector<double> old(vm.par);
-    if (!c.fix_sigma2) {
-      if (c.mstep_elbo) vm.mstep_elbo(zeta.data(), g.data()); else vm.mstep(zeta.data(), c.a0, c.b0);
+    if (c.mstep_elbo) {
+      // ELBO form: stochastic approximation of the statistics (gamma_j, zeta_j), then the update on the averages
+      // (averaging the updated sigma2 would solve E[N_k / D_k] = 1 instead of E[N_k] = E[D_k])
+      for (int64_t j = 0; j < M; ++j) { gbar[j] = (1. - a) * gbar[j] + a * g[j]; zbar[j] = (1. - a) * zbar[j] + a * zeta[j]; }
+      if (!c.fix_sigma2) vm.mstep_elbo(zbar.data(), gbar.data());
+    } else {
+      const std::vector<double> old(vm.par);
+      if (!c.fix_sigma2) vm.mstep(zeta.data(), c.a0, c.b0);
+      for (int kk = 0; kk < K; ++kk) vm.par[kk] = (1. - a) * old[kk] + a * vm.par[kk];
     }
-    for (int kk = 0; kk < K; ++kk) vm.par[kk] = (1. - a) * old[kk] + a * vm.par[kk];
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;
     if (ns > 0. && std::isfinite(ns)) sigma = (1. - a) * sigma + a * ns;

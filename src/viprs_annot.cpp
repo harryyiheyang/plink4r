@@ -336,9 +336,10 @@ struct VarModel {
     set_all();
   }
   // ELBO form: the sigma2-dependent part of the ELBO, -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j) over the SNPs
-  // not suppressed, raised by the multiplicative MM step
-  // sigma2_k <- sigma2_k sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j (fixed point: the stationarity condition),
-  // `inner` steps with h2_j recomputed; the Inverse-Gamma prior is not used here.
+  // not suppressed, by the multiplicative fixed-point step (Itakura-Saito NMF type; exact for one column, its fixed
+  // points the stationarity condition, monotone in numerical checks though not proven)
+  // sigma2_k <- sigma2_k sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j, `inner` steps with h2_j
+  // recomputed; the intercept floored at 1e-20; the Inverse-Gamma prior is not used here.
   template <typename G>
   void mstep_elbo(const double* zeta, const G* gamma, int inner = 5) {
     for (int it = 0; it < inner; ++it) {
@@ -367,6 +368,7 @@ struct VarModel {
         for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
       }
       for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= NU[k] / NU[K + k];
+      par[0] = std::max(par[0], 1e-20);  // the intercept stays positive (h2_j > 0, finite float tau)
       set_all();
     }
   }
