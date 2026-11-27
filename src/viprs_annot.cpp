@@ -307,6 +307,7 @@ struct VarModel {
   // MASH atoms: sigma2_k = grid[m_k] mb for k >= 1, mb = sigma2_0 (the intercept, by the ELBO); m_k by the largest
   // F(sigma2_k = grid[m] mb) + log w_m (VI: MAP), or drawn from p_km proportional to its exponential (Gibbs, eng given);
   // pm: p_km of the last M-step (K x atoms, row k = 0 unused)
+  bool cont = false;  // warm-up: sigma2_k free (no atoms); the atoms start at the nearest of the free fit
   std::vector<double> grid, lw, pm;
   std::vector<int> atom;
   double mb = 0;
@@ -340,8 +341,71 @@ struct VarModel {
     }
     return f;
   }
+  // the sigma2-dependent ELBO part plus the log prior weights of the atoms (the MASH objective of VI)
+  template <typename G>
+  double ftot(const double* zeta, const G* gamma) const {
+    double f = 0;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+ : f) num_threads(threads)
+#endif
+    for (int64_t j = 0; j < M; ++j) {
+      if (sup[j]) continue;
+      f += -.5 * ((double)gamma[j] * std::log(h2[j]) + pi * zeta[j] / h2[j]);
+    }
+    for (int k = 1; k < K; ++k) f += lw[atom[k]];
+    return f;
+  }
+  // MM steps on sigma2_0 with the atoms fixed (column a_j = 1 + sum_k A_jk grid[m_k])
+  template <typename G>
+  void mm_b(const double* zeta, const G* gamma, int steps) {
+    for (int it = 0; it < steps; ++it) {
+      double Nb = 0, Db = 0;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+ : Nb, Db) num_threads(threads)
+#endif
+      for (int64_t j = 0; j < M; ++j) {
+        if (sup[j]) continue;
+        double a = 1.;
+        const double* r = row(j);
+        for (int k = 1; k < K; ++k) a += r[k - 1] * grid[atom[k]];
+        const double h = h2[j];
+        Nb += a * pi * zeta[j] / (h * h); Db += a * (double)gamma[j] / h;
+      }
+      if (Db > 0 && Nb > 0) par[0] *= std::sqrt(Nb / Db);
+      par[0] = std::max(par[0], 1e-20); mb = par[0];
+      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
+      set_all();
+    }
+  }
+  // VI: column-wise MAP of the atoms, then a joint move that cannot be made column by column: every nonzero atom one
+  // level up (down) with sigma2_0 scaled down (up) by the ratio of the levels, sigma2_0 refitted (MM) and the atoms
+  // re-chosen; the state of the largest objective (ftot) is kept. Gibbs (eng given): the atoms drawn column-wise.
   template <typename G>
   void mash_step(const double* zeta, const G* gamma, std::mt19937_64* eng) {
+    mash_cols(zeta, gamma, eng);
+    if (eng || grid.size() < 3) return;
+    const int A_ = (int)grid.size();
+    std::vector<int> a0 = atom;
+    std::vector<double> p0 = par;
+    double f0 = ftot(zeta, gamma), mb0 = mb;
+    for (int d : {-1, 1}) {
+      std::vector<int> a1 = a0;
+      bool ok = false, in = true;
+      for (int k = 1; k < K; ++k) if (a0[k] > 0) { ok = true; a1[k] = a0[k] + d; if (a1[k] < 1 || a1[k] >= A_) in = false; }
+      if (!ok || !in) continue;
+      int i = 1; while (i < A_ && grid[i] <= 0) ++i;
+      if (i + 1 >= A_) continue;
+      atom = a1; par[0] = mb0 * (d > 0 ? grid[i] / grid[i + 1] : grid[i + 1] / grid[i]);
+      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * par[0];
+      mb = par[0]; set_all();
+      mm_b(zeta, gamma, 20); mash_cols(zeta, gamma, nullptr); mm_b(zeta, gamma, 20);
+      const double f1 = ftot(zeta, gamma);
+      if (f1 > f0) { f0 = f1; a0 = atom; p0 = par; mb0 = mb; }
+    }
+    atom = a0; par = p0; mb = mb0; set_all();
+  }
+  template <typename G>
+  void mash_cols(const double* zeta, const G* gamma, std::mt19937_64* eng) {
     if ((int)atom.size() != K) mash_init();
     const size_t A_ = grid.size();
     for (int k = 1; k < K; ++k) {
@@ -410,7 +474,7 @@ struct VarModel {
   // 1e-20.
   template <typename G>
   void mstep_elbo(const double* zeta, const G* gamma, int inner = 10, std::mt19937_64* eng = nullptr) {
-    if ((int)atom.size() != K) mash_init();
+    if (!cont && (int)atom.size() != K) mash_init();
     for (int it = 0; it < inner; ++it) {
       std::vector<double> NU(2 * K, 0.);
 #ifdef _OPENMP
@@ -436,6 +500,11 @@ struct VarModel {
 #endif
         for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
       }
+      if (cont) {  // warm-up (stage 1): sigma2_k free, the MM step per column
+        for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= std::sqrt(NU[k] / NU[K + k]);
+        par[0] = std::max(par[0], 1e-20); set_all();
+        continue;
+      }
       // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
       // a_j = 1 + sum_k A_jk grid[m_k]: MM step with N = N_0 + sum_k grid[m_k] N_k, D likewise
       double Nb = NU[0], Db = NU[K];
@@ -445,7 +514,7 @@ struct VarModel {
       for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
       set_all();
     }
-    mash_step(zeta, gamma, eng);
+    if (!cont) mash_step(zeta, gamma, eng);
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
@@ -806,7 +875,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     const float* bv = pseudo ? train.data() : P.bt.data();
     State st(P.M, P.S, grid[0]);
     VarModel vm(P.M, K, A, sup, threads);
-    setsel(vm);
+    setsel(vm); vm.cont = stage == 1;
     double sigma;
     if (init) {
       st = init->st; st.s.assign(P.S, 0.f);
@@ -822,6 +891,11 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     for (double pi : grid) {
       vm.pi_move(pi);
       const auto t1 = std::chrono::steady_clock::now();
+      if (stage == 2) {  // each pi: sigma2_k free first, then the atoms from the nearest of that fit
+        vm.cont = true;
+        sigma = F.run(st, nv, bv, pi, vm, sigma, c.grid_max_iter, nullptr).sigma;
+        vm.cont = false; vm.atom.clear();
+      }
       const RunResult r = F.run(st, nv, bv, pi, vm, sigma, stage == 1 ? c.max_iter : c.grid_max_iter, nullptr);
       sigma = r.sigma;
       double rb = NAN, rr = NAN;
