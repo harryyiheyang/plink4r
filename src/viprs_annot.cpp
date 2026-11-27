@@ -25,10 +25,11 @@
 // no residual update) and left out of the M-step.
 // Eigen cutoff, then pi, by VI on one PUMAS split (fit_path): xi is drawn once on the full panel, the truncated
 // panel of each cutoff uses its leading entries, so every fit is scored on the same pseudo validation,
-// r = eta' valid / sqrt(eta' R eta). Stage 1, the cutoff (as sbayesrc()): each cutoff fitted at the fixed pi cut_pi
-// (default 0.01); the largest cutoff unless a smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen
-// cutoff: the pi grid ascending on all data with warm start (sigma2_k carried over when pi moves); the converged point
-// of the largest ELBO is refitted to full convergence, then the Gibbs fit.
+// r = eta' valid / sqrt(eta' R eta). Stage 1, the cutoff (as sbayesrc()): a chain over the cutoffs from the lowest up,
+// each level warm-started from the one below, at the fixed pi cut_pi (default 0.01); the largest cutoff unless a
+// smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen cutoff, warm-started from its stage-1 fit: the
+// pi grid ascending on all data with warm start (sigma2_k carried over when pi moves); the converged point of the
+// largest ELBO is refitted to full convergence, then the Gibbs fit.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -670,10 +671,12 @@ double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0
 // Cutoff, then pi, by VI on one PUMAS split: the panel is read once with every stored pair (P0); xi is drawn once per
 // block (Fitter::pumas), the panel at a smaller cutoff uses its leading entries, so every cutoff trains on the same
 // pseudo data, and every fit is scored on the validation half of P0 with R of P0, r = b' valid / sqrt(b' R b).
-// Stage 1: one fit per cutoff at pi = cut_pi (max_iter iterations, scored converged or not); the largest cutoff
-// unless a smaller one has |r / r_largest| > rel_r_min (SBayesRC rule). Stage 2: at the chosen cutoff the pi grid ascending on all data with warm start (state and variance
-// model carried over; early stop after stop_after consecutive ELBO drops); the converged point of the largest ELBO,
-// refitted to full convergence, then the final Gibbs fit.
+// Stage 1: a chain over the cutoffs in ascending order at pi = cut_pi, each level warm-started from the one below
+// (max_iter iterations, scored converged or not); the largest cutoff unless a smaller one has |r / r_largest| >
+// rel_r_min (SBayesRC rule). Stage 2: at the chosen cutoff, from its stage-1 fit, the pi grid ascending on all data
+// with warm start (state and variance model carried over; early stop after stop_after consecutive ELBO drops among
+// the converged points); the converged point of the largest ELBO, refitted to full convergence, then the final Gibbs
+// fit.
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
                     const std::vector<double>& s2_init, const std::vector<std::string>& files,
@@ -710,7 +713,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   // pi path on panel P at cutoff ic (ascending, warm start), each point recorded in the grid table. Stage 1: fitted on
   // the PUMAS training half with max_iter iterations, scored converged or not (as the fixed chain of SBayesRC). Stage 2: fitted on all data, the converged
   // point of the largest ELBO (pi_by = "pseudo_r": as stage 1)
-  auto path = [&](const EigenPanel<T>& P, int ic, int stage, const std::vector<double>& grid) {
+  // init: warm start (effects, sigma2_k, sigma of an earlier fit; s = V' eta is recomputed on this panel)
+  auto path = [&](const EigenPanel<T>& P, int ic, int stage, const std::vector<double>& grid, const Best* init) {
     Fitter<T> F(P, c, in.n, in.z, threads);
     const double h0 = F.h2_ldsc();
     std::vector<float> train, valid, n_tr;
@@ -720,9 +724,16 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     const float* nv = pseudo ? n_tr.data() : in.n.data();
     const float* bv = pseudo ? train.data() : P.bt.data();
     State st(P.M, P.S, grid[0]);
-    for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
     VarModel vm(P.M, K, A, sup, threads);
-    double sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
+    double sigma;
+    if (init) {
+      st = init->st; st.s.assign(P.S, 0.f);
+      vm.par = init->par; vm.pi = grid[0]; vm.set_all();
+      sigma = init->sigma;
+    } else {
+      for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
+      sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
+    }
     Best bb, bn;  // bn: the best point when none converged (stage 2 falls back on it with a warning)
     double best_here = -INFINITY;
     int drops = 0;
@@ -748,8 +759,11 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       } else if (!bb.have && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bn.r) {
         bn.have = true; bn.r = rr_; bn.pi = pi; bn.sigma = sigma; bn.st = st; bn.par = vm.par;
       }
-      if (crit > best_here) { best_here = crit; drops = 0; }
-      else if (c.stop_after && ++drops >= c.stop_after) break;
+      // early stop: only converged points count (as only they can be chosen)
+      if (r.converged) {
+        if (crit > best_here) { best_here = crit; drops = 0; }
+        else if (c.stop_after && ++drops >= c.stop_after) break;
+      }
       Rcpp::checkUserInterrupt();
     }
     if (!bb.have && bn.have) {
@@ -759,17 +773,24 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     }
     return bb;
   };
-  // stage 1: the cutoff at pi = cut_pi
+  // stage 1: the cutoff at pi = cut_pi, a chain from the lowest cutoff (most shrinkage) up, each level warm-started from
+  // the one below (as sbayesrc())
   std::vector<Best> bc(nc);
+  std::vector<int> ord(nc);
+  for (int i = 0; i < nc; ++i) ord[i] = i;
+  std::sort(ord.begin(), ord.end(), [&](int x, int y) { return c.cutoffs[x] < c.cutoffs[y]; });
   int ibest = -1;
-  for (int ic = 0; ic < nc; ++ic) {
+  const Best* prev = nullptr;
+  for (int ic : ord) {
     std::unique_ptr<EigenPanel<T>> Pi;
     if (ks[ic] != P0->k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ic], threads)));
-    bc[ic] = path(Pi ? *Pi : *P0, ic, 1, std::vector<double>{c.cut_pi});
-    if (bc[ic].have && (ibest < 0 || bc[ic].r > bc[ibest].r)) ibest = ic;
+    bc[ic] = path(Pi ? *Pi : *P0, ic, 1, std::vector<double>{c.cut_pi}, prev);
+    if (bc[ic].have) prev = &bc[ic];
+    if (bc[ic].have && (ibest < 0 || bc[ic].r > bc[ibest].r || (bc[ic].r == bc[ibest].r && c.cutoffs[ic] < c.cutoffs[ibest])))
+      ibest = ic;
   }
-  int ib = -1;
-  for (int ic = nc - 1; ic >= 0 && ib < 0; --ic) if (bc[ic].have) ib = ic;
+  int ib = -1;  // base: the largest cutoff with a usable fit
+  for (int i = nc - 1; i >= 0 && ib < 0; --i) if (bc[ord[i]].have) ib = ord[i];
   if (ib < 0) Rcpp::stop("no cutoff with a positive pseudo r at pi = cut_pi");
   int ich = ib;
   if (ibest >= 0 && ibest != ib && bc[ibest].r / bc[ib].r > c.rel_r_min) ich = ibest;
@@ -780,7 +801,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   Best best;
   {
     Fitter<T> Fg(P, c, in.n, in.z, threads);
-    best = path(P, ich, 2, Fg.pi_grid());
+    best = path(P, ich, 2, Fg.pi_grid(), &bc[ich]);  // warm from the stage-1 fit of the chosen cutoff
   }
   if (!best.have)
     Rcpp::stop(c.pi_by_elbo ? "no pi of the grid converged at the chosen cutoff"

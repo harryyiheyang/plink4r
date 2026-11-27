@@ -17,9 +17,10 @@
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
 #' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every fit), each fit
-#' scored by r = eta' valid / sqrt(eta' R eta). Stage 1, the eigen cutoff (as [sbayesrc()]): each cutoff in `cutoffs`
-#' (default 0.995, 0.999) fitted at the fixed pi `cut_pi` (default 0.01); the largest cutoff unless a smaller one has
-#' r / r_largest > `rel_r_min` (SBayesRC rule). Stage 2, pi at the chosen cutoff: the pi grid of [viprs()] ascending on
+#' scored by r = eta' valid / sqrt(eta' R eta). Stage 1, the eigen cutoff (as [sbayesrc()]): a chain over `cutoffs`
+#' (default 0.995, 0.999) from the lowest up, each level warm-started from the one below, at the fixed pi `cut_pi`
+#' (default 0.01); the largest cutoff unless a smaller one has r / r_largest > `rel_r_min` (SBayesRC rule). Stage 2, pi
+#' at the chosen cutoff, warm-started from its stage-1 fit: the pi grid of [viprs()] ascending on
 #' all data, each point warm-started from the last (sigma2_k carried over); the converged point of the largest ELBO is
 #' refitted to full convergence (`pi_by = "pseudo_r"`: the grid on the PUMAS training half, scored like stage 1, the
 #' best point refitted on all data). pi and sigma2_k are not chosen jointly by one criterion (weakly identified).
