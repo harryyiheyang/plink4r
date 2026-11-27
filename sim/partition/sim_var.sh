@@ -6,7 +6,7 @@
 #SBATCH --array=0-5
 #SBATCH -o partvar_%a.log
 # Variance-route partition simulation on PanUKB_EUR_ld blocks 1-100 with the real annotations (run from
-# /home/yxy1234/plink4r_test/partition_sim; plink4r in ../lib; scripts of sim/partition here). One array task per
+# /home/yxy1234/plink4r_test/partition_sim; plink4r installed per task (below); scripts of sim/partition here). One array task per
 # design and seed (2 designs x 3 seeds; task = 3 * design + seed - 1), all in parallel. Two designs (h2 shares;
 # intercept = 20%, t(3) effects on the base causal set); PI = 0.01 causal (at least MIN_CAUSAL = 100 per category),
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
@@ -20,6 +20,10 @@ set -euo pipefail
 LD=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/PanUKB_EUR_ld
 AN=/mnt/vstor/SOM_EPBI_XXZ10/yxy1234/LDpanel/Annotation
 cd /home/yxy1234/plink4r_test/partition_sim
+# plink4r installed per task on its own node (R compiles with -march=native: a build runs only on that CPU type),
+# into lib_<job id>, removed at the end
+LIB=/home/yxy1234/plink4r_test/lib_${SLURM_JOB_ID}; mkdir -p $LIB; trap 'rm -rf $LIB' EXIT
+R CMD INSTALL -l $LIB /home/yxy1234/plink4r_test/src > /dev/null; export R_LIBS=$LIB
 export SHARED=$PWD
 CASE=${CASE:-main}
 DS=(lipid bp); d=${DS[$((SLURM_ARRAY_TASK_ID / 3))]}; seed=$((SLURM_ARRAY_TASK_ID % 3 + 1))
