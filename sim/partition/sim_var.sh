@@ -10,7 +10,7 @@
 # design and seed (2 designs x 3 seeds; task = 3 * design + seed - 1), all in parallel. Two designs (h2 shares;
 # intercept = 20%, t(3) effects on the base causal SNPs outside every design category); PI = 0.01 causal (at least MIN_CAUSAL = 100 per category),
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
-# Methods ORACLE, SSL, MASH (run_var.R), directory var_<design>_s<seed>. GIBBS_DRAWS (env, default 300), PI_BY (env,
+# Methods ORACLE, SSL, MASH, SSL_PI, MASH_PI (run_var.R; eigen cutoff 1), directory var_<design>_s<seed>. GIBBS_DRAWS (env, default 300), PI_BY (env,
 # default elbo; pseudo_r: directory <dir>_pr) and GRID_EXTEND (env, default 4) are passed on to run_var.R.
 # Submit: sbatch sim_var.sh
 # Shared across tasks and cases (made once: the ref table and LD bins under a lock, annot.tsv and snps.tsv renamed
@@ -32,7 +32,7 @@ CODING=High+Moderate+Low+Splice_Region+UTR_Core+UTR5_Other+UTR3_Other
 declare -A DES
 DES[lipid]="coding=$CODING:0.5,hepatocyte=Hepatocyte_Cholangiocyte:0.3"
 DES[bp]="coding=$CODING:0.2,endothelial=Endothelial:0.3,smc=Stromal_Pericyte_SMC:0.3"
-D=var_${d}_s$seed; M="ORACLE SSL MASH"
+D=var_${d}_s$seed; M="ORACLE SSL MASH SSL_PI MASH_PI"
 [ "${PI_BY:-elbo}" = pseudo_r ] && D=${D}_pr   # pi chosen by pseudo r: its own directory
 BINS=ldbin0.98_1-100.bin
 rm -rf $D; mkdir -p $D

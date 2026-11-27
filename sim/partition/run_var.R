@@ -3,13 +3,16 @@
 #   var_shapley = b_k' R b, h2_share = model share)
 # Methods (one path each: VI chooses the cutoff and pi, the final fit is Gibbs + RB; intercept sigma2_0 on every SNP):
 #   ORACLE viprs_annot given only the design columns, sigma2_k and pi fixed at the oracle of gen_var.py (oracle.tsv);
-#   SSL viprs_annot started at ldsc_strat(), select = "ssl"; MASH the same with select = "mash".
+#   SSL viprs_annot started at ldsc_strat(), select = "ssl"; MASH the same with select = "mash"; SSL_PI and MASH_PI the
+#   same with pi fixed at the truth of oracle.tsv (no pi grid). Eigen cutoff: CUTOFFS, default 1 (every component of
+#   eigen.bin, the panel the data are simulated from: no cutoff choice).
 # env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit; default 300),
-#      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 0.995,0.999),
+#      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 1),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
 #      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), COLS (annotation columns given to SSL and MASH, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
-#      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
+#      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all), SSL_RATIO, SSL_GAMMA, SSL_BETA (ssl_ratio, ssl_gamma, ssl_beta of
+#      viprs_annot_control; comma separated),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
 #      L2 / L_base / base / baseL2 and one column per annotation named L_<annot>, L2_<annot>, <annot>L2 or <annot>;
 #      unset: ld_score()).
@@ -25,10 +28,10 @@ if (nzchar(Sys.getenv("COLS"))) an <- an[, c("Block", "Index", strsplit(Sys.gete
 bins <- Sys.getenv("BINS", file.path(dirname(a[2]), "ldbin0.98.bin"))
 if (!file.exists(bins)) ld_bins(a[1], r2 = 0.98, ref = rf, output = bins, threads = 4)
 skip <- if (Sys.getenv("SKIP", "\001") == "\001") NULL else setdiff(strsplit(Sys.getenv("SKIP"), ",")[[1]], "")
-meth <- strsplit(Sys.getenv("METHODS", "ORACLE,SSL,MASH"), ",")[[1]]
+meth <- strsplit(Sys.getenv("METHODS", "ORACLE,SSL,MASH,SSL_PI,MASH_PI"), ",")[[1]]
 tm <- function(e) { t0 <- Sys.time(); x <- e; list(x, as.numeric(difftime(Sys.time(), t0, units = "secs"))) }
 ls <- NULL
-if (any(c("SSL", "MASH") %in% meth)) {
+if (any(c("SSL", "MASH", "SSL_PI", "MASH_PI") %in% meth)) {
   t0 <- Sys.time()
   acols <- setdiff(names(an), c("Block", "Index"))
   if (nzchar(Sys.getenv("LDSCORE"))) {
@@ -51,19 +54,27 @@ if (any(c("SSL", "MASH") %in% meth)) {
 }
 gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300")); pb <- Sys.getenv("PI_BY", "elbo")
 ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000"))
-co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else c(0.995, 0.999)
-ctl <- function(...) viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, ...)
+co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else 1
+en <- function(v, d) if (nzchar(Sys.getenv(v))) as.numeric(strsplit(Sys.getenv(v), ",")[[1]]) else d
+ctl <- function(...) viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm,
+                                         ssl_ratio = en("SSL_RATIO", 10), ssl_gamma = en("SSL_GAMMA", c(2, 1)),
+                                         ssl_beta = en("SSL_BETA", c(1, 1)), ...)
+pt <- function() { p <- fread(file.path(a[3], "oracle.tsv"))$pi[1]; list(pi_grid = p, cut_pi = p) }
 fit <- function(k) switch(k,
   ORACLE = {
     o <- fread(file.path(a[3], "oracle.tsv")); oa <- an0[, c("Block", "Index", setdiff(o$annotation, "intercept")), with = FALSE]
     viprs_annot(ss, a[1], annot = oa, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = setNames(o$sigma2, o$annotation),
                 control = viprs_annot_control(gibbs_draws = gd, fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0,
-                                              cutoffs = max(co), pi_grid = o$pi[1], cut_pi = o$pi[1]), threads = 4)
+                                              cutoffs = co, pi_grid = o$pi[1], cut_pi = o$pi[1]), threads = 4)
   },
   SSL = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
                     control = ctl(select = "ssl"), threads = 4),
   MASH = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
                      control = ctl(select = "mash"), threads = 4),
+  SSL_PI = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
+                       control = do.call(ctl, c(list(select = "ssl"), pt())), threads = 4),
+  MASH_PI = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
+                        control = do.call(ctl, c(list(select = "mash"), pt())), threads = 4),
   stop("unknown method ", k))
 for (k in meth) {
   f <- tm(fit(k)); r <- ids[f[[1]], on = .(Block, Index)]
