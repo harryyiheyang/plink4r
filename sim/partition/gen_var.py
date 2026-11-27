@@ -1,26 +1,25 @@
-# Partition truth by the variance route (the model of viprs_annot): one causal set of proportion PI over all SNPs,
-# annotated or not, raised inside small categories to at least MIN_CAUSAL expected causal SNPs; a causal SNP's
-# effect is the sum of independent components: the intercept beta_j^(0), t(RESID_DF) with unit variance, on the
-# causal SNPs of the base set (rate PI) outside every design category, and beta_j^(c) ~ N(0, A_jc sigma2_c) for each category (A_jc = membership
-# of category c, the largest of its annotation columns / 100) with the slab class (shares MIX, relative variances
-# MIXVAR) common to the categories of the SNP. Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
-# then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised component
-# h2 differ slightly from the design; they are printed and saved).
+# Partition truth simulated from the variance model of viprs_annot itself: E[beta_j^2] = sigma2_0 + sum_c A_jc sigma2_c,
+# sigma2_c = ratio_c sigma2_0 (the ratios of DESIGN, e.g. on the MASH atoms 1, 10, 100), the intercept on every SNP.
+# One causal set of proportion PI over all SNPs; a causal SNP's effect is the sum of independent components, the
+# intercept ~ N(0, kappa sigma2_0 / PI) and per category c ~ N(0, A_jc kappa sigma2_c / PI) (A_jc = membership of c, the
+# largest of its annotation columns / 100), with the slab class kappa (shares MIX, relative variances MIXVAR, E kappa = 1)
+# common to the components of the SNP; sigma2_0 is set so that beta' R beta = h2 exactly. Realised component h2
+# (beta_c' R beta_c) is printed and saved.
 # b_hat = X (X' beta) + X z / sqrt(n), z ~ N(0, I_k), X = U Lambda^{1/2}; R is never formed.
 # usage: python gen_var.py <ld_dir> <snp_table: tsv with ID, block, ld_index, A1, A2, freq> <out_dir> <seed>
 #   env: NGWAS (300000), H2 (0.3), PI (0.01), BLOCKS ("1-100" or "" = all), MIX ("0.6,0.3,0.1"),
-#        MIXVAR ("0.01,0.1,1"), RESID_DF (3), MIN_CAUSAL (100: expected causal SNPs per category at least; 0 = off),
+#        MIXVAR ("0.01,0.1,1"),
 #        ANNOT: tsv / parquet with ID and annotation columns (0-100 or 0-1); without it random 0/1 columns (K, PT,
 #               SEG, DECOY, NOISE: see below),
-#        DESIGN: categories and h2 shares, "name=col1+col2:share,..." (intercept: 1 - the sum), e.g.
-#               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every column (random annotations: the targets t1..tK) at
-#               (1 - RESID) / their number, RESID (0.2).
+#        DESIGN: categories and variance ratios sigma2_c / sigma2_0, "name=col1+col2:ratio,...", e.g.
+#               "coding=High+Moderate:100,liver=Hepatocyte_Cholangiocyte:10"; default every column (random annotations:
+#               the targets t1..tK) at ratio 10.
 # writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), v_design.npy (float32,
 # the design variance E[beta_j^2] of each SNP, for the model-definition truth of eval_var.py), oracle.tsv (annotation,
 # sigma2, pi: the oracle of run_var.R method ORACLE, the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k on the
 # design columns fitted to v_design by the likelihood stationarity sum_j A_jk (v_j - h2_j) / h2_j^2 = 0 (MM steps to
 # convergence, every SNP); pi the realised share of causal SNPs), categories.tsv
-# (name, columns, design h2, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
+# (name, columns, ratio, design h2 = sigma2_c sum_j A_jc, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
 # / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
 import os, sys, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +29,6 @@ env = os.environ.get
 n = float(env("NGWAS", "300000")); h2 = float(env("H2", "0.3")); pi = float(env("PI", "0.01"))
 mix = np.array([float(x) for x in env("MIX", "0.6,0.3,0.1").split(",")]); mix /= mix.sum()
 mv = np.array([float(x) for x in env("MIXVAR", "0.01,0.1,1").split(",")]); kap = mv / (mix * mv).sum()
-df = float(env("RESID_DF", "3")); min_causal = float(env("MIN_CAUSAL", "100"))
 rng = np.random.default_rng(seed); os.makedirs(out, exist_ok=True)
 
 snp = pd.read_csv(tab, sep="\t")
@@ -69,34 +67,26 @@ A = a.values
 if env("DESIGN"):
     cats = []
     for item in env("DESIGN").split(","):
-        nm, rest = item.split("="); cc, sh = rest.split(":"); cats.append((nm, cc.split("+"), float(sh)))
+        nm, rest = item.split("="); cc, rt = rest.split(":"); cats.append((nm, cc.split("+"), float(rt)))
 else:
     tc = [c for c in cols if c[0] == "t"] if not env("ANNOT") else cols   # random annotations: the targets only
-    r = float(env("RESID", "0.2")); cats = [(c, [c], (1 - r) / len(tc)) for c in tc]
+    cats = [(c, [c], 10.) for c in tc]
 for nm, cc, _ in cats:
     miss = [c for c in cc if c not in cols]
     if miss: raise SystemExit(f"DESIGN names unknown columns: {miss}")
-share_r = 1 - sum(s for _, _, s in cats)
-if share_r < 0: raise SystemExit("DESIGN shares sum above 1")
 memb = np.stack([A[:, [cols.index(c) for c in cc]].max(1) for _, cc, _ in cats], 1)   # M x C membership
+ratio = np.array([r for _, _, r in cats])
 
+# the variance model itself: causal with probability PI everywhere, slab class common to the components of a SNP,
+# component c ~ N(0, memb_c ratio_c kappa / PI), intercept ~ N(0, kappa / PI) on every causal SNP; so
+# E[beta_j^2] = sigma2_0 (1 + sum_c memb_jc ratio_c), sigma2_c = ratio_c sigma2_0 (sigma2_0 set by h2 below)
 causal = rng.random(M) < pi
-causal0 = causal.copy()   # base causal set (rate PI everywhere)
-# coverage-stratified causal set: each category gets at least MIN_CAUSAL expected causal SNPs among its members
-# (extra causal SNPs drawn there with p = (MIN_CAUSAL - PI m_c) / (m_c (1 - PI)), m_c = members), so that sigma2_c is
-# estimable (the extra SNPs carry the category components only, not the intercept); 0 turns it off
-pc = np.full(M, pi)   # probability of being causal (for the design variance)
-for i in range(memb.shape[1]):
-    mem = memb[:, i] > 0; mc = int(mem.sum())
-    if mc == 0: continue
-    p_add = min(1., max(0., (min_causal - pi * mc) / (mc * (1 - pi))))
-    if p_add > 0: causal |= mem & (rng.random(M) < p_add); pc = 1 - (1 - pc) * (1 - p_add * mem)
 cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
-for i in range(len(cats)): C[:, i] = sc * np.sqrt(memb[:, i]) * rng.standard_normal(M)
-# intercept: on the base causal SNPs outside every design category, uniformly
-C[:, -1] = np.where(causal0 & (memb.max(1) == 0), rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
+for i in range(len(cats)): C[:, i] = sc * np.sqrt(memb[:, i] * ratio[i]) * rng.standard_normal(M)
+C[:, -1] = sc * rng.standard_normal(M)
+if not causal.any(): raise SystemExit("no causal SNP: raise PI")
 
 def gram(V):
     # V' R V over the blocks (one pass, X not kept), plus the X' V per block for later
@@ -106,18 +96,12 @@ def gram(V):
         idx = np.flatnonzero(snp.block.values == b); li = snp.ld_index.values[idx]
         T[b] = X[li].T @ V[idx]; Q += T[b].T @ T[b]
     return Q, T
-Q, _ = gram(C)
-target = np.array([s for _, _, s in cats] + [share_r]) * h2
-sf = np.ones(C.shape[1])
-for i in range(C.shape[1]):
-    if Q[i, i] > 0: sf[i] = np.sqrt(target[i] / Q[i, i]); C[:, i] *= sf[i]
-    elif target[i] > 0: raise SystemExit(f"component {i} has no causal SNP: raise PI or the share")
 beta = C.sum(1)
 Q, T = gram(np.c_[C, beta])
 f = np.sqrt(h2 / Q[-1, -1]); C *= f; beta *= f
-# design variance v_j = E[beta_j^2] over the causal draw, slab class and effect (E kappa = 1, t scaled to variance 1)
-out_ = memb.max(1) == 0
-vdes = (memb * (pc / pi)[:, None] * (sf[:-1] * f) ** 2).sum(1) + out_ * pi * (sf[-1] * f) ** 2
+s20 = f * f                                                           # sigma2_0
+vdes = s20 * (1. + memb @ ratio)                                      # design variance E[beta_j^2]
+target = np.r_[ratio * s20 * memb.sum(0), s20 * M]                    # design h2 sigma2_c sum_j memb_jc (no LD)
 own = np.diag(Q)[:-1] * f * f                                         # beta_c' R beta_c: h2 of each component
 bh = np.empty(M)
 for b in blocks:
@@ -149,7 +133,7 @@ for it in range(100000):
     r_ = np.divide(N_, D_, out=np.ones_like(N_), where=D_ > 0); s2 = s2 * np.sqrt(r_)
     if np.max(np.abs(r_[s2 > 0] - 1)) < 1e-8: break
 pd.DataFrame(dict(annotation=["intercept"] + oc, sigma2=s2, pi=float(causal.mean()))).to_csv(f"{out}/oracle.tsv", sep="\t", index=False)
-pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
+pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], ratio=np.r_[ratio, 1.], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))
 print("causal per category", dict(zip(names[:-1], [int((causal & (memb[:, i] > 0)).sum()) for i in range(memb.shape[1])])))

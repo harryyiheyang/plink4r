@@ -7,8 +7,8 @@
 #SBATCH -o partvar_%a.log
 # Variance-route partition simulation on PanUKB_EUR_ld blocks 1-100 with the real annotations (run from
 # /home/yxy1234/plink4r_test/partition_sim; plink4r installed per task (below); scripts of sim/partition here). One array task per
-# design and seed (2 designs x 3 seeds; task = 3 * design + seed - 1), all in parallel. Two designs (h2 shares;
-# intercept = 20%, t(3) effects on the base causal SNPs outside every design category); PI = 0.01 causal (at least MIN_CAUSAL = 100 per category),
+# design and seed (2 designs x 3 seeds; task = 3 * design + seed - 1), all in parallel. Two designs (variance ratios sigma2_c / sigma2_0 on the MASH atoms 1, 10, 100;
+# intercept on every SNP; data from the variance model itself, see gen_var.py); PI = 0.01 causal,
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 # Methods ORACLE, MASH, MASH_PI (run_var.R; eigen cutoff 1), directory var_<design>_s<seed>. GIBBS_DRAWS (env, default 300), PI_BY (env,
 # default elbo; pseudo_r: directory <dir>_pr) and GRID_EXTEND (env, default 4) are passed on to run_var.R.
@@ -30,8 +30,8 @@ export SHARED=$PWD
 DS=(lipid bp); d=${DS[$((SLURM_ARRAY_TASK_ID / 3))]}; seed=$((SLURM_ARRAY_TASK_ID % 3 + 1))
 CODING=High+Moderate+Low+Splice_Region+UTR_Core+UTR5_Other+UTR3_Other
 declare -A DES
-DES[lipid]="coding=$CODING:0.5,hepatocyte=Hepatocyte_Cholangiocyte:0.3"
-DES[bp]="coding=$CODING:0.2,endothelial=Endothelial:0.3,smc=Stromal_Pericyte_SMC:0.3"
+DES[lipid]="coding=$CODING:100,hepatocyte=Hepatocyte_Cholangiocyte:10"
+DES[bp]="coding=$CODING:10,endothelial=Endothelial:10,smc=Stromal_Pericyte_SMC:1"
 D=var_${d}_s$seed; M="ORACLE MASH MASH_PI"
 [ "${PI_BY:-elbo}" = pseudo_r ] && D=${D}_pr   # pi chosen by pseudo r: its own directory
 BINS=ldbin0.98_1-100.bin
