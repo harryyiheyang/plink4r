@@ -4,7 +4,8 @@
 # Methods: V viprs; A1 viprs_annot, one Gaussian slab; AM 6:3:1 slab mixture (final Gibbs fit); AMV AM with the VI
 # refit as the final fit;
 # AML AM started at ldsc_strat(). Intercept (sigma2_0) on every SNP.
-# env: SHARED (directory of annot.tsv, default sim_dir), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
+# env: SHARED (directory of annot.tsv, default sim_dir), COLS (annotation columns given to the model, comma or +
+#      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
 #      L2 / L_base / base / baseL2 and one column per annotation named L_<annot>, L2_<annot>, <annot>L2 or <annot>;
@@ -16,6 +17,7 @@ ids <- tab[, .(ID, Block = block, Index = ld_index)]
 ma <- fread(file.path(a[3], "trait.ma"))
 ss <- ids[ma[, .(ID = SNP, Z = b / se, N)], on = "ID"][rf, on = .(Block, Index), nomatch = NULL][, .(A1, A2, Z, N, Block, Index)]
 an <- fread(file.path(Sys.getenv("SHARED", a[3]), "annot.tsv"))[, ID := NULL]
+if (nzchar(Sys.getenv("COLS"))) an <- an[, c("Block", "Index", strsplit(Sys.getenv("COLS"), "[,+]")[[1]]), with = FALSE]
 bins <- Sys.getenv("BINS", file.path(dirname(a[2]), "ldbin0.98.bin"))
 if (!file.exists(bins)) ld_bins(a[1], r2 = 0.98, ref = rf, output = bins, threads = 4)
 skip <- if (Sys.getenv("SKIP", "\001") == "\001") NULL else setdiff(strsplit(Sys.getenv("SKIP"), ",")[[1]], "")

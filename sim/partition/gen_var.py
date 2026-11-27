@@ -112,8 +112,11 @@ sh = env("SHARED", out) if env("ANNOT") else out
 os.makedirs(sh, exist_ok=True)
 if not env("ANNOT") or not os.path.exists(f"{sh}/annot.tsv"):
     ann = a.reset_index(drop=True).copy(); ann.insert(0, "Index", snp.ld_index.values); ann.insert(0, "Block", snp.block.values)
-    ann.insert(0, "ID", snp.ID.values); ann.astype({c: "float32" for c in cols}).to_csv(f"{sh}/annot.tsv", sep="\t", index=False)
-if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"): snp[["ID", "block", "ld_index"]].to_csv(f"{sh}/snps.tsv", sep="\t", index=False)
+    ann.insert(0, "ID", snp.ID.values); tmp = f"{sh}/annot.tsv.{os.getpid()}"   # written aside, then renamed: parallel tasks never read a partial file
+    ann.astype({c: "float32" for c in cols}).to_csv(tmp, sep="\t", index=False); os.replace(tmp, f"{sh}/annot.tsv")
+if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"):
+    tmp = f"{sh}/snps.tsv.{os.getpid()}"
+    snp[["ID", "block", "ld_index"]].to_csv(tmp, sep="\t", index=False); os.replace(tmp, f"{sh}/snps.tsv")
 np.save(f"{out}/beta_comp.npy", C.astype(np.float32))
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
