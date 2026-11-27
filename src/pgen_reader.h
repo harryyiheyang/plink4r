@@ -20,6 +20,14 @@
 #include <vector>
 #include "pgenlib/pgenlib_read.h"
 
+namespace plink2 {
+// pgenlib_read.cc: the cachelines PgrInit() takes from a reader's block for a file with these flags. PgfiInitPhase2()
+// reports fewer for a file of fixed-width records (storage modes 0x02 to 0x04): only the base genovec and the read
+// buffer, while PgrInit() also places the dosage and phase workspaces there.
+uintptr_t CountPgrAllocCachelinesRequired(uint32_t raw_sample_ct, PgenGlobalFlags gflags, uint32_t max_allele_ct,
+                                          uint32_t fread_buf_byte_ct);
+}
+
 namespace plink4r {
 
 // A file dosage (1/16384 steps, 0..32768) taken to the nearest 0.01: steps of 0.01, 0..200. PI 2026-11-18: the
@@ -122,6 +130,8 @@ public:
     if (plink2::PgfiInitPhase2(header_ctrl, 1, 0, 0, 0, info.raw_variant_ct, &max_vrec_width,
                                &info, header_.alloc, &pgr_cachelines, err) != plink2::kPglRetSuccess)
       fail(err);
+    pgr_cachelines = std::max(pgr_cachelines, plink2::CountPgrAllocCachelinesRequired(
+        info.raw_sample_ct, info.gflags, info.max_allele_ct, max_vrec_width));
     genovec_bytes_ = plink2::NypCtToVecCt(n) * plink2::kBytesPerVec;
     dosage_ = (info.gflags & plink2::kfPgenGlobalDosagePresent) != 0;
     const uintptr_t present_bytes = ((n + 7) / 8 / plink2::kBytesPerVec + 2) * plink2::kBytesPerVec;
