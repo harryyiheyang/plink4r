@@ -1,14 +1,13 @@
 # usage: Rscript run_var.R <ld_dir> <snp_table> <sim_dir>  -> sim_dir/<method>.tsv (ID, BETA_STD, BETA_STD_<annot>)
 #   and sim_dir/<method>_h2.tsv (annotation, h2_shapley = Shapley value of the column in beta' R beta, its sd,
 #   var_shapley = b_k' R b, h2_share = model share)
-# Methods: V viprs; A1 viprs_annot, one Gaussian slab; AM 6:3:1 slab mixture (final Gibbs fit); AMV AM with the VI
-# refit as the final fit;
-# AML AM started at ldsc_strat(); AMT AM with sigma2_k and pi fixed at the model-definition truth (needs
-# AM_mtruth.tsv: run eval_var.py on AM first). Intercept (sigma2_0) on every SNP.
-# env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit of A1, AM, AML; default 300),
+# Methods (one path each: VI chooses the cutoff and pi, the final fit is Gibbs + RB; intercept sigma2_0 on every SNP):
+#   ORACLE viprs_annot given only the design columns, sigma2_k and pi fixed at the oracle of gen_var.py (oracle.tsv);
+#   SSL viprs_annot started at ldsc_strat(), select = "ssl"; MASH the same with select = "mash".
+# env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit; default 300),
 #      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 0.995,0.999),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
-#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), SELECT (annotation selection: ssl (default) or mash), COLS (annotation columns given to the model, comma or +
+#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), COLS (annotation columns given to SSL and MASH, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
@@ -21,14 +20,15 @@ ids <- tab[, .(ID, Block = block, Index = ld_index)]
 ma <- fread(file.path(a[3], "trait.ma"))
 ss <- ids[ma[, .(ID = SNP, Z = b / se, N)], on = "ID"][rf, on = .(Block, Index), nomatch = NULL][, .(A1, A2, Z, N, Block, Index)]
 an <- fread(file.path(Sys.getenv("SHARED", a[3]), "annot.tsv"))[, ID := NULL]
+an0 <- an   # every column (ORACLE takes the design columns from it)
 if (nzchar(Sys.getenv("COLS"))) an <- an[, c("Block", "Index", strsplit(Sys.getenv("COLS"), "[,+]")[[1]]), with = FALSE]
 bins <- Sys.getenv("BINS", file.path(dirname(a[2]), "ldbin0.98.bin"))
 if (!file.exists(bins)) ld_bins(a[1], r2 = 0.98, ref = rf, output = bins, threads = 4)
 skip <- if (Sys.getenv("SKIP", "\001") == "\001") NULL else setdiff(strsplit(Sys.getenv("SKIP"), ",")[[1]], "")
-meth <- strsplit(Sys.getenv("METHODS", "V,A1,AM,AMV,AML"), ",")[[1]]
+meth <- strsplit(Sys.getenv("METHODS", "ORACLE,SSL,MASH"), ",")[[1]]
 tm <- function(e) { t0 <- Sys.time(); x <- e; list(x, as.numeric(difftime(Sys.time(), t0, units = "secs"))) }
 ls <- NULL
-if ("AML" %in% meth) {
+if (any(c("SSL", "MASH") %in% meth)) {
   t0 <- Sys.time()
   acols <- setdiff(names(an), c("Block", "Index"))
   if (nzchar(Sys.getenv("LDSCORE"))) {
@@ -50,25 +50,21 @@ if ("AML" %in% meth) {
   cat("ldsc_strat", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "s\n")
 }
 gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300")); pb <- Sys.getenv("PI_BY", "elbo")
-ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000")); sl <- Sys.getenv("SELECT", "ssl")
+ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000"))
 co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else c(0.995, 0.999)
+ctl <- function(...) viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, ...)
 fit <- function(k) switch(k,
-  V = viprs(ss, a[1], ref = rf, threads = 4),
-  A1 = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                   control = viprs_annot_control(mix_prop = 1, mix_var = 1, gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
-  AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                   control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
-  AMV = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                    control = viprs_annot_control(gibbs_draws = 0, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
-  AMT = {  # diagnostic: AM at the model-definition truth of AM (AM_mtruth.tsv of eval_var.py), sigma2_k and pi fixed
-    mt <- fread(file.path(a[3], "AM_mtruth.tsv"))
-    viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                sigma2_init = setNames(mt$sigma2, mt$annotation),
+  ORACLE = {
+    o <- fread(file.path(a[3], "oracle.tsv")); oa <- an0[, c("Block", "Index", setdiff(o$annotation, "intercept")), with = FALSE]
+    viprs_annot(ss, a[1], annot = oa, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = setNames(o$sigma2, o$annotation),
                 control = viprs_annot_control(gibbs_draws = gd, fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0,
-                                              cutoffs = max(co), pi_grid = mt$pi[1], cut_pi = mt$pi[1]), threads = 4)
+                                              cutoffs = max(co), pi_grid = o$pi[1], cut_pi = o$pi[1]), threads = 4)
   },
-  AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                    sigma2_init = ls, control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4))
+  SSL = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
+                    control = ctl(select = "ssl"), threads = 4),
+  MASH = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
+                     control = ctl(select = "mash"), threads = 4),
+  stop("unknown method ", k))
 for (k in meth) {
   f <- tm(fit(k)); r <- ids[f[[1]], on = .(Block, Index)]
   bc <- grep("^BETA_STD", names(r), value = TRUE)

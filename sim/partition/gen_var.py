@@ -16,7 +16,10 @@
 #               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every column (random annotations: the targets t1..tK) at
 #               (1 - RESID) / their number, RESID (0.2).
 # writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), v_design.npy (float32,
-# the design variance E[beta_j^2] of each SNP, for the model-definition truth of eval_var.py), categories.tsv
+# the design variance E[beta_j^2] of each SNP, for the model-definition truth of eval_var.py), oracle.tsv (annotation,
+# sigma2, pi: the oracle of run_var.R method ORACLE, the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k on the
+# design columns fitted to v_design by the likelihood stationarity sum_j A_jk (v_j - h2_j) / h2_j^2 = 0 (MM steps to
+# convergence, every SNP); pi the realised share of causal SNPs), categories.tsv
 # (name, columns, design h2, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
 # / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
 import os, sys, numpy as np, pandas as pd
@@ -137,6 +140,15 @@ if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"):
     tmp = f"{sh}/snps.tsv.{os.getpid()}"
     snp[["ID", "block", "ld_index"]].to_csv(tmp, sep="\t", index=False); os.replace(tmp, f"{sh}/snps.tsv")
 np.save(f"{out}/beta_comp.npy", C.astype(np.float32)); np.save(f"{out}/v_design.npy", vdes.astype(np.float32))
+# oracle variance model on the design columns (the same MM fit as the model-definition truth of eval_var.py)
+oc = list(dict.fromkeys(sum([cc for _, cc, _ in cats], [])))
+Ao = np.c_[np.ones(M), A[:, [cols.index(c) for c in oc]]]
+s2 = np.full(Ao.shape[1], vdes.sum() / Ao.sum())
+for it in range(100000):
+    hh = Ao @ s2; N_ = Ao.T @ (vdes / hh ** 2); D_ = Ao.T @ (1 / hh)
+    r_ = np.divide(N_, D_, out=np.ones_like(N_), where=D_ > 0); s2 = s2 * np.sqrt(r_)
+    if np.max(np.abs(r_[s2 > 0] - 1)) < 1e-8: break
+pd.DataFrame(dict(annotation=["intercept"] + oc, sigma2=s2, pi=float(causal.mean()))).to_csv(f"{out}/oracle.tsv", sep="\t", index=False)
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))

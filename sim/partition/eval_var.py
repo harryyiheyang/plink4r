@@ -9,8 +9,7 @@
 # v_j = E[beta_j^2] of gen_var.py (v_design.npy) by the likelihood stationarity sum_j A_jk (v_j - h2_j) / h2_j^2 = 0
 # (MM steps to convergence; every SNP, the LD-bin suppression is not known here); the true Shapley value of column k is
 # then (w_k beta)' R beta with w_jk = A_jk sigma2_k / h2_j and the true beta (k = 0 the intercept on every SNP).
-# _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth" and written to <method>_mtruth.tsv
-# (annotation, sigma2, h2_shapley, pi = the true share of causal SNPs) for run_var.R method AMT.
+# _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth" (for ORACLE: its own fixed sigma2_k).
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
 import sys, os, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from sim_io import read_X
@@ -54,9 +53,7 @@ for m in sys.argv[3:]:
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
         ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h, hv = ht.h2_shapley, ht.var_shapley
-        ac = [k for k in ht.index if k != "intercept"]; mt, ms2 = model_truth(ac, V[:, tot], Rb)
-        pd.DataFrame(dict(annotation=["intercept"] + ac, sigma2=ms2, h2_shapley=[mt[k] for k in ["intercept"] + ac],
-                          pi=float((C.sum(1) != 0).mean()))).to_csv(f"{sim}/{m}_mtruth.tsv", sep="\t", index=False)
+        ac = [k for k in ht.index if k != "intercept"]; mt, _ = model_truth(ac, V[:, tot], Rb)
         print(m, "model truth", {nm: round(float(sum(mt.get(c, 0.) for c in cc)), 4) for nm, cc in zip(names, cols)},
               "other", round(float(sum(v for k, v in mt.items() if k not in set(sum(cols, [])))), 4))
     for nm, cc in zip(names, cols):
