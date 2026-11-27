@@ -7,13 +7,13 @@
 #' of S-LDSC). Prior on beta_j:
 #' VIPRS spike and slab with pi fixed on the grid; the slab is a mixture of small / medium / large effects with fixed
 #' shares (`mix_prop`, default 6 : 3 : 1) and variances `mix_var` (relative, default 0.01 : 0.1 : 1) times
-#' h2_j / pi, scaled so that Var(beta_j) = h2_j. M-step (D.1.2): with
-#' w_jk = A_jk sigma2_k / h2_j and E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j (zeta_j the posterior
-#' second moment of beta_j on the scale of h2_j),
-#' sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)), S_k = sum_j E[(beta_j^(k))^2] (Inverse-Gamma(a0, b0) prior).
-#' No floor: sigma2_k = 0 is a fixed point of the M-step, so the start (see `start_*` of [viprs_annot_control()]) gives
-#' every column, the intercept included, a positive value. `mstep = "elbo"` replaces this update by the stationarity
-#' condition of the ELBO.
+#' h2_j / pi, scaled so that Var(beta_j) = h2_j. M-step: sigma2_k maximize the ELBO, whose sigma2-dependent part is
+#' -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j) (gamma_j the slab probability, zeta_j = gamma_j E[beta_j^2 / kappa_c]
+#' the slab second moment on the scale of h2_j; SNPs not suppressed): stationarity
+#' sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, solved by multiplicative fixed-point steps
+#' sigma2_k <- sigma2_k sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j (5 per iteration); the intercept is
+#' kept above 1e-20. sigma2_k = 0 is a fixed point, so the start (see `start_*` of [viprs_annot_control()]) gives every
+#' column, the intercept included, a positive value.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
 #' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every fit), each fit
@@ -25,9 +25,9 @@
 #' best point refitted on all data). pi and sigma2_k are not chosen jointly by one criterion (weakly identified).
 #' `sigma2_init` sets the sigma2_k of the first fit of each stage, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
-#' with Rao-Blackwell means; sigma2_k and sigma by stochastic approximation of the same M-step. BETA is the mean of
-#' the conditional posterior means m_j over the draws and BETA_k the mean of w_jk m_j (w_jk of each sweep), so the
-#' columns still sum to BETA.
+#' with Rao-Blackwell means; sigma2_k by the same M-step on stochastic-approximation averages of gamma_j and zeta_j,
+#' sigma by stochastic approximation. BETA is the mean of the conditional posterior means m_j over the draws and
+#' BETA_k the mean of w_jk m_j (w_jk of each sweep), so the columns still sum to BETA.
 #'
 #' LD-bin suppression (as [sbayesrc()]): inside an LD bin of the list `bin_file` (bins of r2 > `bin_r2`, default 0.98,
 #' made by [ld_bins()]) with at least one annotated member (nonzero in any of the columns `skip_annot`), the members
@@ -135,20 +135,14 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #'   `start_total_min` h (sigma2_k = 0 is a fixed point of the M-step, so no column may start at 0).
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
-#' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
-#'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @param fix_sigma2 TRUE keeps sigma2_k at the start (no M-step; a diagnostic with the true values as `sigma2_init`,
 #'   `start_scale = 1`, `start_total_min = 0`).
-#' @param mstep update of sigma2_k: "moment" (above) or "elbo" (the stationarity condition of the ELBO in sigma2,
-#'   sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, by multiplicative fixed-point steps; in the Gibbs fit on the
-#'   stochastic-approximation averages of gamma_j and zeta_j; no Inverse-Gamma prior).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
                                 cutoffs = c(0.995, 0.999), rel_r_min = 1.25, cut_pi = 0.01, pi_by = c("elbo", "pseudo_r"),
                                 start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
-                                gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0, fix_sigma2 = FALSE,
-                                mstep = c("moment", "elbo")) {
+                                gibbs_burn = 100L, gibbs_draws = 300L, fix_sigma2 = FALSE) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
                              rel_r_min = as.numeric(rel_r_min), cut_pi = as.numeric(cut_pi), pi_by = match.arg(pi_by),
@@ -156,7 +150,7 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                              start_zero_share = as.numeric(start_zero_share), start_total_min = as.numeric(start_total_min),
                              gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
-                             a0 = as.numeric(a0), b0 = as.numeric(b0), fix_sigma2 = isTRUE(fix_sigma2), mstep = match.arg(mstep)))
+                             fix_sigma2 = isTRUE(fix_sigma2)))
 }
 
 # sigma2_k of the first grid point (intercept first, then cols), or numeric(0) for the LDSC start

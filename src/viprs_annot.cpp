@@ -57,11 +57,12 @@ struct ViprsControl {
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
-  bool pi_by_elbo, fix_sigma2, mstep_elbo;  // mstep_elbo: sigma2_k by the ELBO (MM) instead of the moment form  // fix_sigma2: sigma2_k kept at the start (diagnostic: no M-step)  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
+  bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
+  bool fix_sigma2;  // sigma2_k kept at the start (diagnostic: no M-step)
   double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
   std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
-      pi_hi_max, pi_cap, a0, b0;
+      pi_hi_max, pi_cap;
   unsigned long long seed;
   std::vector<double> pi_grid_user;  // empty: official grid
   // slab mixture: class c has prior share mix_prop[c] and variance kap[c] h2_j / pi (sum_c mix_prop[c] kap[c] = 1)
@@ -92,8 +93,6 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.pi_hi_count = Rcpp::as<double>(c["pi_hi_count"]);
   x.pi_hi_max = Rcpp::as<double>(c["pi_hi_max"]);
   x.pi_cap = Rcpp::as<double>(c["pi_cap"]);
-  x.a0 = Rcpp::as<double>(c["a0"]);
-  x.b0 = Rcpp::as<double>(c["b0"]);
   x.seed = static_cast<unsigned long long>(Rcpp::as<double>(c["seed"]));
   x.gibbs_burn = Rcpp::as<int>(c["gibbs_burn"]);
   x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
@@ -103,7 +102,6 @@ ViprsControl read_control(const Rcpp::List& c) {
   if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
   x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
   x.fix_sigma2 = Rcpp::as<bool>(c["fix_sigma2"]);
-  x.mstep_elbo = Rcpp::as<std::string>(c["mstep"]) == "elbo";
   x.start_scale = Rcpp::as<double>(c["start_scale"]);
   x.start_zero_share = Rcpp::as<double>(c["start_zero_share"]);
   x.start_total_min = Rcpp::as<double>(c["start_total_min"]);
@@ -401,41 +399,6 @@ struct VarModel {
   // pi moves: sigma2_k (variance of beta) kept, the slab variance h2_j / pi follows
   void pi_move(double pi_) { pi = pi_; set_all(); }
 
-  // one update of sigma2_k (D.1.2), moment form (VIPRS 0.1.5): sigma2_k is the variance of beta, matched to the
-  // posterior second moments of the SNPs not suppressed, sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
-  void mstep(const double* zeta, double a0, double b0) {
-    std::vector<double> SN(2 * K, 0.);  // S_k, then sum_j A_jk
-#ifdef _OPENMP
-#pragma omp parallel num_threads(threads)
-#endif
-    {
-      std::vector<double> loc(2 * K, 0.);
-#ifdef _OPENMP
-#pragma omp for nowait
-#endif
-      for (int64_t j = 0; j < M; ++j) {
-        if (sup[j]) continue;
-        const double h = h2[j], z = zeta[j];
-        const double* r = row(j);
-        for (int k = 0; k < K; ++k) {
-          const double a = k ? r[k - 1] : 1.;
-          if (a == 0.) continue;
-          const double w = a * par[k] / h;
-          loc[k] += w * w * z + w * (1. - w) * h;
-          loc[K + k] += a;
-        }
-      }
-#ifdef _OPENMP
-#pragma omp critical
-#endif
-      for (int i = 0; i < 2 * K; ++i) SN[i] += loc[i];
-    }
-    for (int k = 0; k < K; ++k) {
-      const double den = SN[K + k] + 2. * (a0 + 1.);
-      par[k] = den > 0 ? (SN[k] + 2. * b0) / den : 0.;
-    }
-    set_all();
-  }
 };
 
 // ---- one EM run with some hyperparameters fixed
@@ -523,7 +486,7 @@ struct Fitter {
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
       if (!c.fix_sigma2) {
-        if (c.mstep_elbo) vm.mstep_elbo(zeta.data(), st.gamma.data()); else vm.mstep(zeta.data(), c.a0, c.b0);
+        vm.mstep_elbo(zeta.data(), st.gamma.data());
       }
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;

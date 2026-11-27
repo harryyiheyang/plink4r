@@ -5,7 +5,7 @@
 //   per sweep and SNP j (blocks in parallel, own random stream per block and sweep): the conditional posterior of
 //   beta_j given the others (spike + slab classes, mix_post), its mean m_j (Rao-Blackwell) and its zeta_j (the M-step
 //   statistic of viprs_annot.cpp), then a draw of beta_j (spike, class, normal) and the update of s = V' beta;
-//   after the sweep the variance model (VarModel::mstep, D.1.2) and sigma = 1 - 2 beta'bt + beta'R beta, by
+//   after the sweep the variance model (VarModel::mstep_elbo on the averaged statistics) and sigma = 1 - 2 beta'bt + beta'R beta, by
 //   stochastic approximation: step 1 during burn-in, 1 / (t - burn + 1) after (as sbayesrc()).
 // After burn-in, per sweep: m_j, w_jk m_j (w_jk = A_jk sigma2_k / h2_j of that sweep; the columns sum to m_j in every
 // sweep, so their means sum to the mean of m_j) and the Shapley value of column k in beta' R beta,
@@ -31,7 +31,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
   const float lp = (float)(std::log(vm.pi) - std::log1p(-vm.pi));
   std::vector<float> beta(st0.eta), m(M, 0.f), g(M, 0.f), s(P.S, 0.f);
   std::vector<double> zeta(M, 0.);
-  std::vector<double> gbar(M, 0.), zbar(M, 0.);  // mstep_elbo: stochastic approximation of gamma_j, zeta_j
+  std::vector<double> gbar(M, 0.), zbar(M, 0.);  // stochastic approximation of gamma_j, zeta_j (M-step statistics)
   vtx(P, beta.data(), s.data(), threads);
   GibbsOut o;
   o.bmean.assign(M, 0.); o.pip.assign(M, 0.); o.part.assign((size_t)M * K, 0.);
@@ -104,16 +104,10 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
       o.sigma += sigma; o.h2 += ss / (ss + sigma);
       (void)t;
     }
-    if (c.mstep_elbo) {
-      // ELBO form: stochastic approximation of the statistics (gamma_j, zeta_j), then the update on the averages
-      // (averaging the updated sigma2 would solve E[N_k / D_k] = 1 instead of E[N_k] = E[D_k])
-      for (int64_t j = 0; j < M; ++j) { gbar[j] = (1. - a) * gbar[j] + a * g[j]; zbar[j] = (1. - a) * zbar[j] + a * zeta[j]; }
-      if (!c.fix_sigma2) vm.mstep_elbo(zbar.data(), gbar.data());
-    } else {
-      const std::vector<double> old(vm.par);
-      if (!c.fix_sigma2) vm.mstep(zeta.data(), c.a0, c.b0);
-      for (int kk = 0; kk < K; ++kk) vm.par[kk] = (1. - a) * old[kk] + a * vm.par[kk];
-    }
+    // stochastic approximation of the statistics (gamma_j, zeta_j), then the M-step on the averages (averaging the
+    // updated sigma2 would solve E[N_k / D_k] = 1 instead of E[N_k] = E[D_k])
+    for (int64_t j = 0; j < M; ++j) { gbar[j] = (1. - a) * gbar[j] + a * g[j]; zbar[j] = (1. - a) * zbar[j] + a * zeta[j]; }
+    if (!c.fix_sigma2) vm.mstep_elbo(zbar.data(), gbar.data());
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;
     if (ns > 0. && std::isfinite(ns)) sigma = (1. - a) * sigma + a * ns;
