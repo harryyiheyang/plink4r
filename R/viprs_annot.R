@@ -10,8 +10,8 @@
 #' h2_j / pi, scaled so that Var(beta_j) = h2_j. M-step: sigma2_k maximize the ELBO, whose sigma2-dependent part is
 #' -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j) (gamma_j the slab probability, zeta_j = gamma_j E[beta_j^2 / kappa_c]
 #' the slab second moment on the scale of h2_j; SNPs not suppressed): stationarity
-#' sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, solved by multiplicative fixed-point steps
-#' sigma2_k <- sigma2_k sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j (5 per iteration); the intercept is
+#' sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, by the monotone MM step
+#' sigma2_k <- sigma2_k sqrt(sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j) (10 per iteration); the intercept is
 #' kept above 1e-20. sigma2_k = 0 is a fixed point, so the start (see `start_*` of [viprs_annot_control()]) gives every
 #' column, the intercept included, a positive value.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
