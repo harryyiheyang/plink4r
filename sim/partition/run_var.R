@@ -4,7 +4,7 @@
 # Methods: V viprs; A1 viprs_annot, one Gaussian slab; AM 6:3:1 slab mixture (final Gibbs fit); AMV AM with the VI
 # refit as the final fit;
 # AML AM started at ldsc_strat(). Intercept (sigma2_0) on every SNP.
-# env: SHARED (directory of annot.tsv, default sim_dir), COLS (annotation columns given to the model, comma or +
+# env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit of A1, AM, AML; default 300), COLS (annotation columns given to the model, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
@@ -45,15 +45,17 @@ if ("AML" %in% meth) {
   ls <- ldsc_strat(ss, L)
   cat("ldsc_strat", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "s\n")
 }
+gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300"))
 fit <- function(k) switch(k,
   V = viprs(ss, a[1], ref = rf, threads = 4),
   A1 = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                   control = viprs_annot_control(mix_prop = 1, mix_var = 1), threads = 4),
-  AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, threads = 4),
+                   control = viprs_annot_control(mix_prop = 1, mix_var = 1, gibbs_draws = gd), threads = 4),
+  AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
+                   control = viprs_annot_control(gibbs_draws = gd), threads = 4),
   AMV = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                     control = viprs_annot_control(gibbs_draws = 0), threads = 4),
   AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                    sigma2_init = ls, threads = 4))
+                    sigma2_init = ls, control = viprs_annot_control(gibbs_draws = gd), threads = 4))
 for (k in meth) {
   f <- tm(fit(k)); r <- ids[f[[1]], on = .(Block, Index)]
   bc <- grep("^BETA_STD", names(r), value = TRUE)

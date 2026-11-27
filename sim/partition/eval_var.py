@@ -1,7 +1,8 @@
 # Per category (categories.tsv of gen_var.py): prediction R2 of the category's partitioned PRS (the sum of the
 # BETA_STD_<col> of its columns) for the true category genetic value, and the Shapley heritability ratio
 # _h2 = estimated (h2_shapley of <method>_h2.tsv, summed over the columns of the category: Shapley values add up)
-# / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley"; _or: the
+# / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley"; _vs: the same
+# with var_shapley (b_c' R b of the output posterior means instead of the mean over the draws); _or: the
 # oracle ratio, the estimated per-SNP share BETA_c / BETA applied to the true beta (w_c beta)' R beta / truth.
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
 import sys, os, numpy as np, pandas as pd
@@ -32,12 +33,14 @@ for m in sys.argv[3:]:
     out = {"total": round(float(r2(L[(m, "total")], L[("true", "total")])), 3)}
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
-        h = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation").h2_shapley
+        ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h, hv = ht.h2_shapley, ht.var_shapley
     for nm, cc in zip(names, cols):
         if (m, nm) not in L: continue
         i, j = L[(m, nm)], L[("true", nm)]
         out[nm] = round(float(r2(i, j)), 3)
-        if h is not None: out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
+        if h is not None:
+            out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
+            out[nm + "_vs"] = round(float(hv.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
         # oracle: the estimated allocation share w = BETA_k / BETA of each SNP applied to the true beta
         bt_ = V[:, L[(m, "total")]]; w = np.divide(V[:, i], bt_, out=np.zeros_like(bt_), where=np.abs(bt_) > 1e-12)
         out[nm + "_or"] = round(float((w * V[:, tot]) @ Rb / tsh[nm]), 3)
