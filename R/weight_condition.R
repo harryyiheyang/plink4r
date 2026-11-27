@@ -27,8 +27,8 @@
 #' the panel stops the call (wrong build or chromosome coding). Off-panel weights reach the target only when the two
 #' tables are on the same build.
 #'
-#' The output is keyed by the target's own columns: to score with [geno_score()] (ID and A1), give the target an
-#' ID column matching its genotype file.
+#' The output is keyed by the target's own columns, among them `CHR`, `BP`, `A1`, `A2`: it is the `weights` table
+#' of [geno_score()] as it is.
 #'
 #' @param target the target SNPs: data.frame or file with CHR, BP, A1, A2; other columns are carried to the output.
 #' @param weights data.frame or file with CHR, BP, A1, A2 and the weight columns (per-allele effect of A1).
