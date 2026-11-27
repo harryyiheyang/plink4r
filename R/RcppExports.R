@@ -93,6 +93,10 @@ gxe_kin_stream_cpp <- function(path, bed, n_raw, variant_text, out, sample_idx, 
     .Call(`_plink4r_gxe_kin_stream_cpp`, path, bed, n_raw, variant_text, out, sample_idx, null, E, n_exp, threads, mem_gb, block)
 }
 
+geno_haplotype_cpp <- function(path, n_total, allele_ct, variants, samples, threads) {
+    .Call(`_plink4r_geno_haplotype_cpp`, path, n_total, allele_ct, variants, samples, threads)
+}
+
 reml_tau_binomial_cpp <- function(y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj) {
     .Call(`_plink4r_reml_tau_binomial_cpp`, y, X, ki, kj, kv, kdiag, h_max, tol, max_iter, max_eval, mu_eps, start_iter, h_window, f_tol, rank_tol, proj)
 }

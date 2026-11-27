@@ -1,7 +1,9 @@
 // PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
 // (read), for files whose header flags dosages 1/16384 fixed-point ALT dosages of every sample (read_dosage), and
 // the file's own sparse form over a sample subset that pgenlib takes word by word (set_samples, read_sparse).
-// The one PgenFile of the package (geno objects and the association scans).
+// Hard calls with their phase (read_phased): the genovec, the heterozygotes whose phase the file holds and which
+// haplotype of each carries ALT.
+// The one PgenFile of the package (geno objects, the association scans and the haplotypes).
 // compact_genovec / count_codes: the sample subset of a genovec, and the calls of each code.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
@@ -65,6 +67,8 @@ struct ThreadReader {
   unsigned char* genovec = nullptr;
   unsigned char* dosage_present = nullptr;
   unsigned char* dosage_main = nullptr;
+  unsigned char* phasepresent = nullptr;
+  unsigned char* phaseinfo = nullptr;
   std::vector<std::uint16_t> full;
   ThreadReader() { plink2::PreinitPgr(&pgr); }
   ThreadReader(const ThreadReader&) = delete;
@@ -76,6 +80,8 @@ struct ThreadReader {
     if (genovec) plink2::aligned_free(genovec);
     if (dosage_present) plink2::aligned_free(dosage_present);
     if (dosage_main) plink2::aligned_free(dosage_main);
+    if (phasepresent) plink2::aligned_free(phasepresent);
+    if (phaseinfo) plink2::aligned_free(phaseinfo);
   }
 };
 
@@ -146,6 +152,34 @@ public:
   }
 
   bool dosage() const { return dosage_; }
+
+  // One variant with its phase, all samples in file order: genovec (codes 0/1/2 = ALT count, 3 = missing; a
+  // multiallelic variant counts every non-REF allele), present = the bit of each heterozygote whose phase the
+  // file holds (present_ct of them), info = for those, bit set: ALT on the first haplotype (1|0), clear: on the
+  // second (0|1). The bits of info outside present mean nothing. False on a read error.
+  struct Phased {
+    const std::uint64_t* genovec = nullptr;
+    const std::uint64_t* present = nullptr;
+    const std::uint64_t* info = nullptr;
+    uint32_t present_ct = 0;
+  };
+  bool read_phased(std::size_t variant, int thread, Phased& out) {
+    ThreadReader& r = *readers_[thread];
+    if (!r.phasepresent) {
+      const uintptr_t bytes = plink2::BitCtToVecCt(samples()) * plink2::kBytesPerVec;
+      if (plink2::cachealigned_malloc(bytes, &r.phasepresent) || plink2::cachealigned_malloc(bytes, &r.phaseinfo))
+        return false;
+    }
+    out.present_ct = 0;
+    if (plink2::PgrGetP(nullptr, r.pssi, static_cast<uint32_t>(samples()), static_cast<uint32_t>(variant), &r.pgr,
+                        reinterpret_cast<uintptr_t*>(r.genovec), reinterpret_cast<uintptr_t*>(r.phasepresent),
+                        reinterpret_cast<uintptr_t*>(r.phaseinfo), &out.present_ct) != plink2::kPglRetSuccess)
+      return false;
+    out.genovec = reinterpret_cast<const std::uint64_t*>(r.genovec);
+    out.present = reinterpret_cast<const std::uint64_t*>(r.phasepresent);
+    out.info = reinterpret_cast<const std::uint64_t*>(r.phaseinfo);
+    return true;
+  }
 
   // The samples read_sparse() returns: rows (0-based .psam rows, ascending, distinct); empty or every row keeps
   // all samples. pgenlib subsets the genovec and the dosages word by word.

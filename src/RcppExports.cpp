@@ -379,6 +379,22 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// geno_haplotype_cpp
+Rcpp::List geno_haplotype_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads);
+RcppExport SEXP _plink4r_geno_haplotype_cpp(SEXP pathSEXP, SEXP n_totalSEXP, SEXP allele_ctSEXP, SEXP variantsSEXP, SEXP samplesSEXP, SEXP threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const std::string& >::type path(pathSEXP);
+    Rcpp::traits::input_parameter< int >::type n_total(n_totalSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type allele_ct(allele_ctSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type variants(variantsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type samples(samplesSEXP);
+    Rcpp::traits::input_parameter< int >::type threads(threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(geno_haplotype_cpp(path, n_total, allele_ct, variants, samples, threads));
+    return rcpp_result_gen;
+END_RCPP
+}
 // reml_tau_binomial_cpp
 Rcpp::List reml_tau_binomial_cpp(const Rcpp::NumericVector& y, const Rcpp::NumericMatrix& X, const Rcpp::IntegerVector& ki, const Rcpp::IntegerVector& kj, const Rcpp::NumericVector& kv, double kdiag, double h_max, double tol, int max_iter, int max_eval, double mu_eps, int start_iter, double h_window, double f_tol, double rank_tol, bool proj);
 RcppExport SEXP _plink4r_reml_tau_binomial_cpp(SEXP ySEXP, SEXP XSEXP, SEXP kiSEXP, SEXP kjSEXP, SEXP kvSEXP, SEXP kdiagSEXP, SEXP h_maxSEXP, SEXP tolSEXP, SEXP max_iterSEXP, SEXP max_evalSEXP, SEXP mu_epsSEXP, SEXP start_iterSEXP, SEXP h_windowSEXP, SEXP f_tolSEXP, SEXP rank_tolSEXP, SEXP projSEXP) {
@@ -556,6 +572,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_plink4r_genotype_fill_ld_cpp", (DL_FUNC) &_plink4r_genotype_fill_ld_cpp, 14},
     {"_plink4r_gwas_kin_stream_cpp", (DL_FUNC) &_plink4r_gwas_kin_stream_cpp, 11},
     {"_plink4r_gxe_kin_stream_cpp", (DL_FUNC) &_plink4r_gxe_kin_stream_cpp, 12},
+    {"_plink4r_geno_haplotype_cpp", (DL_FUNC) &_plink4r_geno_haplotype_cpp, 6},
     {"_plink4r_reml_tau_binomial_cpp", (DL_FUNC) &_plink4r_reml_tau_binomial_cpp, 16},
     {"_plink4r_reml_tau_cox_cpp", (DL_FUNC) &_plink4r_reml_tau_cox_cpp, 15},
     {"_plink4r_reml_tau_gaussian_cpp", (DL_FUNC) &_plink4r_reml_tau_gaussian_cpp, 11},
