@@ -137,12 +137,15 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #'   a0 = -1, b0 = 0 is the flat prior (with no annotation column this is [viprs()]).
 #' @param fix_sigma2 TRUE keeps sigma2_k at the start (no M-step; a diagnostic with the true values as `sigma2_init`,
 #'   `start_scale = 1`, `start_total_min = 0`).
+#' @param mstep update of sigma2_k: "moment" (above) or "elbo" (the stationarity condition of the ELBO in sigma2,
+#'   sum_j A_jk (pi zeta_j / h2_j^2 - gamma_j / h2_j) = 0, by multiplicative MM steps; no Inverse-Gamma prior).
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
                                 cutoffs = c(0.995, 0.999), rel_r_min = 1.25, cut_pi = 0.01, pi_by = c("elbo", "pseudo_r"),
                                 start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
-                                gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0, fix_sigma2 = FALSE) {
+                                gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0, fix_sigma2 = FALSE,
+                                mstep = c("moment", "elbo")) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
                              rel_r_min = as.numeric(rel_r_min), cut_pi = as.numeric(cut_pi), pi_by = match.arg(pi_by),
@@ -150,7 +153,7 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                              start_zero_share = as.numeric(start_zero_share), start_total_min = as.numeric(start_total_min),
                              gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
-                             a0 = as.numeric(a0), b0 = as.numeric(b0), fix_sigma2 = isTRUE(fix_sigma2)))
+                             a0 = as.numeric(a0), b0 = as.numeric(b0), fix_sigma2 = isTRUE(fix_sigma2), mstep = match.arg(mstep)))
 }
 
 # sigma2_k of the first grid point (intercept first, then cols), or numeric(0) for the LDSC start

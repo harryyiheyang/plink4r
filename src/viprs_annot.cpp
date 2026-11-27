@@ -57,7 +57,7 @@ struct ViprsControl {
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
-  bool pi_by_elbo, fix_sigma2;  // fix_sigma2: sigma2_k kept at the start (diagnostic: no M-step)  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
+  bool pi_by_elbo, fix_sigma2, mstep_elbo;  // mstep_elbo: sigma2_k by the ELBO (MM) instead of the moment form  // fix_sigma2: sigma2_k kept at the start (diagnostic: no M-step)  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
   double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
   std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
@@ -103,6 +103,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
   x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
   x.fix_sigma2 = Rcpp::as<bool>(c["fix_sigma2"]);
+  x.mstep_elbo = Rcpp::as<std::string>(c["mstep"]) == "elbo";
   x.start_scale = Rcpp::as<double>(c["start_scale"]);
   x.start_zero_share = Rcpp::as<double>(c["start_zero_share"]);
   x.start_total_min = Rcpp::as<double>(c["start_total_min"]);
@@ -334,6 +335,41 @@ struct VarModel {
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
+  // ELBO form: the sigma2-dependent part of the ELBO, -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j) over the SNPs
+  // not suppressed, raised by the multiplicative MM step
+  // sigma2_k <- sigma2_k sum_j A_jk pi zeta_j / h2_j^2 / sum_j A_jk gamma_j / h2_j (fixed point: the stationarity condition),
+  // `inner` steps with h2_j recomputed; the Inverse-Gamma prior is not used here.
+  template <typename G>
+  void mstep_elbo(const double* zeta, const G* gamma, int inner = 5) {
+    for (int it = 0; it < inner; ++it) {
+      std::vector<double> NU(2 * K, 0.);
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#endif
+      {
+        std::vector<double> loc(2 * K, 0.);
+#ifdef _OPENMP
+#pragma omp for nowait
+#endif
+        for (int64_t j = 0; j < M; ++j) {
+          if (sup[j]) continue;
+          const double h = h2[j], u = pi * zeta[j] / (h * h), v = (double)gamma[j] / h;
+          const double* r = row(j);
+          for (int k = 0; k < K; ++k) {
+            const double a = k ? r[k - 1] : 1.;
+            if (a == 0.) continue;
+            loc[k] += a * u; loc[K + k] += a * v;
+          }
+        }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
+      }
+      for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= NU[k] / NU[K + k];
+      set_all();
+    }
+  }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
   // (start_zero_share) of h0; then all scaled up so that sum_j h2_j is at least total_min (start_total_min) times h0.
@@ -484,7 +520,9 @@ struct Fitter {
       stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
-      if (!c.fix_sigma2) vm.mstep(zeta.data(), c.a0, c.b0);
+      if (!c.fix_sigma2) {
+        if (c.mstep_elbo) vm.mstep_elbo(zeta.data(), st.gamma.data()); else vm.mstep(zeta.data(), c.a0, c.b0);
+      }
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
 #ifdef _OPENMP
