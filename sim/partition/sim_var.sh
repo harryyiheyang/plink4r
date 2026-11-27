@@ -12,9 +12,10 @@
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 # CASE (env): main (default; methods V A1 AM AMV AML, directory var_<design>_s<seed>), noskip (AM without the LD-bin
 # suppression, noskip_<design>_s<seed>), truecols (AM given only the annotation columns of the design,
-# truecols_<design>_s<seed>). GIBBS_DRAWS (env, default 300) and PI_BY (env, default elbo) are passed on to run_var.R.
+# truecols_<design>_s<seed>). GIBBS_DRAWS (env, default 300), PI_BY (env, default elbo;
+# pseudo_r: directory <dir>_pr) and GRID_EXTEND (env, default 4) are passed on to run_var.R.
 # Submit: sbatch sim_var.sh;
-# CASE=noskip sbatch sim_var.sh; CASE=truecols GIBBS_DRAWS=500 sbatch sim_var.sh
+# CASE=noskip sbatch sim_var.sh; CASE=truecols PI_BY=pseudo_r sbatch sim_var.sh
 # Shared across tasks and cases (made once: the ref table and LD bins under a lock, annot.tsv and snps.tsv renamed
 # into place): ref_1-100.tsv, ldbin0.98_1-100.bin, annot.tsv, snps.tsv.
 # Each directory keeps only gen.txt, run.txt and eval.txt; a rerun overwrites.
@@ -43,6 +44,7 @@ case $CASE in
   truecols) D=truecols_${d}_s$seed; M=AM; X=(COLS="${COL[$d]}") ;;
   *) echo "unknown CASE $CASE"; exit 1 ;;
 esac
+[ "${PI_BY:-elbo}" = pseudo_r ] && D=${D}_pr   # pi chosen by pseudo r: its own directory
 BINS=ldbin0.98_1-100.bin
 rm -rf $D; mkdir -p $D
 flock shared.lock bash -c "[ -f ref_1-100.tsv ] || python3 make_ref.py $LD 1-100 ref_1-100.tsv"
