@@ -60,7 +60,7 @@ struct ViprsControl {
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
   bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
   bool fix_sigma2;  // sigma2_k kept at the start (diagnostic: no M-step)
-  int select;       // annotation selection on sigma2_k (k >= 1): 0 none, 1 SSL, 2 MASH atoms
+  int select;       // annotation selection on sigma2_k (k >= 1): 1 SSL, 2 MASH atoms
   std::vector<double> mash_grid, mash_w;  // MASH: sigma2_k in mash_grid * b with prior weights mash_w
   double ssl_ratio, ssl_gs, ssl_gr, ssl_ba, ssl_bb;  // lambda0 = ratio lambda1; Gamma(gs, gr) of lambda1; Beta(ba, bb) of theta
   double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
@@ -103,7 +103,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
   x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
   x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
-  { const std::string sl = Rcpp::as<std::string>(c["select"]); x.select = sl == "ssl" ? 1 : sl == "mash" ? 2 : 0; }
+  { const std::string sl = Rcpp::as<std::string>(c["select"]); x.select = sl == "mash" ? 2 : 1; }
   x.mash_grid = Rcpp::as<std::vector<double>>(c["mash_grid"]); x.mash_w = Rcpp::as<std::vector<double>>(c["mash_w"]);
   if (x.mash_grid.size() != x.mash_w.size() || x.mash_grid.empty()) Rcpp::stop("mash_grid and mash_w must have the same length");
   { const std::vector<double> g = Rcpp::as<std::vector<double>>(c["ssl_gamma"]), b = Rcpp::as<std::vector<double>>(c["ssl_beta"]);
@@ -311,7 +311,7 @@ struct VarModel {
   int threads;
   // SSL on s_k = sigma2_k / sb (k >= 1): prior theta Exp(lambda1) + (1 - theta) Exp(lambda0), lambda0 = ratio lambda1;
   // sb the per-SNP scale (the LDSC h2 over the SNPs not suppressed, set at the start); lambda1 and theta by EB
-  int sel = 0;
+  int sel = 1;
   double sb = 0, l1 = 0.5, th = 0.5, ratio = 10, gs = 2, gr = 1, ba = 1, bb = 1;
   double pstar(double s_) const {  // posterior probability of the slab (large-variance) part for s_k = s_
     const double l0 = ratio * l1, a = th * l1 * std::exp(-l1 * s_), b = (1 - th) * l0 * std::exp(-l0 * s_);
@@ -463,7 +463,7 @@ struct VarModel {
       }
       for (int k = 0; k < K; ++k) {
         if (!(NU[K + k] > 0)) continue;
-        if (sel == 1 && k > 0) {
+        if (k > 0) {
           // SSL: penalized MM step s <- s sqrt(N / (D + 2 lambda* / sb)); a column at 0 is revived only when the
           // KKT condition fails at 0 (sb (N - D) > 2 lambda*(0), N and D at sigma2_k = 0)
           const double ls = lstar(par[k] / sb);
@@ -473,7 +473,7 @@ struct VarModel {
             par[k] *= std::sqrt(NU[k] / (NU[K + k] + 2 * ls / sb));
             if (par[k] < 1e-8 * sb) par[k] = 0.;
           }
-        } else {
+        } else {  // the intercept: unpenalized MM step
           par[k] *= std::sqrt(NU[k] / NU[K + k]);
         }
       }

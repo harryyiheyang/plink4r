@@ -140,7 +140,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #'   VI refit as the final fit.
 #' @param fix_sigma2 TRUE keeps sigma2_k at the start (no M-step; a diagnostic with the true values as `sigma2_init`,
 #'   `start_scale = 1`, `start_total_min = 0`).
-#' @param select annotation selection on sigma2_k (not the intercept): "none" or "ssl", the spike-and-slab lasso on
+#' @param select annotation selection on sigma2_k (not the intercept): "ssl" (default), the spike-and-slab lasso on
 #'   s_k = sigma2_k / b (b = LDSC h2 / SNPs not suppressed): prior theta Exp(lambda1) + (1 - theta) Exp(lambda0),
 #'   lambda0 = `ssl_ratio` lambda1; M-step s_k <- s_k sqrt(N_k / (D_k + 2 lambda*_k / b)), lambda*_k =
 #'   p*_k lambda1 + (1 - p*_k) lambda0, p*_k the posterior slab probability of s_k; exact zeros by the KKT condition
@@ -159,7 +159,7 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                                 cutoffs = c(0.995, 0.999), rel_r_min = 1.25, cut_pi = 0.01, pi_by = c("elbo", "pseudo_r"),
                                 start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
                                 gibbs_burn = 100L, gibbs_draws = 300L, fix_sigma2 = FALSE,
-                                select = c("none", "ssl", "mash"), ssl_ratio = 10, ssl_gamma = c(2, 1), ssl_beta = c(1, 1),
+                                select = c("ssl", "mash"), ssl_ratio = 10, ssl_gamma = c(2, 1), ssl_beta = c(1, 1),
                                 mash_grid = c(0, 1, 10, 100), mash_w = c(0.5, 0.3, 0.1, 0.1)) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),

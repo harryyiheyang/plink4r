@@ -8,7 +8,7 @@
 # env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit of A1, AM, AML; default 300),
 #      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 0.995,0.999),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
-#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), SELECT (annotation selection: none, ssl or mash), COLS (annotation columns given to the model, comma or +
+#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), SELECT (annotation selection: ssl (default) or mash), COLS (annotation columns given to the model, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
@@ -50,7 +50,7 @@ if ("AML" %in% meth) {
   cat("ldsc_strat", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "s\n")
 }
 gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300")); pb <- Sys.getenv("PI_BY", "elbo")
-ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000")); sl <- Sys.getenv("SELECT", "none")
+ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000")); sl <- Sys.getenv("SELECT", "ssl")
 co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else c(0.995, 0.999)
 fit <- function(k) switch(k,
   V = viprs(ss, a[1], ref = rf, threads = 4),
