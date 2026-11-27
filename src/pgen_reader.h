@@ -1,14 +1,17 @@
-// PGEN reader on the bundled pgenlib (read side), one PgenReader per thread: packed 2-bit genovecs
-// (read), for files whose header flags dosages 1/16384 fixed-point ALT dosages of every sample (read_dosage), and
-// the file's own sparse form over a sample subset that pgenlib takes word by word (set_samples, read_sparse).
-// Hard calls with their phase (read_phased): the genovec, the heterozygotes whose phase the file holds and which
-// haplotype of each carries ALT.
+// PGEN reader on the bundled pgenlib (read side), one PgenReader per thread. A variant is read as (file line, ALT):
+// the count of the ALT-th ALT allele of that line. A line with one ALT allele is read as pgenlib reads a biallelic
+// variant (PgrGet, PgrGetD, PgrGetP); a line with several is read by allele (PgrGet1, PgrGet1D), a sample that
+// carries another ALT of the line counting 0, and its two haplotypes from the allele codes of the line (PgrGetMP).
+// What is read: packed 2-bit genovecs (read), for files whose header flags dosages 1/16384 fixed-point dosages of
+// every sample (read_dosage), the file's own sparse form over a sample subset that pgenlib takes word by word
+// (set_samples, read_sparse), and the allele on each of the two haplotypes of every sample (read_haplotypes).
 // The one PgenFile of the package (geno objects, the association scans and the haplotypes).
 // compact_genovec / count_codes: the sample subset of a genovec, and the calls of each code.
 #ifndef PLINK4R_PGEN_READER_H
 #define PLINK4R_PGEN_READER_H
 
 #include <Rcpp.h>
+#include <atomic>
 #include <fstream>
 #include <memory>
 #ifdef _OPENMP
@@ -68,35 +71,41 @@ struct PgenHeader {
   }
 };
 
+// A block for pgenlib (cacheline-aligned), freed with its owner.
+struct AlignedBlock {
+  unsigned char* p = nullptr;
+  AlignedBlock() = default;
+  AlignedBlock(const AlignedBlock&) = delete;
+  AlignedBlock& operator=(const AlignedBlock&) = delete;
+  ~AlignedBlock() { if (p) plink2::aligned_free(p); }
+  bool take(uintptr_t bytes) { return !plink2::cachealigned_malloc(std::max<uintptr_t>(bytes, 1), &p); }
+  uintptr_t* words() const { return reinterpret_cast<uintptr_t*>(p); }
+};
+
 struct ThreadReader {
   plink2::PgenReader pgr;
   plink2::PgrSampleSubsetIndex pssi;
-  unsigned char* alloc = nullptr;
-  unsigned char* genovec = nullptr;
-  unsigned char* dosage_present = nullptr;
-  unsigned char* dosage_main = nullptr;
-  unsigned char* phasepresent = nullptr;
-  unsigned char* phaseinfo = nullptr;
+  AlignedBlock alloc, genovec, dosage_present, dosage_main;
   std::vector<std::uint16_t> full;
+  // haplotypes (read_haplotypes): phase and the allele codes of a line with several ALT alleles as pgenlib gives
+  // them, and the line they were last decoded for into h1, h2 (allele on each haplotype), state
+  AlignedBlock phasepresent, phaseinfo, patch_01_set, patch_01_vals, patch_10_set, patch_10_vals;
+  std::vector<unsigned char> h1, h2, state;
+  long long hap_line = -1;
   ThreadReader() { plink2::PreinitPgr(&pgr); }
   ThreadReader(const ThreadReader&) = delete;
   ThreadReader& operator=(const ThreadReader&) = delete;
   ~ThreadReader() {
     plink2::PglErr e = plink2::kPglRetSuccess;
     plink2::CleanupPgr(&pgr, &e);
-    if (alloc) plink2::aligned_free(alloc);
-    if (genovec) plink2::aligned_free(genovec);
-    if (dosage_present) plink2::aligned_free(dosage_present);
-    if (dosage_main) plink2::aligned_free(dosage_main);
-    if (phasepresent) plink2::aligned_free(phasepresent);
-    if (phaseinfo) plink2::aligned_free(phaseinfo);
   }
 };
 
 class PgenFile {
 public:
+  // allele_ct: the number of alleles of every file line, as its .pvar names them.
   PgenFile(const std::string& path, std::size_t n, const std::vector<int>& allele_ct, int threads)
-    : path_(path) {
+    : path_(path), allele_ct_(allele_ct) {
     plink2::PgenFileInfo& info = header_.info;
     char err[plink2::kPglErrstrBufBlen];
     err[0] = '\0';
@@ -140,56 +149,30 @@ public:
       readers_.emplace_back(new ThreadReader);
       ThreadReader& r = *readers_.back();
       plink2::PgrSetFreadBuf(nullptr, &r.pgr);
-      if (plink2::cachealigned_malloc(std::max<uintptr_t>(pgr_cachelines, 1) * plink2::kCacheline, &r.alloc) ||
-          plink2::cachealigned_malloc(genovec_bytes_, &r.genovec) ||
-          (dosage_ && (plink2::cachealigned_malloc(present_bytes, &r.dosage_present) ||
-                       plink2::cachealigned_malloc(main_bytes, &r.dosage_main))))
+      if (!r.alloc.take(std::max<uintptr_t>(pgr_cachelines, 1) * plink2::kCacheline) || !r.genovec.take(genovec_bytes_) ||
+          (dosage_ && (!r.dosage_present.take(present_bytes) || !r.dosage_main.take(main_bytes))))
         Rcpp::stop("Out of memory opening PGEN: " + path);
       if (dosage_) r.full.resize(n);
-      if (plink2::PgrInit(path.c_str(), max_vrec_width, &info, &r.pgr, r.alloc) != plink2::kPglRetSuccess)
+      if (plink2::PgrInit(path.c_str(), max_vrec_width, &info, &r.pgr, r.alloc.p) != plink2::kPglRetSuccess)
         Rcpp::stop("Could not open PGEN reader: " + path);
       plink2::PgrClearSampleSubsetIndex(&r.pgr, &r.pssi);
     }
   }
   std::size_t samples() const { return header_.info.raw_sample_ct; }
-  // Packed 2-bit genovec (all samples, file order); codes 0/1/2 = ALT count, 3 = missing.
-  const unsigned char* read(std::size_t variant, int thread) {
+  // Whether file line `line` names several ALT alleles.
+  bool several(std::size_t line) const { return allele_ct_[line] > 2; }
+
+  // Packed 2-bit genovec of (line, alt) (all samples, file order); codes 0/1/2 = count of that ALT, 3 = missing.
+  const unsigned char* read(std::size_t line, int alt, int thread) {
     ThreadReader& r = *readers_[thread];
-    if (plink2::PgrGet(nullptr, r.pssi, static_cast<uint32_t>(samples()), static_cast<uint32_t>(variant),
-                       &r.pgr, reinterpret_cast<uintptr_t*>(r.genovec)) != plink2::kPglRetSuccess)
-      return nullptr;
-    return r.genovec;
+    const uint32_t n = static_cast<uint32_t>(samples()), v = static_cast<uint32_t>(line);
+    const plink2::PglErr e = several(line)
+        ? plink2::PgrGet1(nullptr, r.pssi, n, v, static_cast<uint32_t>(alt), &r.pgr, r.genovec.words())
+        : plink2::PgrGet(nullptr, r.pssi, n, v, &r.pgr, r.genovec.words());
+    return e == plink2::kPglRetSuccess ? r.genovec.p : nullptr;
   }
 
   bool dosage() const { return dosage_; }
-
-  // One variant with its phase, all samples in file order: genovec (codes 0/1/2 = ALT count, 3 = missing; a
-  // multiallelic variant counts every non-REF allele), present = the bit of each heterozygote whose phase the
-  // file holds (present_ct of them), info = for those, bit set: ALT on the first haplotype (1|0), clear: on the
-  // second (0|1). The bits of info outside present mean nothing. False on a read error.
-  struct Phased {
-    const std::uint64_t* genovec = nullptr;
-    const std::uint64_t* present = nullptr;
-    const std::uint64_t* info = nullptr;
-    uint32_t present_ct = 0;
-  };
-  bool read_phased(std::size_t variant, int thread, Phased& out) {
-    ThreadReader& r = *readers_[thread];
-    if (!r.phasepresent) {
-      const uintptr_t bytes = plink2::BitCtToVecCt(samples()) * plink2::kBytesPerVec;
-      if (plink2::cachealigned_malloc(bytes, &r.phasepresent) || plink2::cachealigned_malloc(bytes, &r.phaseinfo))
-        return false;
-    }
-    out.present_ct = 0;
-    if (plink2::PgrGetP(nullptr, r.pssi, static_cast<uint32_t>(samples()), static_cast<uint32_t>(variant), &r.pgr,
-                        reinterpret_cast<uintptr_t*>(r.genovec), reinterpret_cast<uintptr_t*>(r.phasepresent),
-                        reinterpret_cast<uintptr_t*>(r.phaseinfo), &out.present_ct) != plink2::kPglRetSuccess)
-      return false;
-    out.genovec = reinterpret_cast<const std::uint64_t*>(r.genovec);
-    out.present = reinterpret_cast<const std::uint64_t*>(r.phasepresent);
-    out.info = reinterpret_cast<const std::uint64_t*>(r.phaseinfo);
-    return true;
-  }
 
   // The samples read_sparse() returns: rows (0-based .psam rows, ascending, distinct); empty or every row keeps
   // all samples. pgenlib subsets the genovec and the dosages word by word.
@@ -210,52 +193,42 @@ public:
     for (auto& r : readers_) plink2::PgrSetSampleSubsetIndex(cumpop_.data(), &r->pgr, &r->pssi);
   }
 
-  // One variant over the samples of set_samples() in the file's sparse form: genovec (codes 0/1/2 = ALT count,
-  // 3 = missing, 32 samples per word) and, for a dosage file, the bit of each sample with an explicit dosage
+  // (line, alt) over the samples of set_samples() in the file's sparse form: genovec (codes 0/1/2 = count of that
+  // ALT, 3 = missing, 32 samples per word) and, for a dosage file, the bit of each sample with an explicit dosage
   // (present) and those dosages in sample order (main, 1/16384 steps; dosage_ct of them). An explicit dosage
-  // overrides the sample's genovec code. False on a read error.
+  // overrides the sample's genovec code. False on a read error (failure() says which).
   struct Sparse {
     const std::uint64_t* genovec = nullptr;
     const std::uint64_t* present = nullptr;
     const std::uint16_t* main = nullptr;
     uint32_t dosage_ct = 0;
   };
-  bool read_sparse(std::size_t variant, int thread, Sparse& out) {
+  bool read_sparse(std::size_t line, int alt, int thread, Sparse& out) {
     ThreadReader& r = *readers_[thread];
     const uintptr_t* inc = include_.empty() ? nullptr : include_.data();
     const uint32_t n = sample_ct_ ? sample_ct_ : static_cast<uint32_t>(samples());
     out.dosage_ct = 0;
-    if (dosage_) {
-      if (plink2::PgrGetD(inc, r.pssi, n, static_cast<uint32_t>(variant), &r.pgr,
-                          reinterpret_cast<uintptr_t*>(r.genovec), reinterpret_cast<uintptr_t*>(r.dosage_present),
-                          reinterpret_cast<std::uint16_t*>(r.dosage_main), &out.dosage_ct) != plink2::kPglRetSuccess)
-        return false;
-    } else if (plink2::PgrGet(inc, r.pssi, n, static_cast<uint32_t>(variant), &r.pgr,
-                              reinterpret_cast<uintptr_t*>(r.genovec)) != plink2::kPglRetSuccess) {
-      return false;
-    }
-    out.genovec = reinterpret_cast<const std::uint64_t*>(r.genovec);
-    out.present = reinterpret_cast<const std::uint64_t*>(r.dosage_present);
-    out.main = reinterpret_cast<const std::uint16_t*>(r.dosage_main);
+    if (!get(r, inc, n, line, alt, &out.dosage_ct)) return false;
+    out.genovec = reinterpret_cast<const std::uint64_t*>(r.genovec.p);
+    out.present = reinterpret_cast<const std::uint64_t*>(r.dosage_present.p);
+    out.main = reinterpret_cast<const std::uint16_t*>(r.dosage_main.p);
     return true;
   }
-  // ALT dosage of every sample (file order) in 1/16384 units (0..32768), kMissing for a missing call;
-  // explicit dosages override hardcalls (adapted from SuSiE4I pgen_file.h).
+  // Dosage of the ALT of (line, alt) of every sample (file order) in 1/16384 units (0..32768), kMissing for a
+  // missing call; explicit dosages override hardcalls (adapted from SuSiE4I pgen_file.h).
   static constexpr std::uint16_t kMissing = 65535;
-  const std::uint16_t* read_dosage(std::size_t variant, int thread) {
+  const std::uint16_t* read_dosage(std::size_t line, int alt, int thread) {
     ThreadReader& r = *readers_[thread];
     const uint32_t n = static_cast<uint32_t>(samples());
     uint32_t dosage_ct = 0;
-    if (plink2::PgrGetD(nullptr, r.pssi, n, static_cast<uint32_t>(variant), &r.pgr,
-                        reinterpret_cast<uintptr_t*>(r.genovec), reinterpret_cast<uintptr_t*>(r.dosage_present),
-                        reinterpret_cast<std::uint16_t*>(r.dosage_main), &dosage_ct) != plink2::kPglRetSuccess)
-      return nullptr;
+    if (!get(r, nullptr, n, line, alt, &dosage_ct)) return nullptr;
     static const std::uint16_t code_dosage[4] = {0, 16384, 32768, kMissing};
     std::uint16_t* full = r.full.data();
-    for (uint32_t i = 0; i < n; ++i) full[i] = code_dosage[(r.genovec[i >> 2] >> (2 * (i & 3u))) & 3u];
+    const unsigned char* gv = r.genovec.p;
+    for (uint32_t i = 0; i < n; ++i) full[i] = code_dosage[(gv[i >> 2] >> (2 * (i & 3u))) & 3u];
     if (dosage_ct) {
-      const std::uint64_t* present = reinterpret_cast<const std::uint64_t*>(r.dosage_present);
-      const std::uint16_t* main = reinterpret_cast<const std::uint16_t*>(r.dosage_main);
+      const std::uint64_t* present = reinterpret_cast<const std::uint64_t*>(r.dosage_present.p);
+      const std::uint16_t* main = reinterpret_cast<const std::uint16_t*>(r.dosage_main.p);
       uint32_t k = 0;
       for (uint32_t w = 0; w < (n + 63) / 64 && k < dosage_ct; ++w)
         for (std::uint64_t bits = present[w]; bits && k < dosage_ct; bits &= bits - 1)
@@ -264,7 +237,103 @@ public:
     return full;
   }
 
+  // The allele on each of the two haplotypes of every sample at file line `line` (all samples, file order): h1 and
+  // h2 hold allele codes (0 = REF, k = the k-th ALT of the line; a homozygote the same code twice), state says what
+  // is known: kPhased (h1 is the first haplotype, h2 the second, as the file phases them; every homozygote),
+  // kUnphased (a heterozygote whose phase the file does not hold: h1 < h2 are its two alleles, on which haplotype
+  // each is unknown) or kNoCall (missing call). A thread keeps the line it decoded last, so the ALT alleles of one
+  // line are served by one read. False on a read error.
+  enum : unsigned char { kPhased = 0, kUnphased = 1, kNoCall = 2 };
+  struct Haplotypes {
+    const unsigned char* h1 = nullptr;
+    const unsigned char* h2 = nullptr;
+    const unsigned char* state = nullptr;
+  };
+  bool read_haplotypes(std::size_t line, int thread, Haplotypes& out) {
+    ThreadReader& r = *readers_[thread];
+    const uint32_t n = static_cast<uint32_t>(samples());
+    out.h1 = r.h1.data(); out.h2 = r.h2.data(); out.state = r.state.data();
+    if (r.hap_line == static_cast<long long>(line)) return true;
+    if (r.h1.empty()) {
+      const uintptr_t bits = plink2::BitCtToVecCt(n) * plink2::kBytesPerVec;
+      const uintptr_t codes = (2 * static_cast<uintptr_t>(n) / plink2::kBytesPerVec + 2) * plink2::kBytesPerVec;
+      if (!r.phasepresent.take(bits) || !r.phaseinfo.take(bits) || !r.patch_01_set.take(bits) ||
+          !r.patch_10_set.take(bits) || !r.patch_01_vals.take(codes) || !r.patch_10_vals.take(codes))
+        return false;
+      r.h1.resize(n); r.h2.resize(n); r.state.resize(n);
+      out.h1 = r.h1.data(); out.h2 = r.h2.data(); out.state = r.state.data();
+    }
+    r.hap_line = -1;
+    plink2::PgenVariant pv;
+    plink2::PreinitPgv(&pv);
+    pv.genovec = r.genovec.words();
+    pv.phasepresent = r.phasepresent.words(); pv.phaseinfo = r.phaseinfo.words();
+    pv.patch_01_set = r.patch_01_set.words(); pv.patch_01_vals = r.patch_01_vals.p;
+    pv.patch_10_set = r.patch_10_set.words(); pv.patch_10_vals = r.patch_10_vals.p;
+    pv.patch_01_ct = pv.patch_10_ct = pv.phasepresent_ct = 0;
+    const uint32_t v = static_cast<uint32_t>(line);
+    const plink2::PglErr e = several(line)
+        ? plink2::PgrGetMP(nullptr, r.pssi, n, v, &r.pgr, &pv)
+        : plink2::PgrGetP(nullptr, r.pssi, n, v, &r.pgr, pv.genovec, pv.phasepresent, pv.phaseinfo, &pv.phasepresent_ct);
+    if (e != plink2::kPglRetSuccess) return false;
+    const std::uint64_t* present = reinterpret_cast<const std::uint64_t*>(r.phasepresent.p);
+    const std::uint64_t* info = reinterpret_cast<const std::uint64_t*>(r.phaseinfo.p);
+    const std::uint64_t* set01 = reinterpret_cast<const std::uint64_t*>(r.patch_01_set.p);
+    const std::uint64_t* set10 = reinterpret_cast<const std::uint64_t*>(r.patch_10_set.p);
+    const unsigned char* gv = r.genovec.p;
+    unsigned char* h1 = r.h1.data(); unsigned char* h2 = r.h2.data(); unsigned char* st = r.state.data();
+    uint32_t k01 = 0, k10 = 0;  // the patches come in sample order
+    for (uint32_t i = 0; i < n; ++i) {
+      const unsigned code = (gv[i >> 2] >> (2 * (i & 3u))) & 3u;
+      if (code == 3) { h1[i] = h2[i] = 0; st[i] = kNoCall; continue; }
+      unsigned char lo = 0, hi = 0;  // the two alleles, lo <= hi
+      if (code == 1) {
+        hi = 1;
+        if (pv.patch_01_ct && ((set01[i >> 6] >> (i & 63u)) & 1u)) hi = pv.patch_01_vals[k01++];
+      } else if (code == 2) {
+        lo = hi = 1;
+        if (pv.patch_10_ct && ((set10[i >> 6] >> (i & 63u)) & 1u)) {
+          lo = pv.patch_10_vals[2 * k10]; hi = pv.patch_10_vals[2 * k10 + 1]; ++k10;
+        }
+      }
+      if (lo == hi) { h1[i] = h2[i] = lo; st[i] = kPhased; continue; }
+      if (pv.phasepresent_ct && ((present[i >> 6] >> (i & 63u)) & 1u)) {
+        // the phase bit of a heterozygote: set = the allele of the higher code is on the first haplotype (1|0)
+        const bool first_hi = ((info[i >> 6] >> (i & 63u)) & 1u) != 0;
+        h1[i] = first_hi ? hi : lo; h2[i] = first_hi ? lo : hi; st[i] = kPhased;
+      } else { h1[i] = lo; h2[i] = hi; st[i] = kUnphased; }
+    }
+    r.hap_line = static_cast<long long>(line);
+    return true;
+  }
+
+  // What to say of a read that failed at file line `line` (0-based).
+  std::string failure(std::size_t line) const {
+    if (unsupported_.load())
+      return "Line " + std::to_string(line + 1) + " of the variants of " + path_ + " names several ALT alleles and " +
+             "its record holds dosages: pgenlib does not read such a record allele by allele.";
+    return "Genotype read failed at line " + std::to_string(line + 1) + " of the variants of " + path_;
+  }
+
 private:
+  // The hard calls of (line, alt) into the genovec of r and, for a dosage file, its explicit dosages into the
+  // dosage buffers of r (*dosage_ct of them); inc, n: the sample subset (null: all n samples).
+  bool get(ThreadReader& r, const uintptr_t* inc, uint32_t n, std::size_t line, int alt, uint32_t* dosage_ct) {
+    const uint32_t v = static_cast<uint32_t>(line);
+    plink2::PglErr e;
+    if (!several(line)) {
+      e = dosage_ ? plink2::PgrGetD(inc, r.pssi, n, v, &r.pgr, r.genovec.words(), r.dosage_present.words(),
+                                    reinterpret_cast<std::uint16_t*>(r.dosage_main.p), dosage_ct)
+                  : plink2::PgrGet(inc, r.pssi, n, v, &r.pgr, r.genovec.words());
+    } else if (dosage_) {
+      e = plink2::PgrGet1D(inc, r.pssi, n, v, static_cast<plink2::AlleleCode>(alt), &r.pgr, r.genovec.words(),
+                           r.dosage_present.words(), reinterpret_cast<std::uint16_t*>(r.dosage_main.p), dosage_ct);
+      if (e == plink2::kPglRetNotYetSupported) unsupported_.store(true);
+    } else {
+      e = plink2::PgrGet1(inc, r.pssi, n, v, static_cast<uint32_t>(alt), &r.pgr, r.genovec.words());
+    }
+    return e == plink2::kPglRetSuccess;
+  }
   [[noreturn]] void fail(const char* err) const {
     std::string msg(err);
     if (msg.compare(0, 7, "Error: ") == 0) msg.erase(0, 7);
@@ -276,6 +345,8 @@ private:
   std::vector<uintptr_t> include_;
   std::vector<uint32_t> cumpop_;
   std::string path_;
+  std::vector<int> allele_ct_;
+  std::atomic<bool> unsupported_{false};
   uintptr_t genovec_bytes_ = 0;
   PgenHeader header_;
   std::vector<std::unique_ptr<ThreadReader>> readers_;

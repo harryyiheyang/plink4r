@@ -29,6 +29,7 @@
 #include "anchor_fill.h"
 #include "geno_kernel.h"
 #include "geno_access.h"
+#include "geno_table.h"
 #include "pgen_reader.h"
 #include "resources.h"
 #include "la_dispatch.h"
@@ -590,11 +591,16 @@ void add_d_cross(const Geno& a, const Geno& b, double* out, int threads) {
 
 } // namespace
 
+// file: the genotype file as opened (geno_table.h), a BED; variants: 0-based variants of its table, the columns
+// wanted; samples: 0-based file rows, the rows wanted.
 // [[Rcpp::export]]
-SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
-                       const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads) {
+SEXP geno_open_bed_cpp(SEXP file, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
+                       int threads) {
   threads = resolve_threads(threads);
-  plink4r::BedFile bf(path, static_cast<std::size_t>(n_total), static_cast<std::size_t>(m_total), 1);
+  const plink4r::GenoTable& gt = plink4r::geno_table(file);
+  const std::string& path = gt.path;
+  const int n_total = static_cast<int>(gt.samples.size());
+  plink4r::BedFile bf(path, gt.samples.size(), gt.variants.lines(), 1);
   const std::size_t stride = bf.stride();
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
@@ -606,7 +612,7 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
     for (std::size_t k = 0; k < count; ++k) {
-      const unsigned char* row = bf.read(static_cast<std::size_t>(variants[g0 + k]), 0);
+      const unsigned char* row = bf.read(static_cast<std::size_t>(gt.variants.line[variants[g0 + k]]), 0);
       if (!row) Rcpp::stop("Could not read BED file: " + path);
       std::memcpy(buffer.data() + k * stride, row, stride);
     }
@@ -626,19 +632,19 @@ SEXP geno_open_bed_cpp(const std::string& path, int n_total, int m_total,
   return g;
 }
 
+// file: the genotype file as opened (geno_table.h), a PGEN; variants: 0-based variants of its table, the columns
+// wanted (each the count of one ALT allele of its line); samples: 0-based file rows, the rows wanted.
 // Samples in ascending order are subset by pgenlib (word by word, dosages included) and encoded straight from the
 // file's sparse form; any other order reads all samples and gathers the requested ones.
 // [[Rcpp::export]]
-SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::IntegerVector& allele_ct,
-                        const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples, int threads) {
+SEXP geno_open_pgen_cpp(SEXP file_table, const Rcpp::IntegerVector& variants, const Rcpp::IntegerVector& samples,
+                        int threads) {
   threads = resolve_threads(threads);
-  PgenFile file(path, static_cast<std::size_t>(n_total), std::vector<int>(allele_ct.begin(), allele_ct.end()), threads);
+  const plink4r::GenoTable& gt = plink4r::geno_table(file_table);
+  const std::string& path = gt.path;
+  PgenFile file(path, gt.samples.size(), gt.variants.line_alleles, threads);
   Rcpp::XPtr<Geno> g(new Geno, true);
   const std::vector<int> rows = to_rows(samples);
-  if (file.dosage())
-    for (int v : variants)
-      if (allele_ct[v] > 2)
-        Rcpp::stop("Multiallelic variants are not supported in PGEN files with dosages: " + path);
   init_geno(*g, rows.size(), variants.size());
   g->dosage = file.dosage();
   bool ascending = true;
@@ -655,14 +661,15 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
   }
   for (std::size_t g0 = 0; g0 < p; g0 += kGroup) {
     const std::size_t count = std::min(kGroup, p - g0);
-    int failed = 0, range = 0;
+    int failed = -1, range = 0;
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (std::ptrdiff_t k = 0; k < static_cast<std::ptrdiff_t>(count); ++k) {
       const int t = plink4r::thread_id();
       PgenFile::Sparse s;
-      if (!file.read_sparse(static_cast<std::size_t>(variants[g0 + k]), t, s)) {
+      const int v = variants[g0 + k];
+      if (!file.read_sparse(static_cast<std::size_t>(gt.variants.line[v]), gt.variants.alt[v], t, s)) {
         #pragma omp atomic write
-        failed = 1;
+        failed = gt.variants.line[v];
         continue;
       }
       u64* miss = missbuf.data() + static_cast<std::size_t>(t) * W;
@@ -681,7 +688,7 @@ SEXP geno_open_pgen_cpp(const std::string& path, int n_total, const Rcpp::Intege
         range = 1;
       }
     }
-    if (failed) Rcpp::stop("Could not read PGEN file: " + path);
+    if (failed >= 0) Rcpp::stop(file.failure(static_cast<std::size_t>(failed)));
     if (range) Rcpp::stop("Dosage above 2 in PGEN file: " + path);
     Rcpp::checkUserInterrupt();
   }

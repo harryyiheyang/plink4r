@@ -2,7 +2,7 @@
 #'
 #' Returns a new object whose missing cells (the cells missing in the file, see [geno_missing()]) are
 #' rewritten; the observed cells and `x` itself are unchanged. For a column j with m_j missing cells,
-#' n rows and observed sum S_j (counted allele = `x$a1`):
+#' n rows and observed sum S_j (counted allele = `x$A1`):
 #' - default: f_j = S_j / (n - m_j), the observed mean of `x`'s own rows;
 #' - `af` (finite entries): f_j = clip((2 n af_j - S_j) / m_j, 0, 2), so the column mean is 2 af_j;
 #' - `const` (finite entries): f_j = const_j;
@@ -16,12 +16,12 @@
 #' their observed calls alone, so columns outside `snps`, e.g. wrong calls
 #' that are being replaced, carry no information. Nothing is copied for the subset: the kernel reads the
 #' selected columns of `x` in place. A value f is stored as round(f) in the 2-bit planes and the
-#' rest in the int16 part (1/16384; 0.01 for a dosage PGEN). All values refer to the counted allele `x$a1` (after [geno_harmonise()],
+#' rest in the int16 part (1/16384; 0.01 for a dosage PGEN). All values refer to the counted allele `x$A1` (after [geno_harmonise()],
 #' the harmonised one). Hard calls and dosages are taken alike: observed dosages condition the LD fill and
 #' missing dosages are filled.
 #'
 #' The LD fill works on the panel SNPs that are columns of `x` (panel SNPs absent from `x` are not carried). The
-#' panel need not share the object's allele orientation, IDs or build: SNPs are aligned by chromosome, position
+#' panel need not share the object's allele orientation or build: SNPs are aligned by chromosome, position
 #' and allele pair, and a swapped pair enters with a negative sign.
 #' Stage 1 (OpenMP over people): z_M = R_MO (R_OO + delta I)^{-1} z_O per person on the working set S,
 #' standardized with the anchor AF (`af`, else the panel's A1Freq in the object's orientation), from

@@ -7,10 +7,13 @@
 #' by [genotype_fill()], and the chunk adds [geno_multiply()] of its columns to the scores. Memory is the n x q
 #' score matrix plus one chunk of variants (or one LD block).
 #'
-#' Matching follows plink2: a weight's `A1` must equal the variant's ALT or REF (`2 - x` is used for REF);
-#' no strand flipping. Variants whose ID is absent, whose `A1` matches neither allele, that are
-#' multiallelic, all missing, or whose ID occurs more than once in the .pvar (`dup_ids = "skip"`, plink2
-#' `ignore-dup-ids`) are listed in `skipped`.
+#' Matching: a weight is a variant `CHR`, `BP`, `A1`, `A2` with `A1` the allele the weight is per copy of. It is
+#' matched to the variant of the file ([geno_file()]`$variants`) with that chromosome, position and allele pair:
+#' in the file's orientation the count `x` of the file's `A1` is scored, in the other `2 - x`; no strand flipping.
+#' One ALT allele of several at a position (a `.pvar` line with several ALT alleles) is matched by its own `A1`
+#' only, as `2 - x` of it counts every other allele of the line, not `A2`. Weights that match no variant, match
+#' in the swapped orientation only such an allele, match a variant written twice in the file, or whose calls are
+#' all missing are listed in `skipped`.
 #'
 #' Missing calls (`impute`):
 #' * `"anchor"` (default): the fill of [genotype_fill()]. With an A1 frequency `p` in `weights[[freq_col]]`
@@ -31,9 +34,9 @@
 #' to compare with plink2.
 #'
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst).
-#' @param weights data.frame: variant ID, A1, one or more numeric weight columns, optionally `freq_col`.
-#' @param id_col,a1_col Names of the ID and A1 columns of `weights`.
-#' @param score_cols Weight columns; `NULL` takes every numeric column other than `freq_col`.
+#' @param weights data.frame with the columns `CHR`, `BP`, `A1`, `A2` (`CHR` in any form the package reads: 1,
+#'   chr1, X, 23; alleles in any case), one or more numeric weight columns, optionally `freq_col`.
+#' @param score_cols Weight columns; `NULL` takes every numeric column other than `CHR`, `BP` and `freq_col`.
 #' @param freq_col Column of `weights` with the A1 frequency used as anchor (plink2 `--read-freq`); ignored
 #'   when absent; `NA` entries fall back to the observed frequency.
 #' @param impute `"anchor"` or `"none"`.
@@ -42,21 +45,23 @@
 #'   allele pair, in either orientation; only panel SNPs present in the .pvar enter the imputation.
 #' @param transform `"none"`, `"center"` or `"standardize"`.
 #' @param sample IIDs to score (`NULL` = all .psam rows), in the row order wanted.
-#' @param dup_ids `"error"` or `"skip"`.
 #' @param para named list overriding [geno_score_para()].
 #' @param threads OpenMP threads; 0 takes them from [plink4r_resources()].
+#' @param file A [geno_file()] result of the PGEN, used instead of reading its variant and sample tables (then
+#'   leave `pfile` `NULL`).
 #' @return list(sum = n x q scores (plink2 `<name>_SUM`), avg = sum / allele_ct (`<name>_AVG`),
-#'   allele_ct (`ALLELE_CT`), sample, variants = data.table(ID, A1, flip (A1 is REF), fill ("mean",
-#'   "anchor", "ld", "none"), n_miss, p (A1 frequency used)), skipped = data.table(ID, A1, reason),
+#'   allele_ct (`ALLELE_CT`), sample, variants = data.table(CHR, BP, A1, A2, flip (the file counts A2), fill
+#'   ("mean", "anchor", "ld", "none"), n_miss, p (A1 frequency used)), skipped = data.table(CHR, BP, A1, A2,
+#'   reason),
 #'   ld_blocks = data.table(block, m (panel SNPs opened), scored, cells (LD-filled cells of the scored
 #'   variants), sec), simd (instruction set picked at run time for the SIMD kernels: avx512, avx2 or generic;
 #'   environment variable PLINK4R_SIMD caps it), resources, time).
 #' @export
-geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols = NULL, freq_col = "A1Freq",
+geno_score <- function(pfile = NULL, weights, score_cols = NULL, freq_col = "A1Freq",
                        impute = c("anchor", "none"), ld = NULL, transform = c("none", "center", "standardize"),
-                       sample = NULL, dup_ids = c("error", "skip"), para = list(), threads = 4L) {
+                       sample = NULL, para = list(), threads = 4L, file = NULL) {
   t0 <- proc.time()[["elapsed"]]
-  impute <- match.arg(impute); transform <- match.arg(transform); dup_ids <- match.arg(dup_ids)
+  impute <- match.arg(impute); transform <- match.arg(transform)
   P <- geno_score_para()
   bad <- setdiff(names(para), names(P))
   if (length(bad)) stop("unknown para: ", paste(bad, collapse = ", "), call. = FALSE)
@@ -64,44 +69,52 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   threads <- .threads(threads)
   use_ld <- !is.null(ld) && impute == "anchor"
   w <- data.table::as.data.table(weights)
-  if (!all(c(id_col, a1_col) %in% names(w))) stop("weights lacks ", id_col, " or ", a1_col, ".", call. = FALSE)
+  key <- c("CHR", "BP", "A1", "A2")
+  miss <- setdiff(key, names(w))
+  if (length(miss)) stop("weights lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   if (is.null(score_cols))
-    score_cols <- setdiff(names(w)[vapply(w, is.numeric, logical(1))], c(id_col, a1_col, freq_col))
+    score_cols <- setdiff(names(w)[vapply(w, is.numeric, logical(1))], c(key, freq_col))
   if (!length(score_cols)) stop("No numeric weight columns in weights.", call. = FALSE)
-  ids <- as.character(w[[id_col]])
-  wa1 <- toupper(as.character(w[[a1_col]]))
-  if (anyDuplicated(ids)) stop("Variant IDs repeated in weights, e.g. ", ids[anyDuplicated(ids)], call. = FALSE)
+  wv <- data.table::data.table(CHR = .chr_code(w$CHR), BP = as.integer(w$BP),
+                               A1 = .by_unique(as.character(w$A1), toupper),
+                               A2 = .by_unique(as.character(w$A2), toupper))
+  nw <- nrow(wv)
+  pair <- paste(wv$CHR, wv$BP, pmin(wv$A1, wv$A2), pmax(wv$A1, wv$A2))
+  if (anyDuplicated(pair))
+    stop("A variant is repeated in weights: ", paste(wv[anyDuplicated(pair), ], collapse = " "), call. = FALSE)
   W <- as.matrix(w[, score_cols, with = FALSE]) + 0
   if (any(!is.finite(W))) stop("Weights must be finite.", call. = FALSE)
   q <- ncol(W)
-  pfreq <- if (freq_col %in% names(w)) as.numeric(w[[freq_col]]) else rep(NA_real_, length(ids))
+  pfreq <- if (freq_col %in% names(w)) as.numeric(w[[freq_col]]) else rep(NA_real_, nw)
   pfreq[!(pfreq >= 0 & pfreq <= 1)] <- NA_real_
 
-  # ---- variants: the weight's A1 is the file's counted allele (ALT) or the other one (flip)
-  gf <- geno_file(pgenfile = pfile)
+  # ---- variants: the weight's A1 is the file's counted allele, or the other one (flip)
+  gf <- .as_geno_file(file, NULL, pfile)
+  if (gf$type != "pgen") stop("geno_score() reads PGEN files.", call. = FALSE)
   v <- gf$variants
-  srow <- if (is.null(sample)) NULL else
-    .geno_index(as.character(sample), gf$samples$iid, paste(gf$samples$fid, gf$samples$iid, sep = "_"), "sample")
+  srow <- if (is.null(sample)) NULL else .geno_samples(gf, as.character(sample))
   n <- if (is.null(srow)) nrow(gf$samples) else length(srow)
-  skip <- rep(NA_character_, length(ids))
-  idx <- match(ids, v$id)
-  skip[is.na(idx)] <- "not in pvar"
-  dup <- !is.na(idx) & ids %in% v$id[duplicated(v$id)]
-  if (any(dup) && dup_ids == "error")
-    stop("Variant ID ", ids[which(dup)[1L]], " occurs more than once in the .pvar; use dup_ids = \"skip\" ",
-         "(plink2 ignore-dup-ids).", call. = FALSE)
-  skip[is.na(skip) & dup] <- "duplicate ID in pvar"
-  skip[is.na(skip) & v$allele_ct[idx] > 2L] <- "multiallelic"
-  flip <- wa1 == v$a2[idx]
-  skip[is.na(skip) & !(wa1 == v$a1[idx] | flip)] <- "A1 matches neither allele"
+  # only the variants at a position of some weight can match: the keys are made of those
+  cand <- v[which(v$BP %in% wv$BP)]
+  cand[, several := .several(cand)]
+  ck <- paste(cand$CHR, cand$BP, cand$A1, cand$A2)
+  same <- match(paste(wv$CHR, wv$BP, wv$A1, wv$A2), ck)
+  swap <- match(paste(wv$CHR, wv$BP, wv$A2, wv$A1), ck)
+  flip <- is.na(same) & !is.na(swap)
+  ci <- ifelse(flip, swap, same)
+  idx <- cand$row[ci]
+  skip <- rep(NA_character_, nw)
+  skip[is.na(ci)] <- "not in the file"
+  skip[is.na(skip) & flip & cand$several[ci]] <- "A1 is the A2 of one ALT allele of several"
+  skip[is.na(skip) & ck[ci] %in% ck[duplicated(ck)]] <- "written twice in the file"
   ok <- which(is.na(skip))
-  if (!length(ok)) stop("No weight variant matched the .pvar.", call. = FALSE)
+  if (!length(ok)) stop("No weight variant matched the file.", call. = FALSE)
   af_given <- ifelse(flip, 1 - pfreq, pfreq)  # the given anchor, as a frequency of the counted allele
 
   # ---- LD candidates: weight variants of the panel with an anchor inside (0, 1), by LD block
-  blk <- rep(NA_integer_, length(ids))
+  blk <- rep(NA_integer_, nw)
   if (use_ld) {
-    al <- .ld_align(.ld_panel(ld$ref, ld$dir), v[, .(CHROM = chr, POS = pos, REF = a2, ALT = a1, row, allele_ct)])
+    al <- .ld_align(.ld_panel(ld$ref, ld$dir), v)
     k <- match(idx[ok] - 1L, al$vi)
     anc <- ifelse(is.finite(af_given[ok]), af_given[ok], ifelse(al$sign[k] > 0, al$A1Freq[k], 1 - al$A1Freq[k]))
     cand <- !is.na(k) & is.finite(anc) & anc > 0 & anc < 1
@@ -116,14 +129,14 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   groups <- c(unname(split(plain, (seq_along(plain) - 1L) %/% as.integer(P$chunk))), unname(split(ord[in_ld], blk[ord[in_ld]])))
   gblock <- c(rep(NA_integer_, length(groups) - length(unique(blk[ord[in_ld]]))), sort(unique(blk[ord[in_ld]])))
   S <- matrix(0, n, q); allele_ct <- numeric(n)
-  n_miss <- p1v <- rep(NA_real_, length(ids)); fillv <- rep(NA_character_, length(ids)); status <- rep(NA_integer_, length(ids))
+  n_miss <- p1v <- rep(NA_real_, nw); fillv <- rep(NA_character_, nw); status <- rep(NA_integer_, nw)
   ld_info <- list(); t_ld <- 0
   pb <- if (isTRUE(P$progress)) utils::txtProgressBar(0, length(groups), style = 3) else NULL
   for (gi in seq_along(groups)) {
     j <- groups[[gi]]
     X <- geno_open(file = gf, snp_vec = idx[j], sample_vec = srow, scale = FALSE, threads = threads)
     fl <- flip[j]; nm <- X$n_miss
-    p1 <- ifelse(is.finite(pfreq[j]), pfreq[j], ifelse(fl, 1 - X$af, X$af))
+    p1 <- ifelse(is.finite(pfreq[j]), pfreq[j], ifelse(fl, 1 - X$A1Freq, X$A1Freq))
     st <- ifelse(nm == n, 1L, ifelse(transform == "standardize" & !(p1 > 0 & p1 < 1), 2L, 0L))
     sc <- st == 0L
     off <- if (transform == "none") 0 else 2 * p1
@@ -173,9 +186,9 @@ geno_score <- function(pfile, weights, id_col = "ID", a1_col = "A1", score_cols 
   rn <- if (is.null(srow)) gf$samples$iid else gf$samples$iid[srow]
   dimnames(S) <- list(rn, score_cols)
   list(sum = S, avg = S / allele_ct, allele_ct = allele_ct, sample = rn,
-       variants = data.table::data.table(ID = ids[ok], A1 = wa1[ok], flip = flip[ok], fill = fillv[ok],
-                                         n_miss = n_miss[ok], p = p1v[ok]),
-       skipped = data.table::data.table(ID = ids[!is.na(skip)], A1 = wa1[!is.na(skip)], reason = skip[!is.na(skip)]),
+       variants = cbind(wv[ok], data.table::data.table(flip = flip[ok], fill = fillv[ok], n_miss = n_miss[ok],
+                                                       p = p1v[ok])),
+       skipped = cbind(wv[!is.na(skip)], data.table::data.table(reason = skip[!is.na(skip)])),
        ld_blocks = if (length(ld_info)) data.table::rbindlist(ld_info),
        simd = simd_isa_cpp(), resources = c(threads = threads, mem_gb = .mem_gb(P$mem_gb, threads)),
        time = c(ld = t_ld, total = proc.time()[["elapsed"]] - t0))

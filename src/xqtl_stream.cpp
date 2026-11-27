@@ -26,8 +26,8 @@
 // Output. The pairs of a trait wait in memory (Pending: float beta and se at off_t + (j - lo_t), so threads write to
 // disjoint places) until the scan has passed its last variant; the trait is then written as one row group of the
 // Parquet file (parquet_write.h) and its pairs leave memory. Traits are written in their order, so what waits is the
-// pairs of the traits whose windows the scan is inside. A row is one pair: Outcome (the trait), CHR, BP, REF, ALT
-// (chromosome label and alleles as the .bim / .pvar writes them; ALT is the counted allele, which BETA is per copy
+// pairs of the traits whose windows the scan is inside. A row is one pair: Outcome (the trait), CHR, BP, A1, A2
+// (chromosome label and alleles as the .bim / .pvar writes them; A1 is the counted allele, which BETA is per copy
 // of), BETA, SE (float), N (non-missing calls of the variant). A variant
 // without statistics (monomorphic or all missing; or in the span of the covariates) has no row. The file's key /
 // value metadata hold what a P value needs besides BETA / SE (df = n - k - 1) and the samples and covariate rank.
@@ -174,8 +174,8 @@ struct Windows {
 // The scan as the tables give it: the variants of at least one window in position order, and the traits with a
 // variant in their window, ordered by (lo, hi, name), with their ranges of those variants.
 struct Scan {
-  std::vector<int> row;                          // file row of scan variant j
-  std::vector<std::int32_t> chr, bp, ref, alt;   // its position; chromosome label and alleles as codes into
+  std::vector<int> row;                          // variant of the table (variant_text.h) of scan variant j
+  std::vector<std::int32_t> chr, bp, a1, a2;     // its position; chromosome label and alleles as codes into
   std::vector<std::string> chromosomes, alleles;  // these, the texts of the file
   std::vector<int> trait, lo, hi;                // trait: the place of trait t in the tables given
 };
@@ -183,18 +183,17 @@ struct Scan {
 // A place on the genome as one number: chromosome codes and positions are below 2^31.
 inline std::int64_t genome_key(std::int64_t chr, std::int64_t bp) { return chr * 4294967296LL + bp; }
 
-// vt: every variant line of the file (variant_text.h); those with two alleles, a chromosome code and a position are
-// the candidates. name, o_chr, o_start, o_end: the traits; a trait takes the variants of its chromosome at
+// vt: every variant of the file (variant_text.h); those with a chromosome code and a position are the candidates. name, o_chr, o_start, o_end: the traits; a trait takes the variants of its chromosome at
 // start - window to end + window, both ends included.
 Scan place(const plink4r::VariantTable& vt, const std::vector<std::string>& name, const Rcpp::IntegerVector& o_chr,
            const Rcpp::NumericVector& o_start, const Rcpp::NumericVector& o_end, double window) {
-  // the candidates in position order: (place, file row); equal places keep the order given
+  // the candidates in position order: (place, variant); equal places keep the order given
   using Cand = std::pair<std::int64_t, int>;
   std::vector<Cand> cand;
   const int m = static_cast<int>(vt.size());
   cand.reserve(m);
   for (int r = 0; r < m; ++r) {
-    if (!vt.biallelic(r) || vt.code(r) < 0 || vt.bp[r] < 0) continue;
+    if (vt.code(r) < 0 || vt.bp[r] < 0) continue;
     cand.emplace_back(genome_key(vt.code(r), vt.bp[r]), r);
   }
   const auto by_place = [](const Cand& a, const Cand& b) { return a.first < b.first; };
@@ -240,7 +239,7 @@ Scan place(const plink4r::VariantTable& vt, const std::vector<std::string>& name
 
   // what the output says of a variant; the alleles as codes into their distinct strings (counted alleles first)
   sc.chromosomes = vt.chromosomes;
-  sc.chr.resize(count); sc.bp.resize(count); sc.ref.resize(count); sc.alt.resize(count);
+  sc.chr.resize(count); sc.bp.resize(count); sc.a1.resize(count); sc.a2.resize(count);
   std::vector<std::int32_t> code(vt.alleles.size(), -1);
   const auto coded = [&](std::int32_t a) {
     if (code[a] < 0) {
@@ -251,9 +250,9 @@ Scan place(const plink4r::VariantTable& vt, const std::vector<std::string>& name
   };
   for (int j = 0; j < count; ++j) {
     sc.chr[j] = vt.chr[sc.row[j]]; sc.bp[j] = vt.bp[sc.row[j]];
-    sc.alt[j] = coded(vt.alt[sc.row[j]]);
+    sc.a1[j] = coded(vt.a1[sc.row[j]]);
   }
-  for (int j = 0; j < count; ++j) sc.ref[j] = coded(vt.ref[sc.row[j]]);
+  for (int j = 0; j < count; ++j) sc.a2[j] = coded(vt.a2[sc.row[j]]);
   return sc;
 }
 
@@ -313,20 +312,20 @@ struct Pending {
 
 // The variants of the scan as the output names them, and the columns of one row group.
 struct Rows {
-  const std::int32_t* chr; const std::int32_t* bp; const std::int32_t* ref; const std::int32_t* alt;
+  const std::int32_t* chr; const std::int32_t* bp; const std::int32_t* a1; const std::int32_t* a2;
   const double* n_obs;
   const std::vector<std::string>* chromosomes;
   const std::vector<std::string>* alleles;
   std::vector<std::string> outcome;
-  std::vector<std::int32_t> c_chr, c_bp, c_ref, c_alt, c_n;
+  std::vector<std::int32_t> c_chr, c_bp, c_a1, c_a2, c_n;
   std::vector<float> c_beta, c_se;
   // Writes trait t (its pairs start at b / s) as one row group: the pairs with statistics. Returns their number.
   std::size_t write(plink4r::ParquetWriter& W, const Windows& win, int t, const float* b, const float* s) {
-    c_chr.clear(); c_bp.clear(); c_ref.clear(); c_alt.clear(); c_n.clear(); c_beta.clear(); c_se.clear();
+    c_chr.clear(); c_bp.clear(); c_a1.clear(); c_a2.clear(); c_n.clear(); c_beta.clear(); c_se.clear();
     for (int j = win.lo[t]; j < win.hi[t]; ++j) {
       const int i = j - win.lo[t];
       if (std::isnan(b[i])) continue;
-      c_chr.push_back(chr[j]); c_bp.push_back(bp[j]); c_ref.push_back(ref[j]); c_alt.push_back(alt[j]);
+      c_chr.push_back(chr[j]); c_bp.push_back(bp[j]); c_a1.push_back(a1[j]); c_a2.push_back(a2[j]);
       c_n.push_back(static_cast<std::int32_t>(n_obs[j])); c_beta.push_back(b[i]); c_se.push_back(s[i]);
     }
     if (c_bp.empty()) return 0;
@@ -334,8 +333,8 @@ struct Rows {
     W.string_const(outcome[t]);
     W.string_dict(c_chr.data(), *chromosomes);
     W.int32_delta(c_bp.data());
-    W.string_dict(c_ref.data(), *alleles);
-    W.string_dict(c_alt.data(), *alleles);
+    W.string_dict(c_a1.data(), *alleles);
+    W.string_dict(c_a2.data(), *alleles);
     W.float_plain(c_beta.data());
     W.float_plain(c_se.data());
     W.int32_dict(c_n.data());
@@ -346,9 +345,9 @@ struct Rows {
 
 }  // namespace
 
-// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
-// .bim / .pvar, read here (variant_text.h): chromosome, position and the two alleles of every line; the lines with
-// two alleles may be scanned. sample_idx: 0-based file rows of the analysed samples. X: n x kX covariates with the
+// file: the genotype file as opened (geno_table.h; the external pointer of geno_file()): a BED counts A1 = .bim
+// column 5, a PGEN the ALT allele of each variant; every variant with a chromosome code and a position may be
+// scanned. sample_idx: 0-based file rows of the analysed samples. X: n x kX covariates with the
 // intercept, rows as sample_idx. table: the table of traits as R holds it (a list of columns); row: for every
 // analysed sample its 0-based row in table; col: for every trait its 0-based column in table (double or integer, no
 // missing value among the analysed samples). outcome, o_chr, o_start, o_end: name, chromosome code and the two ends
@@ -356,11 +355,9 @@ struct Rows {
 // "<application> version <x.y.z>" for the file. block: variants per thread (0 = from mem_gb). Returns the rows
 // written, the pairs asked for, which traits were tested (those with a variant in their window), the variants
 // scanned, those without statistics (monomorphic: no variation or all missing; singular: in the span of the
-// covariates), chromosome label and position of the lines with more than two alleles (not scanned) and, per block
-// of the scan, the number of traits it met (active).
+// covariates) and, per block of the scan, the number of traits it met (active).
 // [[Rcpp::export]]
-Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
-                           Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::List table,
+Rcpp::List xqtl_stream_cpp(SEXP file, Rcpp::IntegerVector sample_idx, Rcpp::NumericMatrix X, Rcpp::List table,
                            Rcpp::IntegerVector row, Rcpp::IntegerVector col, Rcpp::CharacterVector outcome,
                            Rcpp::IntegerVector o_chr, Rcpp::NumericVector o_start, Rcpp::NumericVector o_end,
                            double window, const std::string& out, const std::string& created_by, int threads,
@@ -375,27 +372,12 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const s
 
   // ---- the scan: variants in position order, traits with their ranges
   const std::vector<std::string> name = Rcpp::as<std::vector<std::string>>(outcome);
-  Scan sc;
-  std::vector<int> allele_ct, skip_bp;
-  std::vector<std::string> skip_chr;
-  std::size_t m = 0;
-  {
-    plink4r::VariantTable vt = plink4r::read_variant_table(variant_text, bed);
-    m = vt.size();
-    bool any = false;
-    for (std::size_t r = 0; r < m; ++r) {
-      if (vt.biallelic(r)) { any = true; continue; }
-      skip_chr.push_back(vt.chromosomes[vt.chr[r]]);
-      skip_bp.push_back(vt.bp[r] < 0 ? NA_INTEGER : vt.bp[r]);
-    }
-    if (!any) Rcpp::stop("No biallelic variant to test.");
-    sc = place(vt, name, o_chr, o_start, o_end, window);
-    allele_ct = std::move(vt.allele_ct);
-  }
+  const plink4r::GenoTable& gt = plink4r::geno_table(file);
+  const Scan sc = place(gt.variants, name, o_chr, o_start, o_end, window);
   const int p = static_cast<int>(sc.row.size()), q = static_cast<int>(sc.trait.size());
   if (q == 0) Rcpp::stop("No outcome has a variant in its window.");
   const Windows win(sc.lo, sc.hi);
-  plink4r::ScanFile F(path, bed, n_raw, m, allele_ct, sc.row, sample_idx, T);
+  plink4r::ScanFile F(gt, sc.row, sample_idx, T);
   const bool dos = F.dosage;
 
   // ---- what the threads share: the covariate basis, and the traits of the scan read from the table
@@ -444,12 +426,12 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const s
   const int most = win.most_active(b, p);
 
   // the output file
-  rows.chr = sc.chr.data(); rows.bp = sc.bp.data(); rows.ref = sc.ref.data(); rows.alt = sc.alt.data();
+  rows.chr = sc.chr.data(); rows.bp = sc.bp.data(); rows.a1 = sc.a1.data(); rows.a2 = sc.a2.data();
   rows.chromosomes = &sc.chromosomes; rows.alleles = &sc.alleles;
   using PW = plink4r::ParquetWriter;
   PW writer(out,
-            {{"Outcome", PW::kString}, {"CHR", PW::kString}, {"BP", PW::kInt32}, {"REF", PW::kString},
-             {"ALT", PW::kString}, {"BETA", PW::kFloat}, {"SE", PW::kFloat}, {"N", PW::kInt32}},
+            {{"Outcome", PW::kString}, {"CHR", PW::kString}, {"BP", PW::kInt32}, {"A1", PW::kString},
+             {"A2", PW::kString}, {"BETA", PW::kFloat}, {"SE", PW::kFloat}, {"N", PW::kInt32}},
             {{"df", std::to_string(static_cast<long long>(df))}, {"samples", std::to_string(ns)},
              {"covariate_rank", std::to_string(k)}},
             created_by);
@@ -515,7 +497,7 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const s
       }
     }
     for (int t = 0; t < T; ++t)
-      if (bad[t] >= 0) Rcpp::stop("Genotype read failed at variant %d of %s", bad[t] + 1, path.c_str());
+      if (bad[t] >= 0) Rcpp::stop(F.failure(bad[t]));
     // the traits whose last variant the scan has passed are written and leave memory
     const int done = std::min(q, static_cast<int>(std::upper_bound(win.top.begin(), win.top.end(),
                                                                    static_cast<int>(c1)) - win.top.begin()));
@@ -542,6 +524,5 @@ Rcpp::List xqtl_stream_cpp(const std::string& path, bool bed, int n_raw, const s
   Rcpp::LogicalVector tested(q_in, false);
   for (int t : sc.trait) tested[t] = true;
   res["tested"] = tested; res["outcomes"] = q; res["variants"] = p;
-  res["skipped_chr"] = Rcpp::wrap(skip_chr); res["skipped_bp"] = Rcpp::wrap(skip_bp);
   return res;
 }

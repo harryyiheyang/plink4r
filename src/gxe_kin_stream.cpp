@@ -1,8 +1,8 @@
-// gxe_kin_stream_cpp: gene-environment interaction of every biallelic variant of a PGEN or BED against the null
+// gxe_kin_stream_cpp: gene-environment interaction of every variant of a PGEN or BED against the null
 // model of gwas_kin_stream.cpp (the plink4r::KinNull of kin_sparse.h: linear, logistic or Cox, with a sparse
 // kinship or with no related sample), streamed in blocks; the genotype matrix is never formed and no table of the
 // results either: the rows of a group of blocks are written to the result file as soon as they are computed, each
-// one CHR, BP, REF, ALT of the variant as its .bim / .pvar line has them, then its statistics (ResultText,
+// one CHR, BP, A1, A2 of the variant as its .bim / .pvar line has them, then its statistics (ResultText,
 // variant_text.h).
 //
 // The null model is the one of the association test, with the same kinship parameter; the exposures are columns
@@ -200,17 +200,17 @@ int block_stats(const Pre& pre, Worker& wk, int nb, double* cc, double* AA) {
 
 }  // namespace
 
-// path: .pgen or .bed; bed = true for a BED (A1 = .bim column 5 counted), else PGEN (ALT counted). variant_text: its
-// .bim / .pvar. out: the text file to write: after CHR, BP, REF, ALT of each line of the .bim / .pvar ALT_FREQ, N,
-// the association test of g (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA and SE of G and of each interaction term
+// file: the genotype file as opened (geno_table.h; the external pointer of geno_file()): a BED counts A1 = .bim
+// column 5, a PGEN the ALT allele of each variant. out: the text file to write: after CHR, BP, A1, A2 of each
+// variant A1Freq, N, the association test of g (BETA_MARGINAL, SE_MARGINAL, P_MARGINAL), BETA and SE of G and of each interaction term
 // (the columns of Z = [g, g e_1, ...], named by the columns of E), and the Wald tests of the exposure terms (P_INT)
-// and of g with them (P_JOINT); NA for a variant without statistics (no variation among the samples, or singular)
-// and for a line with more than two alleles, which is not scanned. sample_idx: 0-based file rows of the analysed
+// and of g with them (P_JOINT); NA for a variant without statistics (no variation among the samples, or singular).
+// sample_idx: 0-based file rows of the analysed
 // samples. null: external pointer to the plink4r::KinNull of the analysis samples (in the order of sample_idx),
 // projected. E: n x (S - 1), the n_exp exposures first, then the interaction covariates (columns of the design of
 // the null model, centred or not), with their names. block: variants per thread (0 = from mem_gb).
 // [[Rcpp::export]]
-Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, const std::string& variant_text,
+Rcpp::List gxe_kin_stream_cpp(SEXP file,
                              const std::string& out, Rcpp::IntegerVector sample_idx, SEXP null,
                              Rcpp::NumericMatrix E, int n_exp, int threads, double mem_gb, int block) {
   const int T = plink4r::resolve_threads(threads);
@@ -222,8 +222,8 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
   if (NM.n != ns || NM.L1.size() != static_cast<std::size_t>(ns) * (k + 1) || E.nrow() != ns)
     Rcpp::stop("the null model does not match the samples");
   if (n_exp < 1 || n_exp > S - 1) Rcpp::stop("n_exp out of range");
-  const plink4r::FileVariants fv = plink4r::file_variants(path, bed, n_raw, variant_text);
-  plink4r::ScanFile F(path, bed, n_raw, fv.m, fv.allele_ct, fv.rows, sample_idx, T);
+  const plink4r::GenoTable& gt = plink4r::geno_table(file);
+  plink4r::ScanFile F(gt, sample_idx, T);
   const bool dos = F.dosage;
   const int p = static_cast<int>(F.vi.size());
 
@@ -239,7 +239,7 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
   const double per_thread = 8.0 * N * (1 + S) + 8.0 * K.nr * S + F.thread_bytes();
   const int b = plink4r::scan_block_size(block, mem_gb, shared, per_thread, per_var, p, ns, T);
 
-  std::vector<std::string> statistics = {"ALT_FREQ", "N", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
+  std::vector<std::string> statistics = {"A1Freq", "N", "BETA_MARGINAL", "SE_MARGINAL", "P_MARGINAL"};
   {
     const Rcpp::List dn = E.attr("dimnames");
     if (dn.size() != 2 || Rf_isNull(dn[1])) Rcpp::stop("E has no column names");
@@ -251,7 +251,7 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
   }
   statistics.push_back("P_INT"); statistics.push_back("P_JOINT");
   const std::size_t nv = statistics.size() - 1;
-  plink4r::ResultText text(variant_text, bed, out, statistics);
+  plink4r::ResultText text(gt.variants, out, statistics);
   std::vector<Worker> wk(T);
   std::vector<std::vector<double>> cbuf(T), abuf(T), nbuf(T), sbuf(T), vbuf(T);
   std::vector<std::string> rows(T);
@@ -267,8 +267,6 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
   long long n_mono = 0, n_sing = 0;
 
   for (long long c0 = 0; c0 < p; c0 += static_cast<long long>(b) * T) {
-    const long long c1 = std::min<long long>(p, c0 + static_cast<long long>(b) * T);
-    text.load(static_cast<long long>(F.vi[c1 - 1]) + 1);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static, 1) num_threads(T) reduction(+ : nexp, n_mono, n_sing)
 #endif
@@ -287,11 +285,9 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
       double* cc = cbuf[th].data();
       double* AA = abuf[th].data();
       nexp += block_stats(pre, W, nb, cc, AA);
-      double* v = vbuf[th].data();  // ALT_FREQ, BETA_MARGINAL, SE_MARGINAL, P_MARGINAL, (BETA, SE) x S, P_INT, P_JOINT
-      long long r = j0 == c0 ? text.first() : static_cast<long long>(F.vi[j0 - 1]) + 1;  // the next file row to write
+      double* v = vbuf[th].data();  // A1Freq, BETA_MARGINAL, SE_MARGINAL, P_MARGINAL, (BETA, SE) x S, P_INT, P_JOINT
       for (int s = 0; s < nb; ++s) {
         const long long j = j0 + s;
-        for (; r < F.vi[j]; ++r) text.row(o, r, 0, nullptr);  // lines with more than two alleles: not scanned
         std::fill(v, v + nv, NA_REAL);
         v[0] = a1_sum[s] / (2 * n_obs[s]);
         for (;;) {  // the statistics of the variant, as far as they can be computed
@@ -313,19 +309,18 @@ Rcpp::List gxe_kin_stream_cpp(const std::string& path, bool bed, int n_raw, cons
           v[5 + 2 * S] = plink4r::p_chisq(bj.dot(Ainv.topLeftCorner(n_exp + 1, n_exp + 1).ldlt().solve(bj)), n_exp + 1);
           break;
         }
-        text.row(o, r, static_cast<long long>(n_obs[s]), v);
-        ++r;
+        text.row(o, static_cast<std::size_t>(F.vi[j]), static_cast<long long>(n_obs[s]), v);
       }
     }
     for (int t = 0; t < T; ++t)
-      if (bad[t] >= 0) Rcpp::stop("Genotype read failed at variant %d of %s", bad[t] + 1, path.c_str());
+      if (bad[t] >= 0) Rcpp::stop(F.failure(bad[t]));
     for (int t = 0; t < T; ++t) text.write(rows[t]);
     Rcpp::checkUserInterrupt();
   }
-  text.finish(static_cast<long long>(fv.m));
+  text.finish();
 
   Rcpp::List res;
-  res["variants"] = static_cast<double>(fv.m); res["tested"] = p; res["bytes"] = text.bytes();
+  res["variants"] = p; res["bytes"] = text.bytes();
   res["monomorphic"] = static_cast<double>(n_mono); res["singular"] = static_cast<double>(n_sing);
   res["explicit"] = nexp; res["block"] = b; res["threads"] = T; res["mem_gb"] = mem_gb; res["dosage"] = dos;
   res["simd"] = std::string(plink4r::la().isa); res["n_related"] = K.nr;

@@ -2,8 +2,8 @@
 # (n p / 4 bytes) instead of an n x p double matrix. The object behaves like a numeric matrix
 # for dim(), dimnames() and [ , and gives the products fine-mapping needs:
 # geno_crossprod() (X'X; X'M), geno_multiply() (X B),
-# geno_wcrossprod() and geno_cor() (correlations). Values are A1 (BED) or ALT (PGEN)
-# allele dosages, as in BEDMatrix. Every column is held as X = H + D: H a
+# geno_wcrossprod() and geno_cor() (correlations). Values are counts of A1 (bim column 5
+# of a BED, one ALT allele of a PGEN line; see geno_file()), as in BEDMatrix. Every column is held as X = H + D: H a
 # 0/1/2 matrix in 2-bit planes, D a sparse int16 part in the column's own
 # unit (1/16384 for hard-call inputs, 0.01 for a PGEN with dosages) holding dosage - H for a PGEN with dosages,
 # f - round(f) for a missing entry filled with f (at open the variant's lower median, for a PGEN with dosages
@@ -14,29 +14,30 @@
 #' Open a BED or PGEN file as a compact genotype matrix
 #'
 #' Keeps the genotypes of a PLINK BED or PGEN file in 2-bit form, so R
-#' never holds an n by p double matrix in R. Values are A1 (BED) or ALT (PGEN)
-#' allele counts as in BEDMatrix. Multiallelic PGEN variants are counted as REF
-#' versus all non-REF alleles. To choose the counted direction, set the target
+#' never holds an n by p double matrix in R. Values are counts of `A1`: bim column 5 of a BED, the ALT allele of
+#' a PGEN variant. A `.pvar` line with several ALT alleles is one column per ALT allele (see [geno_file()]), each
+#' the count of that allele. To choose the counted direction, set the target
 #' allele as REF upstream (`plink2 --ref-allele force target.txt 1 2
-#' --make-pgen`); the counted allele is then everything else.
+#' --make-pgen`), or flip the columns with [geno_harmonise()].
 #'
 #' Missing cells: a missing hard call takes the variant's lower median, a missing dosage of a PGEN with dosages
 #' the variant's observed mean dosage (to 0.01). Every other fill (observed mean, anchored to a frequency, LD,
 #' constants, per cell) is [genotype_fill()] on the opened object.
 #'
 #' @param bedfile PLINK 1 BED path or prefix (`.bim` and `.fam` alongside).
-#' @param pgenfile PLINK 2 PGEN path or prefix (uncompressed `.pvar` and
-#'   `.psam` alongside). Give either `bedfile` or `pgenfile`. A PGEN whose
+#' @param pgenfile PLINK 2 PGEN path or prefix (`.pvar` or `.pvar.zst`, and
+#'   `.psam` alongside). Give `bedfile`, `pgenfile` or `file`. A PGEN whose
 #'   header flags dosages (e.g. `--make-pgen` from imputed data) is detected
 #'   automatically and read as ALT dosages taken to the nearest 0.01 (the
 #'   precision of imputed dosages; the file holds 1/16384 steps): values,
 #'   `center`, `sd` and all products are those of that dosage matrix, stored as
 #'   the rounded hard call in 2-bit planes plus the dosage - hard call
-#'   correction (a 1-bit nonzero mask and int16 values in 0.01 units). Such
-#'   files must be biallelic.
-#' @param snp_vec Variants to keep, as IDs or 1-based file indices, in the
-#'   column order wanted. `NULL` keeps all in file order. Selection by ID takes
-#'   the first match, so use indices when IDs are duplicated (e.g. ".").
+#'   correction (a 1-bit nonzero mask and int16 values in 0.01 units). In such a file a line with several ALT
+#'   alleles is read when its record holds hard calls only; pgenlib does not read the dosages of such a line
+#'   allele by allele, and the open stops there.
+#' @param snp_vec Variants to keep, as names `CHR:BP:A1:A2` or as rows of [geno_file()]`$variants` (1-based), in
+#'   the column order wanted. `NULL` keeps all in file order. In a file without lines of several ALT alleles a
+#'   row is the line of the `.bim` / `.pvar`.
 #' @param sample_vec Samples to keep, as IIDs (or `FID_IID`) or 1-based file
 #'   indices, in the row order wanted. `NULL` keeps all in file order. The rows
 #'   of `y`, `Z` and `status` passed to `SuSiE4I()` must be in this order (or in
@@ -47,17 +48,14 @@
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
 #' @param file A [geno_file()] result of the same file, used instead of reading the variant and sample
 #'   tables (then leave `bedfile` and `pgenfile` `NULL`).
-#' @return An object of class `geno` with fields `n`, `p`, `snp`,
-#'   `a1`, `a2` (aligned with `snp`; `a1` is the counted allele: bim column 5
-#'   for BED, ALT for PGEN, and `a2` the other allele: bim column 6 or REF),
-#'   `sample` (IIDs in row order), `impute` (how the missing cells are filled now: "median", "mean", "af",
-#'   "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
-#'   (whether the PGEN holds dosages) and `dosage_nnz` (nonzero entries of the
-#'   int16 deviation D); per column also `id` (file ID; `chr:pos:a1:a2` when opened from
-#'   `geno_file(id = FALSE)`, built once at open for the opened rows only), `chr` (integer chromosome code, see
-#'   [geno_file()]), `pos`, `row` (file row), `flipped` (stored
-#'   value = 2 - file value), `n_miss` (missing calls) and `af` (observed frequency of `a1`); per row `fid`;
-#'   and `file` = list(type, path). The rows of the missing cells are kept (see [geno_missing()]). It holds an
+#' @return An object of class `geno` with fields `n`, `p`, `snp` (the column names, `CHR:BP:A1:A2`), per column
+#'   `CHR` (integer chromosome code, see [geno_file()]), `BP`, `A1` (the counted allele), `A2` (the other allele),
+#'   `A1Freq` (observed frequency of `A1`), `row` (its row of [geno_file()]`$variants`), `flipped` (stored
+#'   value = 2 - file value) and `n_miss` (missing calls); per row `sample` (IID) and `fid`; `impute` (how the
+#'   missing cells are filled now: "median", "mean", "af", "ld" or "custom"), `scale`, `center`, `sd`, `dosage`
+#'   (whether the PGEN holds dosages), `dosage_nnz` (nonzero entries of the
+#'   int16 deviation D) and `file` = list(type, path). The rows of the missing cells are kept (see
+#'   [geno_missing()]). It holds an
 #'   external pointer, so it is valid only in the current R session (it cannot
 #'   be saved with `saveRDS` or sent to parallel workers).
 #' @export
@@ -67,45 +65,37 @@ geno_open <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_ve
   gf <- .as_geno_file(file, bedfile, pgenfile)
   v <- gf$variants
   s <- gf$samples
-  # without IDs, chr:pos:a1:a2 names only of the opened rows (and of the candidate rows of character snp_vec)
-  ids <- if ("id" %in% names(v)) v$id else NULL
-  vidx <- if (is.null(ids) && is.character(snp_vec)) .geno_vid_index(v, snp_vec) else
-    .geno_index(snp_vec, if (is.null(ids)) v$row else ids, NULL, "snp_vec")
-  sidx <- .geno_index(sample_vec, s$iid, paste(s$fid, s$iid, sep = "_"), "sample_vec")
-  ptr <- if (gf$type == "bed") {
-    geno_open_bed_cpp(gf$path, nrow(s), nrow(v), vidx - 1L, sidx - 1L, threads)
-  } else {
-    geno_open_pgen_cpp(gf$path, nrow(s), v$allele_ct, vidx - 1L, sidx - 1L, threads)
-  }
-  # names built once here, for the opened rows only, and kept in the object (snp and id)
-  nm <- if (is.null(ids)) .geno_vid(v[vidx]) else ids[vidx]
-  X <- .geno_new(ptr, list(snp = nm, id = nm,
-                           chr = v$chr[vidx], pos = v$pos[vidx], a1 = v$a1[vidx], a2 = v$a2[vidx], row = vidx,
-                           flipped = rep(FALSE, length(vidx))),
+  vidx <- .geno_variants(gf, snp_vec)
+  sidx <- .geno_samples(gf, sample_vec)
+  ptr <- if (gf$type == "bed") geno_open_bed_cpp(gf$ptr, vidx - 1L, sidx - 1L, threads) else
+    geno_open_pgen_cpp(gf$ptr, vidx - 1L, sidx - 1L, threads)
+  X <- .geno_new(ptr, list(snp = .geno_vid(v[vidx]), CHR = v$CHR[vidx], BP = v$BP[vidx], A1 = v$A1[vidx],
+                           A2 = v$A2[vidx], row = vidx, flipped = rep(FALSE, length(vidx))),
                  list(sample = s$iid[sidx], fid = s$fid[sidx]), impute = "median", scale = scale, threads = threads,
                  file = list(type = gf$type, path = gf$path))
   if (X$dosage) X$impute <- "mean"
   X
 }
 
-# The one constructor of a geno object: per-column fields `cols` (snp, id, chr, pos, a1, a2, row, flipped),
-# per-row fields `rows` (sample, fid); center, sd, n_miss and af come from the store.
+# The one constructor of a geno object: per-column fields `cols` (snp, CHR, BP, A1, A2, row, flipped),
+# per-row fields `rows` (sample, fid); center, sd, n_miss and A1Freq come from the store.
 .geno_new <- function(ptr, cols, rows, impute, scale, threads, file = NULL) {
   info <- geno_info_cpp(ptr)
   n <- as.integer(info$n); p <- as.integer(info$p)
   for (k in names(cols)) if (length(cols[[k]]) != p) stop("internal: column field ", k, " has the wrong length", call. = FALSE)
   for (k in names(rows)) if (length(rows[[k]]) != n) stop("internal: row field ", k, " has the wrong length", call. = FALSE)
-  structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, a1 = cols$a1, a2 = cols$a2, sample = rows$sample,
+  structure(list(ptr = ptr, n = n, p = p, snp = cols$snp, CHR = cols$CHR, BP = cols$BP, A1 = cols$A1, A2 = cols$A2,
+                 A1Freq = info$af, sample = rows$sample,
                  impute = impute, scale = scale, center = info$mean, sd = info$sd, threads = threads,
                  dosage = isTRUE(info$dosage), dosage_nnz = info$dosage_nnz,
-                 id = cols$id, chr = cols$chr, pos = cols$pos, row = cols$row, flipped = cols$flipped,
-                 n_miss = info$n_miss, af = info$af, fid = rows$fid, file = file),
+                 row = cols$row, flipped = cols$flipped,
+                 n_miss = info$n_miss, fid = rows$fid, file = file),
             class = "geno")
 }
 
 .geno_cols <- function(X, j = seq_len(X$p)) {
-  list(snp = X$snp[j], id = X$id[j], chr = X$chr[j], pos = X$pos[j], a1 = X$a1[j], a2 = X$a2[j],
-       row = X$row[j], flipped = X$flipped[j])
+  list(snp = X$snp[j], CHR = X$CHR[j], BP = X$BP[j], A1 = X$A1[j], A2 = X$A2[j], row = X$row[j],
+       flipped = X$flipped[j])
 }
 
 .geno_index <- function(x, ids, alt_ids, arg) {
@@ -165,23 +155,23 @@ as.matrix.geno <- function(x, ...) x[, , drop = FALSE]
 #'
 #' Same reader and arguments as [geno_open()], returned as an ordinary n x p
 #' double matrix (rows = samples, named by IID; columns = variants). Values are
-#' A1 (BED) or ALT (PGEN) allele counts, or dosages for a dosage PGEN (to
+#' counts of `A1` (see [geno_open()]), or dosages for a dosage PGEN (to
 #' 0.01); missing cells are filled as by [geno_open()]. With `scale = TRUE`
 #' every column is standardized (mean 0, sd 1 with n - 1). For a large region
 #' prefer [geno_open()], which never forms this matrix.
 #'
 #' @inheritParams geno_open
-#' @return A numeric matrix with attributes `a1` and `a2` (counted and other
+#' @return A numeric matrix with attributes `A1` and `A2` (counted and other
 #'   allele per column).
 #' @export
 geno_read <- function(bedfile = NULL, pgenfile = NULL, snp_vec = NULL, sample_vec = NULL, scale = FALSE,
-                      threads = 4L) {
+                      threads = 4L, file = NULL) {
   X <- geno_open(bedfile = bedfile, pgenfile = pgenfile, snp_vec = snp_vec, sample_vec = sample_vec,
-                 scale = scale, threads = threads)
+                 scale = scale, threads = threads, file = file)
   G <- X[, , drop = FALSE]
   rownames(G) <- X$sample
-  attr(G, "a1") <- X$a1
-  attr(G, "a2") <- X$a2
+  attr(G, "A1") <- X$A1
+  attr(G, "A2") <- X$A2
   G
 }
 

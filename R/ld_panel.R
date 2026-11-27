@@ -59,23 +59,24 @@
 }
 
 # Adds vi (0-based variant of the file) and sign (+1 / -1) to the panel rows found in the file; the others are
-# dropped. pvar: CHROM (chromosome code), POS, REF, ALT (the counted allele), row, allele_ct. A panel SNP is
-# matched by chromosome, position and allele pair, in either orientation. The position column is the panel's only
-# build column (BP37 or BP38: the file must be on that build); with both, every panel row on the file's
-# chromosomes is matched on each build and the build that places more SNPs is taken. A row without a position on
-# that build is matched to nothing. A variant of the file is used once; multiallelic variants are not aligned. No
-# panel SNP in the file is an error.
-.ld_align <- function(panel, pvar) {
+# dropped. variants: CHR (chromosome code), BP, A1 (the counted allele), A2, row, as geno_file()$variants. A panel
+# SNP is matched by chromosome, position and allele pair, in either orientation; a variant that shares its CHR, BP
+# and A2 with another (one ALT allele of several, .several()) only in its own orientation. The position column is
+# the panel's only build column (BP37 or BP38: the file must be on that build); with both, every panel row on the
+# file's chromosomes is matched on each build and the build that places more SNPs is taken. A row without a
+# position on that build is matched to nothing. A variant of the file is used once. No panel SNP in the file is an
+# error.
+.ld_align <- function(panel, variants) {
   builds <- intersect(c("BP37", "BP38"), names(panel))
-  pv <- data.table::data.table(CHR = pvar$CHROM, POS = as.integer(pvar$POS), REF = pvar$REF, ALT = pvar$ALT,
-                               row = pvar$row)[pvar$allele_ct == 2L]
+  pv <- data.table::data.table(CHR = variants$CHR, POS = as.integer(variants$BP), REF = variants$A2,
+                               ALT = variants$A1, row = variants$row, several = .several(variants))
   pv <- pv[!is.na(CHR) & !is.na(POS)]
   q <- data.table::data.table(i = seq_len(nrow(panel)), CHR = panel$CHR, A1 = panel$A1, A2 = panel$A2)
   q <- q[CHR %in% unique(pv$CHR)]
   hits <- function(b) {
     qb <- data.table::copy(q)[, POS := panel[[b]][i]][!is.na(POS)]
     same <- pv[qb, on = .(CHR, POS, REF = A2, ALT = A1), nomatch = NULL, .(i = i.i, row = x.row, s = 1L)]
-    swap <- pv[qb, on = .(CHR, POS, REF = A1, ALT = A2), nomatch = NULL, .(i = i.i, row = x.row, s = -1L)]
+    swap <- pv[!several][qb, on = .(CHR, POS, REF = A1, ALT = A2), nomatch = NULL, .(i = i.i, row = x.row, s = -1L)]
     h <- rbind(same, swap)
     h[!duplicated(i) & !duplicated(row)]
   }

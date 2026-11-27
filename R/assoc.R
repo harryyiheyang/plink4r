@@ -1,6 +1,6 @@
 #' Genome-wide association of one trait (linear, logistic or Cox)
 #'
-#' Tests every biallelic variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
+#' Tests every variant of a PGEN or BED for association with one phenotype, adjusting for covariates:
 #' `formula + g` with a linear (`family = "gaussian"`) or logistic (`"binomial"`) model. The genotype matrix is
 #' never formed: the null model `formula` is fitted once with [stats::glm()] (which calls glm.fit), and its numeric design (`x = TRUE`: factors and characters expanded by base R with the current contrasts) is the covariate matrix used below; then variants are streamed
 #' from the file in blocks whose size follows from `mem_gb` and reduced in C++ to a few numbers each (the
@@ -20,19 +20,18 @@
 #' Common variants: every test here is a large-sample test (normal or chi-square reference), meant for variants
 #' with a minor allele frequency above 0.01. For the logistic and Cox models the reference also needs minor
 #' alleles among the cases (events), about `2 x cases x MAF >= 30`, which MAF > 0.01 gives from 1,500 cases on.
-#' Variants are not filtered here: every biallelic variant of the file is tested, in file order. To test a part of
+#' Variants are not filtered here: every variant of the file is tested, in file order. To test a part of
 #' them, write that part to a file of its own first (e.g. with PLINK).
 #'
-#' The result is written to the text file `out` as the scan goes; R holds nothing of it and reads no line of the
-#' `.bim` / `.pvar`. The file is tab-separated, with one row per line of the `.bim` / `.pvar`, in its order. A row
-#' is `CHR`, `BP`, `REF`, `ALT`, the chromosome, position and alleles of the line as they are written there (nothing
-#' is recoded, and no other column of the line is read; `ALT` is the counted allele: ALT of a PGEN, .bim column 5
-#' of a BED), then `ALT_FREQ` (frequency of the counted allele), `N` (non-missing calls among the analysed samples),
-#' `BETA`, `SE`, `T` (linear) or `Z` (logistic, Cox), `P`, and `SE_ROBUST`, `P_ROBUST` when `robust`. A variant with
-#' no variation among the analysed samples or a singular `Z'WZ` has `NA` after `N`; a line with more than two
-#' alleles (PGEN) is not tested and has `NA` after `ALT`. As row i of the file is line i of the `.bim` / `.pvar`,
-#' any other column of the variants (their IDs, for one) can be pasted beside it. Numbers are written with the
-#' digits that read back as the same double.
+#' The result is written to the text file `out` as the scan goes; R holds nothing of it. The file is tab-separated,
+#' with one row per variant, in file order: row i of `out` is row i of [geno_file()]`$variants`. A `.pvar` line with
+#' several ALT alleles is one variant per ALT allele, each tested as the count of that allele. A row is `CHR`, `BP`,
+#' `A1`, `A2`, the chromosome, position and alleles as they are written in the `.bim` / `.pvar` (nothing is recoded;
+#' `A1` is the counted allele, which `BETA` is per copy of: one ALT allele of a PGEN, .bim column 5 of a BED; `A2` is
+#' the other: REF of a PGEN, .bim column 6), then `A1Freq` (frequency of the counted allele), `N` (non-missing calls
+#' among the analysed samples), `BETA`, `SE`, `T` (linear) or `Z` (logistic, Cox), `P`, and `SE_ROBUST`, `P_ROBUST`
+#' when `robust`. A variant with no variation among the analysed samples or a singular `Z'WZ` has `NA` after `N`.
+#' Numbers are written with the digits that read back as the same double.
 #'
 #' @param formula The null model, `phenotype ~ covariates`, as for [stats::glm()]: e.g. `y ~ age + sex + PC1`,
 #'   `y ~ 1` without covariates; transformations, factors and interactions among covariates as in base R. Logistic:
@@ -44,6 +43,8 @@
 #' @param out Path of the text file to write (replaced when it exists); read it with `data.table::fread(out)`.
 #' @param pfile PLINK2 prefix (.pgen/.pvar/.psam; .pvar may be .pvar.zst); or give `bfile`.
 #' @param bfile PLINK1 prefix (.bed/.bim/.fam).
+#' @param file A [geno_file()] result of the genotype file, used instead of reading its variant and sample tables
+#'   (then leave `pfile` and `bfile` `NULL`).
 #' @param family `"gaussian"` (linear), `"binomial"` (logistic) or `"cox"` (proportional hazards). Cox: the
 #'   phenotype of `formula` is `cbind(time, status)` (or `survival::Surv(time,
 #'   status)`), `status` 1 for an event and 0 for censoring. The null model is fitted once and every variant is
@@ -75,36 +76,34 @@
 #'   its block of genotypes to doubles 2048 samples at a time, and a few hundred variants keep that within the
 #'   cache: 256 took 0.4 to 0.6 of the time of 4096 for 1,000 and 20,000 samples (linear, logistic, kinship, Cox;
 #'   0.5 to 0.65 for [gxe()]).
-#' @return Invisibly, a list: `out` (the file), `variants` (its rows: the lines of the `.bim` / `.pvar`), `tested`
-#'   (the biallelic ones), `bytes` (size of the file), and the run: samples, covariate rank, whether the null model
-#'   converged, `df` (of the t distribution of the linear model), block size, threads, memory budget, SIMD set,
-#'   whether dosages were read, variants recomputed by explicit projection, `monomorphic` and `singular` (variants
-#'   without statistics) and `multiallelic` (lines not tested).
+#' @return Invisibly, a list: `out` (the file), `variants` (its rows), `bytes` (size of the file), and the run:
+#'   samples, covariate rank, whether the null model converged, `df` (of the t distribution of the linear model),
+#'   block size, threads, memory budget, SIMD set, whether dosages were read, variants recomputed by explicit
+#'   projection, and `monomorphic` and `singular` (variants without statistics).
 #' @export
 gwas <- function(formula, data, out, pfile = NULL, bfile = NULL, family = c("gaussian", "binomial", "cox"),
                  id_col = "IID", robust = FALSE, threads = 0L, mem_gb = 0, block = 256L,
-                 kinship = NULL, para = list()) {
+                 kinship = NULL, para = list(), file = NULL) {
   family <- match.arg(family)
   out <- .result_path(out)
+  gf <- .as_geno_file(file, bfile, pfile)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (robust) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gwas_kinship(formula, data, out, pfile, bfile, kinship, family, id_col, threads, mem_gb, block, para))
+    return(.gwas_kinship(formula, data, out, gf, kinship, family, id_col, threads, mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
-  gf <- .geno_files(pfile, bfile)
-  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
-  nl <- .assoc_null(formula, data, gf$iid, exposure = NULL, int_covar = NULL, family, id_col, robust, center = FALSE,
+  nl <- .assoc_null(formula, data, gf$samples$iid, exposure = NULL, int_covar = NULL, family, id_col, robust, center = FALSE,
                     threads, mem_gb)
-  res <- gwas_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, nl$srow, nl$X, nl$resid, nl$w, robust,
+  res <- gwas_stream_cpp(gf$ptr, out, nl$srow, nl$X, nl$resid, nl$w, robust,
                          nl$threads, nl$mem_gb, as.integer(block))
   invisible(.assoc_value(out, nl, res))
 }
 
 #' Gene-environment interaction of one trait (linear, logistic or Cox)
 #'
-#' For every biallelic variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
+#' For every variant fits `formula + g + g:E + g:int_covar` as GEM does, from one null-model fit
 #' (`formula`, which contains the exposures and interaction covariates) and the same streaming as [gwas()]. The
 #' null model is the one of [gwas()] called with the same `formula`, `family`, `kinship` and `para`: without
 #' `kinship` the linear or logistic fit of [stats::glm()] (design taken from the fit); with `kinship`, and for the
@@ -115,7 +114,7 @@ gwas <- function(formula, data, out, pfile = NULL, bfile = NULL, family = c("gau
 #' covariates (numeric ones and indicators alike), so `BETA_G` is the effect of `g` at their mean; the
 #' interaction estimates do not change.
 #'
-#' Written per variant to `out`, after `CHR`, `BP`, `REF`, `ALT`, `ALT_FREQ` and `N` as [gwas()] writes them: the
+#' Written per variant to `out`, after `CHR`, `BP`, `A1`, `A2`, `A1Freq` and `N` as [gwas()] writes them: the
 #' marginal effect from the model without interactions (`BETA_MARGINAL`,
 #' `SE_MARGINAL`, `P_MARGINAL`, as [gwas()]); the main effect `BETA_G`, `SE_G` and every interaction
 #' `BETA_GxE_<term>`, `SE_GxE_<term>` (terms of `exposure` and `int_covar`, after expansion); `P_INT`, the Wald test
@@ -145,23 +144,22 @@ gwas <- function(formula, data, out, pfile = NULL, bfile = NULL, family = c("gau
 #' @export
 gxe <- function(formula, data, exposure, out, int_covar = NULL, pfile = NULL, bfile = NULL,
                 family = c("gaussian", "binomial", "cox"), id_col = "IID", center = TRUE, robust = NULL,
-                threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list()) {
+                threads = 0L, mem_gb = 0, block = 256L, kinship = NULL, para = list(), file = NULL) {
   family <- match.arg(family)
   if (missing(exposure) || !length(exposure)) stop("Give at least one exposure.", call. = FALSE)
   out <- .result_path(out)
+  gf <- .as_geno_file(file, bfile, pfile)
   if (family == "cox" && is.null(kinship))  # the Cox model has one route: its null model with no related pair
     kinship <- data.frame(ID1 = character(0), ID2 = character(0), kinship = numeric(0))
   if (!is.null(kinship)) {
     if (isTRUE(robust)) stop("Robust standard errors are not available with kinship or for the Cox model.", call. = FALSE)
-    return(.gxe_kinship(formula, data, exposure, out, int_covar, pfile, bfile, kinship, family, id_col, center,
+    return(.gxe_kinship(formula, data, exposure, out, int_covar, gf, kinship, family, id_col, center,
                         threads, mem_gb, block, para))
   }
   if (length(para)) stop("para is used with kinship only.", call. = FALSE)
   if (is.null(robust)) robust <- family == "gaussian"
-  gf <- .geno_files(pfile, bfile)
-  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
-  nl <- .assoc_null(formula, data, gf$iid, exposure, int_covar, family, id_col, robust, center, threads, mem_gb)
-  res <- gxe_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, nl$srow, nl$X, nl$S, nl$n_exp, nl$terms,
+  nl <- .assoc_null(formula, data, gf$samples$iid, exposure, int_covar, family, id_col, robust, center, threads, mem_gb)
+  res <- gxe_stream_cpp(gf$ptr, out, nl$srow, nl$X, nl$S, nl$n_exp, nl$terms,
                         nl$resid, nl$w, robust, nl$threads, nl$mem_gb, as.integer(block))
   invisible(c(.assoc_value(out, nl, res),
               list(df_marginal = res$df_marginal, exposure_terms = nl$terms[seq_len(nl$n_exp)],
@@ -178,34 +176,10 @@ gxe <- function(formula, data, exposure, out, int_covar = NULL, pfile = NULL, bf
 
 # The value of gwas() / gxe() without kinship: the file and the run (nl: .assoc_null, res: the C++ stream).
 .assoc_value <- function(out, nl, res) {
-  list(out = out, variants = res$variants, tested = res$tested, bytes = res$bytes, samples = nl$n,
+  list(out = out, variants = res$variants, bytes = res$bytes, samples = nl$n,
        covariate_rank = res$rank, null_converged = nl$converged, df = res$df, block = res$block,
        threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
-       explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
-       multiallelic = res$variants - res$tested)
-}
-
-# The files of an association run: the genotype file (path; bed = whether a BED), its variant text, which the compiled
-# code reads (text: the .bim, or the .pvar; a .pvar.zst is expanded into a temporary file, tmp, which the caller
-# removes), and the sample IDs in file order (iid). R reads no line of the variant text.
-.geno_files <- function(pfile, bfile) {
-  if (is.null(pfile) == is.null(bfile)) stop("Give exactly one of pfile and bfile.", call. = FALSE)
-  if (!is.null(bfile)) {
-    bed <- .geno_bed_path(bfile)
-    base <- sub("\\.bed$", "", bed)
-    for (f in paste0(base, c(".bim", ".fam"))) if (!file.exists(f)) stop("File not found: ", f, call. = FALSE)
-    fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, select = 2L, colClasses = "character")
-    return(list(path = bed, bed = TRUE, text = paste0(base, ".bim"), tmp = NULL, iid = fam[[1L]]))
-  }
-  files <- .geno_pgen_files(pfile)
-  pvar <- paste0(files$prefix, ".pvar")
-  tmp <- NULL
-  if (!file.exists(pvar)) {
-    if (!file.exists(paste0(pvar, ".zst"))) stop("no .pvar or .pvar.zst for ", files$prefix, call. = FALSE)
-    pvar <- tmp <- .zst_expand(paste0(pvar, ".zst"))
-  }
-  list(path = files$pgen, bed = FALSE, text = normalizePath(pvar, winslash = "/"), tmp = tmp,
-       iid = .psam_ids(files$prefix))
+       explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular)
 }
 
 # The analysis samples of the null model `formula` (phenotype ~ covariates): rows of d with an ID and no missing

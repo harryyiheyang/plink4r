@@ -1,68 +1,98 @@
-#' Read the variant and sample tables of a BED or PGEN file once
+#' Open a BED or PGEN file: its variant and sample tables, read once
 #'
-#' Reads `.bim` / `.fam` (BED) or `.pvar` / `.psam` (PGEN) once, without any genotypes. Give the result to
-#' [geno_open()] as `file =` to open many windows or sample sets of the same file without re-reading the
-#' tables (a 10-million-row `.bim` takes seconds; an open from the tables takes milliseconds).
+#' Reads `.bim` / `.fam` (BED) or `.pvar` / `.psam` (PGEN) once, in compiled code, without any genotypes. Every
+#' function of the package that reads a genotype file takes the result as `file =` and then reads neither table
+#' again; a path given in its place is opened by the same reader, once in that call.
+#'
+#' A `.pvar` line that names several ALT alleles is one variant per ALT allele, in the order the line names them:
+#' each counts that one allele (a sample that carries another ALT of the line counts 0 of it), so every variant of
+#' the table has one counted allele `A1` and one other allele `A2`, and every function works on it as on a line
+#' with one ALT. A file without such lines has one variant per line. No variant ID is read: a variant is `CHR`,
+#' `BP`, `A1`, `A2`.
 #'
 #' @param bedfile PLINK 1 BED path or prefix (`.bim` and `.fam` alongside).
 #' @param pgenfile PLINK 2 PGEN path or prefix (`.pvar` or `.pvar.zst`, and `.psam` alongside).
-#' @param id Whether to read the variant ID column. `FALSE` saves time and memory on large tables (IDs are
-#'   often duplicated, e.g. "."); objects opened from it name their columns `chr:pos:a1:a2` and `snp_vec`
-#'   then selects by those names or by row.
-#' @return A list of class `geno_file`: `type` ("bed" / "pgen"), `path` (the .bed / .pgen), `prefix`,
-#'   `variants` = data.table(row, chr, pos, id, a1, a2, allele_ct) with `a1` the counted allele (bim
-#'   column 5 / ALT) and `a2` the other (bim column 6 / REF), both in upper case, and `chr` the integer chromosome
-#'   code: 1..22, 23 = X (a file's X, 23, PAR1, PAR2, XY and 25 are all 23), 24 = Y, 26 = MT, `NA` for any other
-#'   label; and `samples` = data.table(row, fid, iid). Select windows by row, e.g.
-#'   `gf$variants[chr == 16 & pos >= lo & pos <= hi, row]`, and pass them as `snp_vec`.
+#' @return A list of class `geno_file`: `type` ("bed" / "pgen"), `path` (the .bed / .pgen), `prefix`, `ptr` (the
+#'   tables as the compiled code holds them: an external pointer, valid in this R session only, so the object is
+#'   neither saved with `saveRDS` nor sent to parallel workers), `variants` = data.table(row, CHR, BP, A1, A2) with
+#'   `A1` the counted allele (bim column 5 / one ALT allele) and `A2` the other (bim column 6 / REF), both in upper
+#'   case, `CHR` the integer chromosome code: 1..22, 23 = X (a file's X, 23, PAR1, PAR2, XY and 25 are all 23),
+#'   24 = Y, 26 = MT, `NA` for any other label, and `row` the place of the variant in this table; and `samples` =
+#'   data.table(row, fid, iid). Select windows by row, e.g. `gf$variants[CHR == 16 & BP >= lo & BP <= hi, row]`,
+#'   and pass them as `snp_vec`.
 #' @export
-geno_file <- function(bedfile = NULL, pgenfile = NULL, id = TRUE) {
+geno_file <- function(bedfile = NULL, pgenfile = NULL) {
   if (is.null(bedfile) == is.null(pgenfile)) stop("Give exactly one of bedfile and pgenfile.", call. = FALSE)
+  tmp <- NULL
   if (!is.null(bedfile)) {
-    bed <- .geno_bed_path(bedfile)
-    base <- sub("\\.bed$", "", bed)
-    sel <- if (id) c(1L, 2L, 4L, 5L, 6L) else c(1L, 4L, 5L, 6L)
-    v <- data.table::fread(paste0(base, ".bim"), header = FALSE, select = sel,
-                           colClasses = list(character = intersect(c(1L, 2L, 5L, 6L), sel), integer = 4L))
-    data.table::setnames(v, if (id) c("chr", "id", "pos", "a1", "a2") else c("chr", "pos", "a1", "a2"))
-    v[, `:=`(row = .I, chr = .chr_code(chr), a1 = .by_unique(a1, toupper), a2 = .by_unique(a2, toupper),
-             allele_ct = 2L)]
-    fam <- data.table::fread(paste0(base, ".fam"), header = FALSE, select = 1:2, colClasses = "character")
-    s <- data.table::data.table(row = seq_len(nrow(fam)), fid = fam[[1L]], iid = fam[[2L]])
-    type <- "bed"; path <- bed
+    path <- .geno_bed_path(bedfile)
+    base <- sub("\\.bed$", "", path)
+    text <- paste0(base, c(".bim", ".fam"))
+    type <- "bed"
   } else {
     files <- .geno_pgen_files(pgenfile)
-    base <- files$prefix
-    pv <- .read_pvar5(base, id = id)
-    v <- data.table::setnames(pv, c("CHROM", "POS", "ID", "ALT", "REF"), c("chr", "pos", "id", "a1", "a2"), skip_absent = TRUE)
-    ps <- .psam_ids(base, fid = TRUE)
-    s <- data.table::data.table(row = seq_along(ps$iid), fid = ps$fid, iid = ps$iid)
-    type <- "pgen"; path <- files$pgen
+    base <- files$prefix; path <- files$pgen
+    pvar <- paste0(base, ".pvar")
+    if (!file.exists(pvar)) {
+      if (!file.exists(paste0(pvar, ".zst"))) stop("no .pvar or .pvar.zst for ", base, call. = FALSE)
+      pvar <- tmp <- .zst_expand(paste0(pvar, ".zst"))
+      on.exit(unlink(tmp), add = TRUE)
+    }
+    text <- c(pvar, paste0(base, ".psam"))
+    type <- "pgen"
   }
-  data.table::setcolorder(v, intersect(c("row", "chr", "pos", "id", "a1", "a2", "allele_ct"), names(v)))
-  structure(list(type = type, path = path, prefix = base, variants = v, samples = s), class = "geno_file")
+  for (f in text) if (!file.exists(f)) stop("File not found: ", f, call. = FALSE)
+  ptr <- geno_table_open_cpp(path, type == "bed", normalizePath(text[1L], winslash = "/"),
+                             normalizePath(text[2L], winslash = "/"))
+  v <- geno_table_variants_cpp(ptr)
+  s <- geno_table_samples_cpp(ptr)
+  structure(list(type = type, path = path, prefix = base, ptr = ptr,
+                 variants = data.table::data.table(row = seq_along(v$BP), CHR = v$CHR, BP = v$BP, A1 = v$alleles[v$A1],
+                                                   A2 = v$alleles[v$A2]),
+                 samples = data.table::data.table(row = seq_along(s$iid), fid = s$fid, iid = s$iid)),
+            class = "geno_file")
 }
 
-# The geno_file behind a geno_open call: `file` as given, else read from bedfile / pgenfile.
+# The geno_file behind a call: `file` as given, else opened from bedfile / pgenfile.
 .as_geno_file <- function(file = NULL, bedfile = NULL, pgenfile = NULL) {
   if (is.null(file)) return(geno_file(bedfile = bedfile, pgenfile = pgenfile))
   if (!inherits(file, "geno_file")) stop("file must be a geno_file() result.", call. = FALSE)
-  if (!is.null(bedfile) || !is.null(pgenfile)) stop("Give file or bedfile / pgenfile, not both.", call. = FALSE)
+  if (!is.null(bedfile) || !is.null(pgenfile)) stop("Give file or a path, not both.", call. = FALSE)
   file
 }
 
-# Column names of a geno_file's variants: the file ID, or chr:pos:a1:a2 without IDs.
-.geno_vid <- function(v) if ("id" %in% names(v)) v$id else paste(v$chr, v$pos, v$a1, v$a2, sep = ":")
+# The name of a variant: CHR:BP:A1:A2.
+.geno_vid <- function(v) paste(v$CHR, v$BP, v$A1, v$A2, sep = ":")
 
-# Rows of chr:pos:a1:a2 names x in a variants table without IDs, as match(x, .geno_vid(v)) but naming only the rows
-# at the positions in x (the second field of a name is its row's pos, so every row with that name is among them);
-# if a name is not found, through all names.
+# Rows of the names x (CHR:BP:A1:A2) in a variants table, as match(x, .geno_vid(v)) but naming only the rows at the
+# positions in x (the second field of a name is its row's BP, so every row with that name is among them); if a name
+# is not found, through all names.
 .geno_vid_index <- function(v, x) {
   pos <- suppressWarnings(as.integer(sub("^[^:]*:([^:]*):.*$", "\\1", x)))
   if (!anyNA(pos)) {
-    cand <- which(v$pos %in% pos)
+    cand <- which(v$BP %in% pos)
     idx <- cand[match(x, .geno_vid(v[cand]))]
     if (!anyNA(idx)) return(idx)
   }
   .geno_index(x, .geno_vid(v), NULL, "snp_vec")
+}
+
+# The variants (rows of the table) that snp_vec names: NULL = all, names CHR:BP:A1:A2, or rows.
+.geno_variants <- function(gf, snp_vec) {
+  v <- gf$variants
+  if (is.character(snp_vec)) .geno_vid_index(v, snp_vec) else .geno_index(snp_vec, v$row, NULL, "snp_vec")
+}
+
+# The samples (file rows) that sample_vec names: NULL = all, IIDs (or FID_IID), or rows.
+.geno_samples <- function(gf, sample_vec) {
+  s <- gf$samples
+  .geno_index(sample_vec, s$iid, paste(s$fid, s$iid, sep = "_"), "sample_vec")
+}
+
+# Per row of a variants table (CHR, BP, A1, A2): whether another row has its CHR, BP and A2. Such rows are the ALT
+# alleles of one position (a .pvar line with several ALT alleles, or the same written on several lines): 2 - x of
+# one of them counts "not A1", which is not the count of A2, so it is never matched in the swapped orientation.
+.several <- function(v) {
+  k <- data.table::data.table(CHR = v$CHR, BP = v$BP, A2 = v$A2)
+  duplicated(k) | duplicated(k, fromLast = TRUE)
 }

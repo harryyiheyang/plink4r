@@ -15,8 +15,9 @@
 #'    frequency of A1) on chromosomes 1 to 22 and X are matched to the `.pvar` /
 #'    `.bim` of `geno` by chromosome, the `build` position and alleles: a file
 #'    whose counted allele (ALT for PGEN, bim column 5 for BED) is `A1` keeps
-#'    its sign, one whose counted allele is `A2` is flipped; multiallelic
-#'    `.pvar` rows are skipped. The LD of the panel counts `A1`.
+#'    its sign, one whose counted allele is `A2` is flipped (not one ALT
+#'    allele of several at a position, which is matched by its own `A1` only:
+#'    see [geno_file()]). The LD of the panel counts `A1`.
 #' 2. A variant is placed in the block of `blocks` with start <= position < end. Blocks
 #'    without variants are dropped; a block with fewer than `min_snp` variants
 #'    is merged into its neighbour on the same chromosome with fewer variants,
@@ -195,20 +196,20 @@ ld_blocks_default <- function(build = 38) {
   list(table = d, key = key[CHR %in% .panel_chr & !is.na(BP)])
 }
 
-# Variants of every genotype file: file, 1-based row, chromosome code, position, counted / other allele of its biallelic
-# rows on the panel chromosomes (1 to 22, X; a .pvar's PAR1 / PAR2 / XY rows are X). files[[f]] = list(prefix as given, file = its geno_file(), read without IDs), from
-# which every block of the file is opened.
+# Variants of every genotype file: file, 1-based row, chromosome code, position, counted / other allele of its
+# variants on the panel chromosomes (1 to 22, X; a .pvar's PAR1 / PAR2 / XY rows are X), and several (.several()).
+# files[[f]] = list(prefix as given, file = its geno_file()), from which every block of the file is opened.
 .ldb_geno_variants <- function(geno) {
   files <- list()
   vars <- list()
   for (f in seq_along(geno)) {
     pre <- sub("\\.(pgen|bed)$", "", geno[f])
-    gf <- if (file.exists(paste0(pre, ".pgen"))) geno_file(pgenfile = pre, id = FALSE) else
-      if (file.exists(paste0(pre, ".bed"))) geno_file(bedfile = pre, id = FALSE) else
+    gf <- if (file.exists(paste0(pre, ".pgen"))) geno_file(pgenfile = pre) else
+      if (file.exists(paste0(pre, ".bed"))) geno_file(bedfile = pre) else
         stop("No .pgen or .bed for ", geno[f], call. = FALSE)
     files[[f]] <- list(prefix = pre, file = gf)
     v <- gf$variants
-    v <- data.table::data.table(file = f, row = v$row, CHR = v$chr, BP = v$pos, cnt = v$a1, oth = v$a2)[v$allele_ct == 2L]
+    v <- data.table::data.table(file = f, row = v$row, CHR = v$CHR, BP = v$BP, cnt = v$A1, oth = v$A2, several = .several(v))
     vars[[f]] <- v[CHR %in% .panel_chr]
   }
   vars <- data.table::rbindlist(vars)
@@ -223,11 +224,12 @@ ld_blocks_default <- function(build = 38) {
   v <- gv$variants
   same <- v[ref, on = .(CHR, BP, cnt = A1, oth = A2), nomatch = NULL]
   same[, sgn := 1L]
+  v <- v[!v$several]  # one ALT allele of several is matched in its own orientation only
   data.table::setnames(same, c("cnt", "oth"), c("A1", "A2"))
   swap <- v[ref, on = .(CHR, BP, cnt = A2, oth = A1), nomatch = NULL]
   swap[, sgn := -1L]
   data.table::setnames(swap, c("cnt", "oth"), c("A2", "A1"))
-  m <- data.table::rbindlist(list(same, swap), use.names = TRUE)
+  m <- data.table::rbindlist(list(same, swap), use.names = TRUE)[, several := NULL]
   data.table::setorder(m, CHR, BP, A2, A1, file, row)
   dup <- duplicated(m, by = c("CHR", "BP", "A2", "A1"))
   if (any(dup)) {

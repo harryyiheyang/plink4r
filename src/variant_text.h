@@ -2,11 +2,11 @@
 // in file order. R holds none of it. Three layers:
 //   TextLines      the lines of a text file, one after another
 //   VariantLines   the variant lines of a .bim / .pvar, and what a field of such a line says (chr_code, parse_bp,
-//                  allele_count, variant_fields)
-//   what a scan takes from them: allele_counts (a PGEN needs the number of alleles of every variant before any
-//   genotype is read), read_variant_table (chromosome, position and alleles of every line, for a scan that places
-//   windows) and ResultText (the result of a scan of every variant: chromosome, position and alleles of each line,
-//   then its statistics).
+//                  variant_fields)
+//   VariantTable   the variants of a file, read once (read_variant_table): a line that names K ALT alleles is K
+//                  variants, each counting one of them, so every variant has one counted allele (A1) and one other (A2)
+//   SampleTable    the samples of a .fam / .psam, read once (read_sample_table)
+//   ResultText     the result of a scan as text: CHR, BP, A1, A2 of each variant scanned, then its statistics
 // What a result says of a variant is what its line says: chromosome label and alleles are written as the file has
 // them, never recoded. The chromosome code (chr_code) only matches a variant to a table that names chromosomes.
 #ifndef PLINK4R_VARIANT_TEXT_H
@@ -149,29 +149,6 @@ inline std::int32_t parse_bp(const char* s, std::size_t n) {
   return v > 2147483647LL ? -1 : static_cast<std::int32_t>(v);
 }
 
-// The number of alleles an ALT field names: the reference and one per comma-separated ALT allele.
-inline int allele_count(const char* alt, std::size_t n) {
-  int c = 2;
-  for (std::size_t i = 0; i < n; ++i) c += alt[i] == ',';
-  return c;
-}
-
-// The number of alleles of every variant line of a .pvar.
-inline std::vector<int> allele_counts(const std::string& pvar) {
-  VariantLines in(pvar, false);
-  std::vector<int> ct;
-  const char* s; std::size_t len;
-  VariantFields f;
-  while (in.next(s, len)) {
-    if (len == 0) continue;
-    if (!variant_fields(s, len, false, f))
-      Rcpp::stop("Line %.0f of the variants of %s has fewer than 5 fields.", static_cast<double>(ct.size() + 1),
-                 pvar.c_str());
-    ct.push_back(allele_count(f.alt, f.alt_n));
-  }
-  return ct;
-}
-
 // The distinct texts of a field, as the file writes them, each with the code of its first appearance.
 class TextCodes {
  public:
@@ -198,18 +175,21 @@ class TextCodes {
   std::string key_;
 };
 
-// Every variant line of a .bim / .pvar, by file row: its chromosome label and its two alleles as codes into the
-// distinct texts of the file (chromosomes, alleles: as the file writes them), its position (-1: not a position), and
-// for a .pvar the number of alleles (a .bim line has two: allele_ct is empty). chromosome_code: the chromosome code
-// of each label (chr_code; -1: none).
+// The variants of a .bim / .pvar, in file order. A .pvar line that names K ALT alleles (comma-separated) is K
+// variants, one per ALT allele, in the order the line names them: variant v counts the alt[v]-th ALT of file line
+// line[v] (A1) against the reference (A2); a sample carrying another ALT of the line counts 0 of this one. A .bim
+// line is one variant: A1 = column 5, the counted allele, A2 = column 6. chr, a1, a2: codes into the distinct texts
+// of the file (chromosomes, alleles: as the file writes them); bp: the position (-1: not a position);
+// chromosome_code: the chromosome code of each label (chr_code; -1: none). line_alleles: the number of alleles of
+// every file line (a PGEN needs it before any genotype is read).
 struct VariantTable {
-  std::vector<std::int32_t> chr, bp, ref, alt;
-  std::vector<int> allele_ct;
+  std::vector<std::int32_t> chr, bp, a1, a2, line, alt;
+  std::vector<int> line_alleles;
   std::vector<std::string> chromosomes, alleles;
   std::vector<std::int32_t> chromosome_code;
   std::size_t size() const { return chr.size(); }
-  bool biallelic(std::size_t r) const { return allele_ct.empty() || allele_ct[r] == 2; }
-  std::int32_t code(std::size_t r) const { return chromosome_code[chr[r]]; }
+  std::size_t lines() const { return line_alleles.size(); }
+  std::int32_t code(std::size_t v) const { return chromosome_code[chr[v]]; }
 };
 inline VariantTable read_variant_table(const std::string& path, bool bim) {
   VariantLines in(path, bim);
@@ -220,21 +200,87 @@ inline VariantTable read_variant_table(const std::string& path, bool bim) {
   VariantFields f;
   while (in.next(s, len)) {
     if (len == 0) continue;
+    const std::int32_t line = static_cast<std::int32_t>(v.lines());
     if (!variant_fields(s, len, bim, f))
-      Rcpp::stop("Line %.0f of the variants of %s has fewer than %d fields.", static_cast<double>(v.size() + 1),
+      Rcpp::stop("Line %.0f of the variants of %s has fewer than %d fields.", static_cast<double>(line + 1),
                  path.c_str(), bim ? 6 : 5);
     if (c < 0 || chromosomes.text[c].size() != f.chr_n || std::memcmp(chromosomes.text[c].data(), f.chr, f.chr_n) != 0)
       c = chromosomes.code(f.chr, f.chr_n);
-    v.chr.push_back(c);
-    v.bp.push_back(parse_bp(f.pos, f.pos_n));
-    v.ref.push_back(alleles.code(f.ref, f.ref_n));
-    v.alt.push_back(alleles.code(f.alt, f.alt_n));
-    if (!bim) v.allele_ct.push_back(allele_count(f.alt, f.alt_n));
+    const std::int32_t bp = parse_bp(f.pos, f.pos_n), ref = alleles.code(f.ref, f.ref_n);
+    int k = 0;
+    for (const char* b = f.alt; ; ) {  // the ALT alleles of the line: one for a .bim line
+      const char* e = bim ? nullptr : static_cast<const char*>(std::memchr(b, ',', f.alt + f.alt_n - b));
+      if (!e) e = f.alt + f.alt_n;
+      v.chr.push_back(c); v.bp.push_back(bp); v.a2.push_back(ref);
+      v.a1.push_back(alleles.code(b, static_cast<std::size_t>(e - b)));
+      v.line.push_back(line); v.alt.push_back(++k);
+      if (e == f.alt + f.alt_n) break;
+      b = e + 1;
+    }
+    v.line_alleles.push_back(k + 1);
   }
   v.chromosomes = std::move(chromosomes.text);
   v.alleles = std::move(alleles.text);
   for (const std::string& label : v.chromosomes) v.chromosome_code.push_back(chr_code(label.data(), label.size()));
   return v;
+}
+
+// The samples of a .fam (columns 1 and 2: family and individual ID, no header) or of a .psam (the columns named
+// IID or #IID, and FID or #FID in its header line; fid "0" without that column), in file order.
+struct SampleTable {
+  std::vector<std::string> fid, iid;
+  std::size_t size() const { return iid.size(); }
+};
+inline SampleTable read_sample_table(const std::string& path, bool fam) {
+  TextLines in(path);
+  SampleTable t;
+  const char* s; std::size_t len;
+  std::vector<std::pair<const char*, std::size_t>> tok;
+  const auto split = [&](bool tabs_only) {
+    tok.clear();
+    const char* p = s; const char* const e = s + len;
+    if (tabs_only) {  // a .psam: tab-separated, a field may be empty
+      for (;;) {
+        const char* q = static_cast<const char*>(std::memchr(p, '\t', e - p));
+        if (!q) q = e;
+        tok.emplace_back(p, static_cast<std::size_t>(q - p));
+        if (q == e) break;
+        p = q + 1;
+      }
+      return;
+    }
+    while (p < e) {
+      while (p < e && (*p == '\t' || *p == ' ')) ++p;
+      if (p == e) break;
+      const char* b = p;
+      while (p < e && *p != '\t' && *p != ' ') ++p;
+      tok.emplace_back(b, static_cast<std::size_t>(p - b));
+    }
+  };
+  int fid_col = fam ? 0 : -1, iid_col = fam ? 1 : -1;
+  bool header = !fam, tabs = false;
+  while (in.next(s, len)) {
+    if (len == 0) continue;
+    if (header) {
+      if (len >= 2 && s[0] == '#' && s[1] == '#') continue;
+      tabs = std::memchr(s, '\t', len) != nullptr;
+      split(tabs);
+      for (std::size_t c = 0; c < tok.size(); ++c) {
+        const std::string name(tok[c].first, tok[c].second);
+        if (name == "#IID" || name == "IID") { if (iid_col < 0) iid_col = static_cast<int>(c); }
+        else if (name == "#FID" || name == "FID") { if (fid_col < 0) fid_col = static_cast<int>(c); }
+      }
+      if (iid_col < 0) Rcpp::stop(path + " has no IID column");
+      header = false;
+      continue;
+    }
+    split(tabs);
+    if (static_cast<int>(tok.size()) <= std::max(iid_col, fid_col))
+      Rcpp::stop("Line %.0f of the samples of %s has too few fields.", static_cast<double>(t.size() + 1), path.c_str());
+    t.iid.emplace_back(tok[iid_col].first, tok[iid_col].second);
+    if (fid_col >= 0) t.fid.emplace_back(tok[fid_col].first, tok[fid_col].second); else t.fid.emplace_back("0");
+  }
+  return t;
 }
 
 // A number as the shortest text that reads back as the same double; NA for a missing value.
@@ -249,25 +295,20 @@ inline void put_count(std::string& o, long long v) {
   o.append(b, std::to_chars(b, b + 24, v).ptr);
 }
 
-// The result of a scan of every variant of a file, as text: one row per line of the .bim / .pvar, in file order,
-// tab-separated. A row is CHR, BP, REF, ALT, the four fields of the line as they are written there (nothing is
-// recoded; ALT is the counted allele, column 5 of a .bim), then the statistics of the variant; a variant without
-// statistics has NA in their place. The first line names the columns.
-//
-// The scan goes through the file in order. Before a group of threads computes, load() brings in the fields of the
-// lines up to the group's last variant; every thread then writes the rows of its own variants into a text of its
-// own (row()), and write() puts those texts into the file in order. finish() writes the lines after the last
-// variant tested.
+// The result of a scan as text, tab-separated: one row per variant scanned, in the order of the scan. A row is CHR,
+// BP, A1, A2 of the variant (chromosome label and alleles as its line of the .bim / .pvar writes them, nothing
+// recoded; A1 is the counted allele; NA for a position that is not one), then its statistics; a variant without
+// statistics has NA in their place. The first line names the columns. Every thread writes the rows of its own
+// variants into a text of its own (row()), and write() puts those texts into the file in order; finish() closes it.
 class ResultText {
  public:
-  // statistics: the names of the columns after ALT; the second of them is a count (row()).
-  ResultText(const std::string& text_path, bool bim, const std::string& out_path,
-             const std::vector<std::string>& statistics)
-      : in_(text_path, bim), bim_(bim), n_stat_(static_cast<int>(statistics.size())), out_path_(out_path) {
+  // statistics: the names of the columns after A2; the second of them is a count (row()).
+  ResultText(const VariantTable& variants, const std::string& out_path, const std::vector<std::string>& statistics)
+      : vt_(variants), n_stat_(static_cast<int>(statistics.size())), out_path_(out_path) {
     out_ = std::fopen(out_path.c_str(), "wb");
     if (!out_) Rcpp::stop("Cannot write " + out_path);
     std::setvbuf(out_, nullptr, _IOFBF, std::size_t(1) << 22);
-    std::string h = "CHR\tBP\tREF\tALT";
+    std::string h = "CHR\tBP\tA1\tA2";
     for (const std::string& s : statistics) { h += '\t'; h += s; }
     h += '\n';
     put(h);
@@ -278,89 +319,36 @@ class ResultText {
   ResultText(const ResultText&) = delete;
   ResultText& operator=(const ResultText&) = delete;
 
-  // Brings the fields of the file rows first() .. row_end - 1 into memory, in place of those held before.
-  void load(long long row_end) {
-    first_ = next_;
-    text_.clear(); off_.clear();
-    const char* s; std::size_t len;
-    while (next_ < row_end) {
-      if (!take(s, len))
-        Rcpp::stop("%s has %.0f variant lines, fewer than the genotype file has variants.", in_.path().c_str(),
-                   static_cast<double>(next_));
-      off_.push_back(text_.size());
-      append_fields(text_, s, len);
-      ++next_;
-    }
-    off_.push_back(text_.size());
-  }
-  long long first() const { return first_; }
-  long long end() const { return next_; }
-  // Appends the row of file row r (loaded) to o: its four fields, then the statistics: v[0], the count n, v[1],
-  // v[2], ...; NA for each when v is null.
-  void row(std::string& o, long long r, long long n, const double* v) const {
-    const std::size_t i = static_cast<std::size_t>(r - first_);
-    o.append(text_.data() + off_[i], off_[i + 1] - off_[i]);
-    if (!v) {
-      for (int k = 0; k < n_stat_; ++k) o += "\tNA";
-    } else {
-      o += '\t'; put_number(o, v[0]);
-      o += '\t'; put_count(o, n);
-      for (int k = 1; k + 1 < n_stat_; ++k) { o += '\t'; put_number(o, v[k]); }
-    }
+  // Appends the row of variant r of the table to o: its four fields, then the statistics: v[0], the count n, v[1],
+  // v[2], ...
+  void row(std::string& o, std::size_t r, long long n, const double* v) const {
+    o += vt_.chromosomes[vt_.chr[r]]; o += '\t';
+    if (vt_.bp[r] < 0) o += "NA"; else put_count(o, vt_.bp[r]);
+    o += '\t'; o += vt_.alleles[vt_.a1[r]];
+    o += '\t'; o += vt_.alleles[vt_.a2[r]];
+    o += '\t'; put_number(o, v[0]);
+    o += '\t'; put_count(o, n);
+    for (int k = 1; k + 1 < n_stat_; ++k) { o += '\t'; put_number(o, v[k]); }
     o += '\n';
   }
   void write(const std::string& rows) { put(rows); }
-  // The lines after the last variant tested (no statistics), the end of the file; returns the variant lines of the
-  // .bim / .pvar, which must be m.
-  long long finish(long long m) {
-    std::string o;
-    const char* s; std::size_t len;
-    while (take(s, len)) {
-      append_fields(o, s, len);
-      ++next_;
-      for (int k = 0; k < n_stat_; ++k) o += "\tNA";
-      o += '\n';
-      if (o.size() > (std::size_t(1) << 20)) { put(o); o.clear(); }
-    }
-    put(o);
-    if (next_ != m)
-      Rcpp::stop("%s has %.0f variant lines, the genotype file %.0f variants.", in_.path().c_str(),
-                 static_cast<double>(next_), static_cast<double>(m));
+  void finish() {
     const bool bad = std::fclose(out_) != 0;
     out_ = nullptr;
     if (bad) { std::remove(out_path_.c_str()); Rcpp::stop("Write error in " + out_path_); }
-    return next_;
   }
   double bytes() const { return bytes_; }
 
  private:
-  bool take(const char*& s, std::size_t& len) {  // the next variant line (empty lines are passed over)
-    while (in_.next(s, len)) if (len) return true;
-    return false;
-  }
-  void append_fields(std::string& o, const char* s, std::size_t len) const {  // of variant line next_ + 1
-    VariantFields f;
-    if (!variant_fields(s, len, bim_, f))
-      Rcpp::stop("Line %.0f of the variants of %s has fewer than %d fields.", static_cast<double>(next_ + 1),
-                 in_.path().c_str(), bim_ ? 6 : 5);
-    o.append(f.chr, f.chr_n); o += '\t';
-    o.append(f.pos, f.pos_n); o += '\t';
-    o.append(f.ref, f.ref_n); o += '\t';
-    o.append(f.alt, f.alt_n);
-  }
   void put(const std::string& s) {
     if (s.empty()) return;
     if (std::fwrite(s.data(), 1, s.size(), out_) != s.size()) Rcpp::stop("Write error in " + out_path_);
     bytes_ += static_cast<double>(s.size());
   }
-  VariantLines in_;
-  bool bim_;
+  const VariantTable& vt_;
   int n_stat_;
   std::string out_path_;
   std::FILE* out_ = nullptr;
-  std::string text_;
-  std::vector<std::size_t> off_;
-  long long first_ = 0, next_ = 0;
   double bytes_ = 0;
 };
 

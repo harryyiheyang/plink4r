@@ -12,32 +12,45 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "geno_table.h"
 #include "pgen_reader.h"
-#include "variant_text.h"
 
 namespace plink4r {
 
 constexpr int kScanRowChunk = 2048;   // rows of G expanded at a time (multiple of 4)
 constexpr int kScanBlockMax = 4096;   // largest automatic block per thread
 
-// The genotype file of a scan: a BED (A1 = .bim column 5 counted) or a PGEN (ALT counted; hard calls or dosages), and
-// the file rows (0-based) of the variants to scan and of the analysis samples.
+// The genotype file of a scan: an opened BED (A1 = .bim column 5 counted) or PGEN (the ALT of each variant counted;
+// hard calls or dosages), the variants of its table to scan (vi, 0-based) and the file rows of the analysis samples.
 struct ScanFile {
+  const GenoTable& table;
   std::unique_ptr<PgenFile> pf;
   std::unique_ptr<BedFile> bf;
   std::vector<int> vi, si;
   int n_raw = 0, ns = 0;
   bool ident = false, dosage = false;
-  // m: the variants of the file. allele_ct: the number of alleles of every variant of a PGEN, by file row (a BED
-  // has two of each; not read). var_rows: the file rows of the variants to scan. T: threads that will read.
-  ScanFile(const std::string& path, bool bed, int n_raw_, std::size_t m, const std::vector<int>& allele_ct,
-           std::vector<int> var_rows, const Rcpp::IntegerVector& sample_idx, int T)
-      : vi(std::move(var_rows)), si(sample_idx.begin(), sample_idx.end()), n_raw(n_raw_),
-        ns(static_cast<int>(sample_idx.size())) {
+  // variants: those to scan; T: threads that will read.
+  ScanFile(const GenoTable& table_, std::vector<int> variants, const Rcpp::IntegerVector& sample_idx, int T)
+      : table(table_), vi(std::move(variants)), si(sample_idx.begin(), sample_idx.end()),
+        n_raw(static_cast<int>(table_.samples.size())), ns(static_cast<int>(sample_idx.size())) {
     ident = identity_samples(si.data(), ns, n_raw);
-    if (bed) bf.reset(new BedFile(path, n_raw, m, T));
-    else pf.reset(new PgenFile(path, n_raw, allele_ct, T));
+    if (table.bed) bf.reset(new BedFile(table.path, n_raw, table.variants.lines(), T));
+    else pf.reset(new PgenFile(table.path, n_raw, table.variants.line_alleles, T));
     dosage = pf && pf->dosage();
+  }
+  // Every variant of the file.
+  ScanFile(const GenoTable& table_, const Rcpp::IntegerVector& sample_idx, int T)
+      : ScanFile(table_, all_variants(table_), sample_idx, T) {}
+  static std::vector<int> all_variants(const GenoTable& t) {
+    std::vector<int> v(t.variants.size());
+    for (std::size_t j = 0; j < v.size(); ++j) v[j] = static_cast<int>(j);
+    return v;
+  }
+  std::size_t line(long long j) const { return static_cast<std::size_t>(table.variants.line[vi[j]]); }
+  int alt(long long j) const { return table.variants.alt[vi[j]]; }
+  // What to say of a read that failed at scan variant j.
+  std::string failure(long long j) const {
+    return pf ? pf->failure(line(j)) : "Genotype read failed at line " + std::to_string(line(j) + 1) + " of " + table.path;
   }
   // Bytes of the read buffers of one thread.
   double thread_bytes() const {
@@ -45,35 +58,6 @@ struct ScanFile {
     return (bf ? rawb : (dosage ? 3.0 * n_raw : rawb)) + 1048576.0;
   }
 };
-
-// The variants of a file for a scan of all of them: how many it has, the number of alleles of each (PGEN) and the
-// file rows of those with two, which are the ones scanned. A BED says how many variants it has by its size (3 bytes,
-// then (n + 3) / 4 bytes per variant) and all have two alleles; for a PGEN the .pvar is read for the ALT alleles of
-// every line (variant_text.h).
-struct FileVariants {
-  std::size_t m = 0;
-  std::vector<int> allele_ct, rows;
-};
-inline FileVariants file_variants(const std::string& path, bool bed, int n_raw, const std::string& variant_text) {
-  FileVariants v;
-  if (bed) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) Rcpp::stop("Cannot open BED file: " + path);
-    const std::uint64_t size = static_cast<std::uint64_t>(f.tellg()), stride = (static_cast<std::uint64_t>(n_raw) + 3) / 4;
-    if (size < 3 || stride == 0 || (size - 3) % stride != 0)
-      Rcpp::stop("BED size does not match its FAM file: " + path);
-    v.m = static_cast<std::size_t>((size - 3) / stride);
-    v.rows.resize(v.m);
-    for (std::size_t j = 0; j < v.m; ++j) v.rows[j] = static_cast<int>(j);
-  } else {
-    v.allele_ct = allele_counts(variant_text);
-    v.m = v.allele_ct.size();
-    for (std::size_t j = 0; j < v.m; ++j)
-      if (v.allele_ct[j] == 2) v.rows.push_back(static_cast<int>(j));
-  }
-  if (v.rows.empty()) Rcpp::stop("No biallelic variant to test.");
-  return v;
-}
 
 // The variants of one thread's block over the analysis samples, compact: 2-bit codes (hard calls) or 0.01 dosage steps,
 // with the observed mean of each variant (a missing cell counts as that mean: 0 after centring) and whether it cannot be
@@ -133,7 +117,7 @@ struct ScanBlock {
       const long long j = j0 + s;
       double no = 0, sum = 0, sq = 0;
       if (dosage) {
-        const std::uint16_t* d = F.pf->read_dosage(static_cast<std::size_t>(F.vi[j]), th);
+        const std::uint16_t* d = F.pf->read_dosage(F.line(j), F.alt(j), th);
         if (!d) { bad = j; mono[s] = 1; continue; }
         std::uint16_t* o = &g16[static_cast<std::size_t>(s) * n];
         for (int i = 0; i < n; ++i) {
@@ -145,8 +129,7 @@ struct ScanBlock {
           no += 1; sum += x; sq += x * x;
         }
       } else {
-        const unsigned char* gv = F.bf ? F.bf->read_counts(static_cast<std::size_t>(F.vi[j]), th)
-                                       : F.pf->read(static_cast<std::size_t>(F.vi[j]), th);
+        const unsigned char* gv = F.bf ? F.bf->read_counts(F.line(j), th) : F.pf->read(F.line(j), F.alt(j), th);
         if (!gv) { bad = j; mono[s] = 1; continue; }
         unsigned char* dst = &g8[s * sb];
         compact_genovec(gv, F.si.data(), n, F.ident, dst);

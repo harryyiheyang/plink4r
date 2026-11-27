@@ -87,19 +87,17 @@ reml_tau_para <- function() {
 # BETA = g' P y / g' P g and SE = (g' P g)^-1/2 (generalised least squares; for the logistic model on the working
 # response, one step from the null model). g' P g is exact (no GRAMMAR-GAMMA approximation). The result file has
 # the columns of the route without kinship.
-.gwas_kinship <- function(formula, data, out, pfile, bfile, kinship, family, id_col, threads, mem_gb, block, para) {
+.gwas_kinship <- function(formula, data, out, gf, kinship, family, id_col, threads, mem_gb, block, para) {
   t0 <- proc.time()[["elapsed"]]
   P <- .reml_para(para)
   threads <- .threads(threads); mem_gb <- .mem_gb(mem_gb, threads)
-  gf <- .geno_files(pfile, bfile)
-  if (!is.null(gf$tmp)) on.exit(unlink(gf$tmp), add = TRUE)
-  D <- .mm_design(formula, data, family, id_col, gf$iid)
+  D <- .mm_design(formula, data, family, id_col, gf$samples$iid)
   nl <- .reml_null(D, kinship, family, P, proj = TRUE)
   t1 <- proc.time()[["elapsed"]]
-  res <- gwas_kin_stream_cpp(gf$path, gf$bed, length(gf$iid), gf$text, out, if (family == "gaussian") "T" else "Z",
+  res <- gwas_kin_stream_cpp(gf$ptr, out, if (family == "gaussian") "T" else "Z",
                              as.integer(D$srow - 1L), nl$null, threads, mem_gb, as.integer(block))
   t2 <- proc.time()[["elapsed"]]
-  invisible(c(list(out = out, variants = res$variants, tested = res$tested, bytes = res$bytes),
+  invisible(c(list(out = out, variants = res$variants, bytes = res$bytes),
               .kin_value(nl, family, res), list(time = c(null = t1 - t0, stream = t2 - t1, total = t2 - t0))))
 }
 
@@ -108,8 +106,7 @@ reml_tau_para <- function() {
   c(nl$est[setdiff(names(nl$est), c("beta", "baseline"))],
     list(samples = nl$est$n, family = family, covariate_rank = length(nl$est$beta), block = res$block,
          threads = res$threads, mem_gb = res$mem_gb, simd = res$simd, dosage = res$dosage,
-         explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular,
-         multiallelic = res$variants - res$tested))
+         explicit_projection = res$explicit, monomorphic = res$monomorphic, singular = res$singular))
 }
 
 .reml_para <- function(para) {

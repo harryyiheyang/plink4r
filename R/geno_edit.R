@@ -4,7 +4,7 @@
 #' Rows and columns of a geno object as a new geno object
 #'
 #' The selected cells are copied as stored (missing cells keep their current fill; nothing is refilled) and
-#' the rows of the missing cells follow the selection. `center`, `sd`, `n_miss` and `af` are those of the
+#' the rows of the missing cells follow the selection. `center`, `sd`, `n_miss` and `A1Freq` are those of the
 #' subset. Use [genotype_fill()] afterwards to refill the missing cells from the subset's own samples.
 #'
 #' @param X A `geno` object.
@@ -22,14 +22,14 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
   .geno_take(X, rows, cols, NULL, threads)
 }
 
-# Rows x cols (1-based) of X, columns with flip TRUE stored as 2 - x (a1 / a2 swapped, `flipped` toggled).
+# Rows x cols (1-based) of X, columns with flip TRUE stored as 2 - x (A1 / A2 swapped, `flipped` toggled).
 .geno_take <- function(X, rows, cols, flip = NULL, threads = X$threads) {
   ptr <- geno_take_cpp(X$ptr, as.integer(rows) - 1L, as.integer(cols) - 1L,
                        if (is.null(flip)) logical(0) else as.logical(flip), .threads(threads))
   cl <- .geno_cols(X, cols)
   if (!is.null(flip) && any(flip)) {
-    a1 <- cl$a1
-    cl$a1[flip] <- cl$a2[flip]; cl$a2[flip] <- a1[flip]
+    a1 <- cl$A1
+    cl$A1[flip] <- cl$A2[flip]; cl$A2[flip] <- a1[flip]
     cl$flipped <- xor(cl$flipped, flip)
   }
   .geno_new(ptr, cl, list(sample = X$sample[rows], fid = X$fid[rows]), impute = X$impute, scale = X$scale,
@@ -38,29 +38,29 @@ geno_subset <- function(X, sample_vec = NULL, snp_vec = NULL, threads = X$thread
 
 #' Put geno objects on one counted allele per variant
 #'
-#' Variants are matched across objects by chromosome, position and the unordered allele pair (IDs are not
-#' used). Without `ref`, the counted allele of each variant is that of the first object holding it, and
+#' Variants are matched across objects by chromosome, position and the unordered allele pair. Without `ref`, the counted allele of each variant is that of the first object holding it, and
 #' every other object is flipped there exactly (stored x -> 2 - x on the 2-bit and int16 parts, so the
 #' values, missing cells and fills of a flipped column are 2 minus the old ones). With `ref`, only `ref`
 #' decides: columns matching a `ref` row are put on its A1, and columns absent from `ref` (or whose allele
 #' pair does not match) are left as they are in every object (remove them with [geno_subset()]; the
 #' `ref_row` column of the `variants` table is `NA` for them). A variant whose unordered pair occurs twice
 #' at one position in any object or in `ref` (e.g. TC/T and T/TC) is matched by its ordered alleles and
-#' never flipped. Nothing is dropped and no sample or fill is changed; strand is not considered
+#' never flipped. A flipped column of one ALT allele of a `.pvar` line with several holds 2 minus the count of that
+#' allele, i.e. the count of every other allele of the line, not of REF alone (as after `plink2` splits such a
+#' line). Nothing is dropped and no sample or fill is changed; strand is not considered
 #' (palindromic variants are only marked).
 #'
 #' @param X A named list of `geno` objects (or one object), in order of priority.
-#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns: `CHR` (or chr /
-#'   CHROM; read as the chromosome code of [geno_file()], so X, chrX and 23 are the same), `BP37` or `BP38` (or
-#'   pos / POS / BP; the build of the objects' positions), `A1`, `A2`, optional `A1Freq` (frequency of A1);
-#'   alleles are upper-cased. The SNP table of an LD panel (`snpinfo.parquet`) is such a table.
+#' @param ref Optional SNP table giving the counted allele A1 of its variants. Columns: `CHR` (read as the
+#'   chromosome code of [geno_file()], so X, chrX and 23 are the same), `BP` (or `BP37` / `BP38`: the build of the
+#'   objects' positions), `A1`, `A2`, optional `A1Freq` (frequency of A1); alleles are upper-cased. The SNP table of an LD panel (`snpinfo.parquet`) is such a table.
 #' @param build 37 or 38: which of `BP37` / `BP38` to use when `ref` has both.
 #' @param threads Number of OpenMP threads; 0 takes them from [plink4r_resources()].
-#' @return A list of `geno` objects like `X`, with column names `chr:pos:a1:a2` (a1 = counted allele)
-#'   and `a1`, `a2`, `flipped` updated; objects without a flip keep their store. Attribute `variants`: one
-#'   row per column name (key, chr, pos, a1, a2, anchor = name of the object (or "ref") fixing a1,
+#' @return A list of `geno` objects like `X`, with column names `CHR:BP:A1:A2` (A1 = counted allele)
+#'   and `A1`, `A2`, `flipped` updated; objects without a flip keep their store. Attribute `variants`: one
+#'   row per column name (key, CHR, BP, A1, A2, anchor = name of the object (or "ref") fixing A1,
 #'   ref_row = row of `ref` (NA if absent), A1Freq = `ref`'s A1Freq (NA if absent), present_<name>,
-#'   af_<name> = observed frequency of a1 in that object, palindromic). Map an object's columns to it with
+#'   A1Freq_<name> = observed frequency of A1 in that object, palindromic). Map an object's columns to it with
 #'   `match(G$snp, variants$key)`.
 #' @export
 geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
@@ -74,17 +74,17 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
   if (anyDuplicated(nm)) stop("The names of X must be unique.", call. = FALSE)
   metas <- lapply(seq_along(X), function(k) {
     G <- X[[k]]
-    if (is.null(G$chr) || anyNA(G$chr) || anyNA(G$pos))
+    if (anyNA(G$CHR) || anyNA(G$BP))
       stop(nm[k], " has columns without a chromosome code or a position.", call. = FALSE)
-    data.table::data.table(chr = G$chr, pos = as.integer(G$pos), A1 = toupper(G$a1), A2 = toupper(G$a2))
+    data.table::data.table(CHR = G$CHR, BP = as.integer(G$BP), A1 = G$A1, A2 = G$A2)
   })
   # of ref, only the rows at a position of some object can name a column: the others are left out before keys are made
-  r <- if (!is.null(ref)) .harm_ref(ref, build)[unique(data.table::rbindlist(metas)[, .(chr, pos)]), on = .(chr, pos),
+  r <- if (!is.null(ref)) .harm_ref(ref, build)[unique(data.table::rbindlist(metas)[, .(CHR, BP)]), on = .(CHR, BP),
                                                  nomatch = NULL][order(ref_row)]
   all_m <- c(if (!is.null(r)) list(r), metas)
-  for (m in all_m) m[, cid := paste(chr, pos, pmin(A1, A2), pmax(A1, A2), sep = ":")]
+  for (m in all_m) m[, cid := paste(CHR, BP, pmin(A1, A2), pmax(A1, A2), sep = ":")]
   amb <- unique(unlist(lapply(all_m, function(m) m$cid[duplicated(m$cid)])))
-  for (m in all_m) m[, mk := ifelse(cid %in% amb, paste(chr, pos, A1, A2, sep = ":"), cid)]
+  for (m in all_m) m[, mk := ifelse(cid %in% amb, paste(CHR, BP, A1, A2, sep = ":"), cid)]
   # target allele per column: from ref (if given; columns not in ref keep their own), else from the first object
   tgt <- if (!is.null(r)) {
     lapply(seq_along(X), function(k) {
@@ -106,13 +106,13 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
     H <- if (any(flip)) .geno_take(G, seq_len(G$n), seq_len(G$p), flip, if (is.null(threads)) G$threads else threads) else {
       G
     }
-    H$snp <- paste(m$chr, m$pos, t$A1, t$A2, sep = ":"); H$a1 <- t$A1; H$a2 <- t$A2
+    H$snp <- paste(m$CHR, m$BP, t$A1, t$A2, sep = ":"); H$A1 <- t$A1; H$A2 <- t$A2
     H
   })
   names(out) <- nm
   U <- data.table::rbindlist(lapply(seq_along(X), function(k) {
     t <- tgt[[k]]; m <- metas[[k]]
-    data.table::data.table(snp_key = out[[k]]$snp, chr = m$chr, pos = m$pos, a1 = t$A1, a2 = t$A2, anchor = t$anchor,
+    data.table::data.table(snp_key = out[[k]]$snp, CHR = m$CHR, BP = m$BP, A1 = t$A1, A2 = t$A2, anchor = t$anchor,
                            ref_row = t$ref_row, A1Freq = t$A1Freq)
   }))
   data.table::setnames(U, "snp_key", "key")  # (data.table()'s own `key` argument would set a sort key)
@@ -121,31 +121,25 @@ geno_harmonise <- function(X, ref = NULL, build = NULL, threads = NULL) {
     H <- out[[k]]
     i <- match(U$key, H$snp)
     data.table::set(U, j = paste0("present_", nm[k]), value = !is.na(i))
-    data.table::set(U, j = paste0("af_", nm[k]), value = H$af[i])
+    data.table::set(U, j = paste0("A1Freq_", nm[k]), value = H$A1Freq[i])
   }
-  U[, palindromic := paste(a1, a2) %in% c("A T", "T A", "C G", "G C")]
-  data.table::setorder(U, chr, pos, a1, a2)
+  U[, palindromic := paste(A1, A2) %in% c("A T", "T A", "C G", "G C")]
+  data.table::setorder(U, CHR, BP, A1, A2)
   attr(out, "variants") <- U[]
   out
 }
 
-# The SNP table `ref` of geno_harmonise() (CHR, BP37 / BP38, A1, A2, optional A1Freq; or chr, pos, a1, a2),
-# cleaned: chromosome code, alleles upper-cased, positions integer, ref_row = its row in `ref`.
+# The SNP table `ref` of geno_harmonise() (CHR, BP or BP37 / BP38, A1, A2, optional A1Freq), cleaned: chromosome
+# code, alleles upper-cased, positions integer, ref_row = its row in `ref`.
 .harm_ref <- function(ref, build = NULL) {
   r <- data.table::as.data.table(ref)
-  pick <- function(cands, what) {
-    k <- intersect(cands, names(r))
-    if (!length(k)) stop("ref has no ", what, " column.", call. = FALSE)
-    r[[k[1L]]]
-  }
-  pc <- intersect(c("pos", "POS", "BP", "bp"), names(r))
-  bc <- intersect(c("BP37", "BP38"), names(r))
-  pcol <- if (!is.null(build)) paste0("BP", build) else if (length(pc)) pc[1L] else if (length(bc) == 1L) bc else
-    stop("ref needs exactly one of BP37 / BP38 (or pos), or set build", call. = FALSE)
-  if (!pcol %in% names(r)) stop("ref has no column ", pcol, call. = FALSE)
+  bc <- intersect(c("BP", "BP37", "BP38"), names(r))
+  pcol <- if (!is.null(build)) paste0("BP", build) else if (length(bc) == 1L) bc else
+    stop("ref needs exactly one of BP, BP37 and BP38, or set build", call. = FALSE)
+  miss <- setdiff(c("CHR", pcol, "A1", "A2"), names(r))
+  if (length(miss)) stop("ref lacks column(s): ", paste(miss, collapse = ", "), call. = FALSE)
   up <- function(a) .by_unique(as.character(a), toupper)
-  data.table::data.table(chr = .chr_code(pick(c("chr", "CHR", "CHROM", "#CHROM"), "chr")), pos = as.integer(r[[pcol]]),
-                         A1 = up(pick(c("A1", "a1"), "A1")), A2 = up(pick(c("A2", "a2"), "A2")),
+  data.table::data.table(CHR = .chr_code(r$CHR), BP = as.integer(r[[pcol]]), A1 = up(r$A1), A2 = up(r$A2),
                          A1Freq = if ("A1Freq" %in% names(r)) as.numeric(r$A1Freq) else NA_real_,
                          ref_row = seq_len(nrow(r)))
 }
@@ -166,12 +160,7 @@ geno_missing <- function(X) {
   data.table::data.table(snp = X$snp[j], IID = X$sample[mc$i + 1L], g = mc$g)
 }
 
-# The object's variants as a .pvar-like table for the LD panel code: ALT = counted allele, REF = the other.
+# The object's variants as the table .ld_align() takes: CHR, BP, A1, A2 and row = the column of the object.
 .geno_vartab <- function(X) {
-  if (is.null(X$chr) || is.null(X$pos)) stop("the geno object has no chr / pos per column.", call. = FALSE)
-  alt <- toupper(X$a1)
-  act <- 2L + lengths(regmatches(alt, gregexpr(",", alt, fixed = TRUE)))
-  act[is.na(alt)] <- 0L  # a column without alleles is matched to nothing
-  data.table::data.table(CHROM = X$chr, POS = as.integer(X$pos), ID = X$snp, REF = toupper(X$a2), ALT = alt,
-                         row = seq_len(X$p), allele_ct = act)
+  data.table::data.table(CHR = X$CHR, BP = as.integer(X$BP), A1 = X$A1, A2 = X$A2, row = seq_len(X$p))
 }

@@ -6,8 +6,8 @@
 #' Merge geno objects
 #'
 #' The result holds the variants of all objects and, by default, the samples of all objects:
-#' * variants: the union over the objects of (chr, pos, a1, a2), ordered by chromosome code (1..22, 23 = X,
-#'   24 = Y, 26 = MT; variants without a code last), position, `a1`, then `a2`, whatever the order of the
+#' * variants: the union over the objects of (CHR, BP, A1, A2), ordered by chromosome code (1..22, 23 = X,
+#'   24 = Y, 26 = MT; variants without a code last), position, `A1`, then `A2`, whatever the order of the
 #'   objects. The same variant in the opposite orientation is another variant: bring the objects to one
 #'   orientation first with [geno_harmonise()].
 #' * samples: `sample = NULL`, the union over the objects of (FID, IID) in the order of first appearance;
@@ -33,7 +33,7 @@ geno_merge <- function(..., sample = NULL, threads = 4L) {
   if (!length(X) || !all(vapply(X, inherits, NA, "geno"))) stop("give geno objects, or a list of them.", call. = FALSE)
   K <- length(X)
   skey <- lapply(X, function(x) paste(if (is.null(x$fid)) x$sample else x$fid, x$sample, sep = "\r"))
-  vkey <- lapply(X, function(x) paste(x$chr, x$pos, x$a1, x$a2, sep = "\r"))
+  vkey <- lapply(X, function(x) paste(x$CHR, x$BP, x$A1, x$A2, sep = "\r"))
   # samples of the result
   s_obj <- rep(seq_len(K), lengths(skey)); s_all <- unlist(skey, use.names = FALSE)
   if (is.null(sample)) {
@@ -45,14 +45,14 @@ geno_merge <- function(..., sample = NULL, threads = 4L) {
     s_first <- s_first[!is.na(s_first)]
   }
   if (length(s_first) < 2L) stop("fewer than two samples to merge.", call. = FALSE)
-  # variants of the result, in chr / pos / a1 / a2 order
+  # variants of the result, in CHR / BP / A1 / A2 order
   v_obj <- rep(seq_len(K), lengths(vkey)); v_all <- unlist(vkey, use.names = FALSE)
   v_col <- sequence(lengths(vkey))
   v_first <- which(!duplicated(v_all))
   f <- function(name, na) unlist(lapply(X, function(x) if (is.null(x[[name]])) rep(na, x$p) else x[[name]]), use.names = FALSE)[v_first]
-  cols <- list(snp = f("snp", NA_character_), id = f("id", NA_character_), chr = f("chr", NA_integer_), pos = f("pos", NA_integer_),
-               a1 = f("a1", NA_character_), a2 = f("a2", NA_character_), row = f("row", NA_integer_), flipped = f("flipped", NA))
-  o <- order(cols$chr, cols$pos, cols$a1, cols$a2, method = "radix")
+  cols <- list(snp = f("snp", NA_character_), CHR = f("CHR", NA_integer_), BP = f("BP", NA_integer_),
+               A1 = f("A1", NA_character_), A2 = f("A2", NA_character_), row = f("row", NA_integer_), flipped = f("flipped", NA))
+  o <- order(cols$CHR, cols$BP, cols$A1, cols$A2, method = "radix")
   v_first <- v_first[o]
   C <- matrix(-1L, K, length(v_first)); R <- matrix(-1L, K, length(s_first))
   for (k in seq_len(K)) {
