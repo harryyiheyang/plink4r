@@ -15,7 +15,8 @@
 #        DESIGN: categories and h2 shares, "name=col1+col2:share,..." (intercept: 1 - the sum), e.g.
 #               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every column (random annotations: the targets t1..tK) at
 #               (1 - RESID) / their number, RESID (0.2).
-# writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), categories.tsv
+# writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), v_design.npy (float32,
+# the design variance E[beta_j^2] of each SNP, for the model-definition truth of eval_var.py), categories.tsv
 # (name, columns, design h2, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
 # / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
 import os, sys, numpy as np, pandas as pd
@@ -81,11 +82,12 @@ causal0 = causal.copy()   # base causal set (rate PI everywhere)
 # coverage-stratified causal set: each category gets at least MIN_CAUSAL expected causal SNPs among its members
 # (extra causal SNPs drawn there with p = (MIN_CAUSAL - PI m_c) / (m_c (1 - PI)), m_c = members), so that sigma2_c is
 # estimable (the extra SNPs carry the category components only, not the intercept); 0 turns it off
+pc = np.full(M, pi)   # probability of being causal (for the design variance)
 for i in range(memb.shape[1]):
     mem = memb[:, i] > 0; mc = int(mem.sum())
     if mc == 0: continue
     p_add = min(1., max(0., (min_causal - pi * mc) / (mc * (1 - pi))))
-    if p_add > 0: causal |= mem & (rng.random(M) < p_add)
+    if p_add > 0: causal |= mem & (rng.random(M) < p_add); pc = 1 - (1 - pc) * (1 - p_add * mem)
 cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
@@ -103,12 +105,16 @@ def gram(V):
     return Q, T
 Q, _ = gram(C)
 target = np.array([s for _, _, s in cats] + [share_r]) * h2
+sf = np.ones(C.shape[1])
 for i in range(C.shape[1]):
-    if Q[i, i] > 0: C[:, i] *= np.sqrt(target[i] / Q[i, i])
+    if Q[i, i] > 0: sf[i] = np.sqrt(target[i] / Q[i, i]); C[:, i] *= sf[i]
     elif target[i] > 0: raise SystemExit(f"component {i} has no causal SNP: raise PI or the share")
 beta = C.sum(1)
 Q, T = gram(np.c_[C, beta])
 f = np.sqrt(h2 / Q[-1, -1]); C *= f; beta *= f
+# design variance v_j = E[beta_j^2] over the causal draw, slab class and effect (E kappa = 1, t scaled to variance 1)
+out_ = memb.max(1) == 0
+vdes = (memb * (pc / pi)[:, None] * (sf[:-1] * f) ** 2).sum(1) + out_ * pi * (sf[-1] * f) ** 2
 own = np.diag(Q)[:-1] * f * f                                         # beta_c' R beta_c: h2 of each component
 bh = np.empty(M)
 for b in blocks:
@@ -130,7 +136,7 @@ if not env("ANNOT") or not os.path.exists(f"{sh}/annot.tsv"):
 if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"):
     tmp = f"{sh}/snps.tsv.{os.getpid()}"
     snp[["ID", "block", "ld_index"]].to_csv(tmp, sep="\t", index=False); os.replace(tmp, f"{sh}/snps.tsv")
-np.save(f"{out}/beta_comp.npy", C.astype(np.float32))
+np.save(f"{out}/beta_comp.npy", C.astype(np.float32)); np.save(f"{out}/v_design.npy", vdes.astype(np.float32))
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))
