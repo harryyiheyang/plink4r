@@ -57,7 +57,7 @@ struct ViprsControl {
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
-  bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
+  bool pi_by_elbo, fix_sigma2;  // fix_sigma2: sigma2_k kept at the start (diagnostic: no M-step)  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
   double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
   std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
@@ -102,6 +102,7 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
   if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
   x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
+  x.fix_sigma2 = Rcpp::as<bool>(c["fix_sigma2"]);
   x.start_scale = Rcpp::as<double>(c["start_scale"]);
   x.start_zero_share = Rcpp::as<double>(c["start_zero_share"]);
   x.start_total_min = Rcpp::as<double>(c["start_total_min"]);
@@ -483,7 +484,7 @@ struct Fitter {
       stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
-      vm.mstep(zeta.data(), c.a0, c.b0);
+      if (!c.fix_sigma2) vm.mstep(zeta.data(), c.a0, c.b0);
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
 #ifdef _OPENMP

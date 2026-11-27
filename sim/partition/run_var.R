@@ -3,7 +3,8 @@
 #   var_shapley = b_k' R b, h2_share = model share)
 # Methods: V viprs; A1 viprs_annot, one Gaussian slab; AM 6:3:1 slab mixture (final Gibbs fit); AMV AM with the VI
 # refit as the final fit;
-# AML AM started at ldsc_strat(). Intercept (sigma2_0) on every SNP.
+# AML AM started at ldsc_strat(); AMT AM with sigma2_k and pi fixed at the model-definition truth (needs
+# AM_mtruth.tsv: run eval_var.py on AM first). Intercept (sigma2_0) on every SNP.
 # env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit of A1, AM, AML; default 300),
 #      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 0.995,0.999),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
@@ -59,6 +60,13 @@ fit <- function(k) switch(k,
                    control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4),
   AMV = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                     control = viprs_annot_control(gibbs_draws = 0, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4),
+  AMT = {  # diagnostic: AM at the model-definition truth of AM (AM_mtruth.tsv of eval_var.py), sigma2_k and pi fixed
+    mt <- fread(file.path(a[3], "AM_mtruth.tsv"))
+    viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
+                sigma2_init = setNames(mt$sigma2, mt$annotation),
+                control = viprs_annot_control(gibbs_draws = gd, fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0,
+                                              cutoffs = max(co), pi_grid = mt$pi[1], cut_pi = mt$pi[1]), threads = 4)
+  },
   AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
                     sigma2_init = ls, control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4))
 for (k in meth) {

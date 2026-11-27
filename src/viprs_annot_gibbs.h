@@ -104,7 +104,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
       (void)t;
     }
     const std::vector<double> old(vm.par);
-    vm.mstep(zeta.data(), c.a0, c.b0);
+    if (!c.fix_sigma2) vm.mstep(zeta.data(), c.a0, c.b0);
     for (int kk = 0; kk < K; ++kk) vm.par[kk] = (1. - a) * old[kk] + a * vm.par[kk];
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;

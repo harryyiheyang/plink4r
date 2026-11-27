@@ -8,7 +8,8 @@
 # SHARED): the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k fitted to the true beta by the M-step of
 # viprs_annot with beta known, sigma2_k <- sum_j (w_jk^2 beta_j^2 + w_jk (1 - w_jk) h2_j) / sum_j A_jk,
 # w_jk = A_jk sigma2_k / h2_j; the true Shapley value of column k is then (w_k beta)' R beta (k = 0 the intercept on
-# every SNP). _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth".
+# every SNP). _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth" and written to
+# <method>_mtruth.tsv (annotation, sigma2, h2_shapley, pi = the true share of causal SNPs) for run_var.R method AMT.
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
 import sys, os, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from sim_io import read_X
@@ -39,7 +40,7 @@ def model_truth(acols, beta, Rb, iters=500):
         h = A @ s2; W = np.divide(A * s2, h[:, None], out=np.zeros_like(A), where=h[:, None] > 0)
         s2 = np.where(sa > 0, (W ** 2 * (beta ** 2)[:, None] + W * (1 - W) * h[:, None]).sum(0) / sa, 0.)
     h = A @ s2; W = np.divide(A * s2, h[:, None], out=np.zeros_like(A), where=h[:, None] > 0)
-    return dict(zip(["intercept"] + list(acols), W.T @ (beta * Rb)))
+    return dict(zip(["intercept"] + list(acols), W.T @ (beta * Rb))), s2
 def r2(i, j): return Q[i, j] ** 2 / (Q[i, i] * Q[j, j]) if Q[i, i] * Q[j, j] > 0 else float("nan")
 tot = L[("true", "total")]
 tsh = {nm: Q[L[("true", nm)], tot] for nm in names}
@@ -50,7 +51,9 @@ for m in sys.argv[3:]:
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
         ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h, hv = ht.h2_shapley, ht.var_shapley
-        mt = model_truth([k for k in ht.index if k != "intercept"], V[:, tot], Rb)
+        ac = [k for k in ht.index if k != "intercept"]; mt, ms2 = model_truth(ac, V[:, tot], Rb)
+        pd.DataFrame(dict(annotation=["intercept"] + ac, sigma2=ms2, h2_shapley=[mt[k] for k in ["intercept"] + ac],
+                          pi=float((C.sum(1) != 0).mean()))).to_csv(f"{sim}/{m}_mtruth.tsv", sep="\t", index=False)
         print(m, "model truth", {nm: round(float(sum(mt.get(c, 0.) for c in cc)), 4) for nm, cc in zip(names, cols)},
               "other", round(float(sum(v for k, v in mt.items() if k not in set(sum(cols, [])))), 4))
     for nm, cc in zip(names, cols):
