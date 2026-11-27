@@ -38,6 +38,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
   o.bmean.assign(M, 0.); o.pip.assign(M, 0.); o.part.assign((size_t)M * K, 0.);
   o.phi.assign(K, 0.); o.phi2.assign(K, 0.); o.pzero.assign(K, 0.);
   o.draws = draws;
+  std::vector<double> psum(K, 0.);  // sigma2_k summed over the draws (reported: the posterior mean)
   std::vector<double> q(M, 0.);
   for (int it = 1; it <= burn + draws; ++it) {
     const float sg = (float)sigma;
@@ -111,8 +112,10 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     if (!c.fix_sigma2) {
       std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);  // MASH atoms drawn (not MAP)
       vm.mstep_elbo(zbar.data(), gbar.data(), 10, &meng);
-      if (it > burn)
+      if (it > burn) {
         for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.pm[(size_t)kk * vm.grid.size()];
+        for (int kk = 0; kk < K; ++kk) psum[kk] += vm.par[kk];
+      }
     }
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;
@@ -126,6 +129,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     for (auto& x : o.pzero) x *= inv;
     for (int kk = 0; kk < K; ++kk) { o.phi[kk] *= inv; o.phi2[kk] *= inv; }
     o.sigma *= inv; o.h2 *= inv;
+    if (!c.fix_sigma2) { for (int kk = 0; kk < K; ++kk) vm.par[kk] = psum[kk] * inv; vm.mb = vm.par[0]; vm.set_all(); }
   }
   return o;
 }

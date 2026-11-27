@@ -9,13 +9,12 @@
 //   vt_jc = n_j d_j / sigma + tau_j / kap_c,  u_c = log p_c + .5 D_j^2 / vt_jc + .5 (log tau_j - log kap_c - log vt_jc)
 //   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc
 // (one class: the VIPRS update with tau_j in place of tau).
-// M-step (D.1.2): w_jk = A_jk sigma2_k / h2_j, E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j with
-// zeta_j = gamma_j sum_c psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c (the second moment on the scale of h2_j),
-// sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)), S_k = sum_j E[(beta_j^(k))^2]. No floor: an annotation with
-// sigma2_k = 0 (e.g. a negative ldsc_strat() start cut at 0) has w_jk = 0 and stays 0 (b0 = 0), its SNPs fall back
-// on the intercept. With one slab class, no annotation and a0 = -1, b0 = 0 this is the VIPRS 0.1.5 tau update, i.e.
-// viprs(). Start: sigma2_init (e.g. ldsc_strat() tau, annotation values cut at 0; the intercept must be > 0) or all
-// sigma2_k equal with sum_j h2_j = the naive LDSC h2.
+// M-step: the sigma2-dependent ELBO part -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j), zeta_j = gamma_j sum_c
+// psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c, maximized by MM steps (VarModel::mstep_elbo) under the MASH prior
+// sigma2_k = grid[m_k] sigma2_0 (atoms mash_grid, fixed weights mash_w): sigma2_0 by MM on the column
+// a_j = 1 + sum_k A_jk grid[m_k], the atoms by the MAP of ELBO + log w (VI) or drawn (Gibbs). Each VI fit of stage 1 and
+// each pi of stage 2 first fits sigma2_k free (the warm-up), the atoms then start at the nearest of that fit. Start:
+// sigma2_init (e.g. ldsc_strat() tau) or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
 // Search by VI (below); final fit at the chosen pi by a short Gibbs sampler with Rao-Blackwell means
 // (viprs_annot_gibbs.h; gibbs_draws = 0: the VI refit). Output: posterior mean b_j and its MMSE allocation
 // b_j^(k) = w_jk b_j (Gibbs: the mean over the draws of w_jk m_j; sum_k b_j^(k) = b_j, k = 0 the intercept part), the
@@ -29,7 +28,7 @@
 // each level warm-started from the one below, at the fixed pi cut_pi (default 0.01); the largest cutoff unless a
 // smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen cutoff, warm-started from its stage-1 fit: the
 // pi grid ascending on all data with warm start (sigma2_k carried over when pi moves); the converged point of the
-// largest ELBO is refitted to full convergence, then the Gibbs fit.
+// largest MASH objective (ELBO + sum_k log w_{m_k}) is refitted to full convergence, then the Gibbs fit.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -314,12 +313,17 @@ struct VarModel {
   void mash_init() {
     mb = par[0];
     atom.assign(K, 0); pm.assign((size_t)K * grid.size(), 0.);
-    for (int k = 1; k < K; ++k) {  // nearest atom of the current sigma2_k
-      int best = 0; double bd = INFINITY;
-      for (size_t m = 0; m < grid.size(); ++m) {
-        const double d = grid[m] == 0. ? (par[k] <= 0. ? 0. : std::fabs(std::log(par[k] / mb)) + 1.)
-                                       : std::fabs(std::log((par[k] + 1e-300) / (grid[m] * mb)));
-        if (d < bd) { bd = d; best = (int)m; }
+    // nearest atom of the current sigma2_k on the log scale; atom 0 below the geometric midpoint g1 sqrt(g1 / g2)
+    // under the first positive atom g1 (g2 the next; g1 / sqrt(10) if there is none)
+    const double g1 = grid[1], z0 = grid.size() > 2 ? g1 * std::sqrt(g1 / grid[2]) : g1 / std::sqrt(10.);
+    for (int k = 1; k < K; ++k) {
+      int best = 0;
+      if (par[k] > z0 * mb) {
+        double bd = INFINITY;
+        for (size_t m = 1; m < grid.size(); ++m) {
+          const double d = std::fabs(std::log(par[k] / (grid[m] * mb)));
+          if (d < bd) { bd = d; best = (int)m; }
+        }
       }
       atom[k] = best; par[k] = grid[best] * mb;
     }
@@ -354,6 +358,19 @@ struct VarModel {
     }
     for (int k = 1; k < K; ++k) f += lw[atom[k]];
     return f;
+  }
+  // sum_k log w_{m_k}: the atom prior term of the MASH objective (0 in the warm-up)
+  double logw() const {
+    double f = 0;
+    if (!cont && (int)atom.size() == K) for (int k = 1; k < K; ++k) f += lw[atom[k]];
+    return f;
+  }
+  // a column at 0 gets one atom level under the first positive one (so the free warm-up can move it; it maps back to
+  // atom 0 unless the data raise it)
+  void revive_zeros() {
+    const double v = par[0] * grid[1] * (grid.size() > 2 ? grid[1] / grid[2] : .1);
+    for (int k = 1; k < K; ++k) if (!(par[k] > 0)) par[k] = v;
+    set_all();
   }
   // MM steps on sigma2_0 with the atoms fixed (column a_j = 1 + sum_k A_jk grid[m_k])
   template <typename G>
@@ -475,7 +492,7 @@ struct VarModel {
   template <typename G>
   void mstep_elbo(const double* zeta, const G* gamma, int inner = 10, std::mt19937_64* eng = nullptr) {
     if (!cont && (int)atom.size() != K) mash_init();
-    for (int it = 0; it < inner; ++it) {
+    for (int it = 0; it < (cont ? inner : 0); ++it) {
       std::vector<double> NU(2 * K, 0.);
 #ifdef _OPENMP
 #pragma omp parallel num_threads(threads)
@@ -500,21 +517,20 @@ struct VarModel {
 #endif
         for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
       }
-      if (cont) {  // warm-up (stage 1): sigma2_k free, the MM step per column
-        for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= std::sqrt(NU[k] / NU[K + k]);
-        par[0] = std::max(par[0], 1e-20); set_all();
-        continue;
-      }
-      // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
-      // a_j = 1 + sum_k A_jk grid[m_k]: MM step with N = N_0 + sum_k grid[m_k] N_k, D likewise
-      double Nb = NU[0], Db = NU[K];
-      for (int k = 1; k < K; ++k) { Nb += grid[atom[k]] * NU[k]; Db += grid[atom[k]] * NU[K + k]; }
-      if (Db > 0 && Nb > 0) par[0] *= std::sqrt(Nb / Db);
-      par[0] = std::max(par[0], 1e-20); mb = par[0];
-      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
-      set_all();
+      // warm-up (cont): sigma2_k free, the MM step per column
+      for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= std::sqrt(NU[k] / NU[K + k]);
+      par[0] = std::max(par[0], 1e-20); set_all();
     }
-    if (!cont) mash_step(zeta, gamma, eng);
+    if (cont) return;
+    // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
+    // a_j = 1 + sum_k A_jk grid[m_k] (mm_b); VI alternates mm_b and the atoms (mash_step) until no atom changes
+    // (at most 20 rounds); Gibbs (eng): one round, the atoms drawn
+    for (int round = 0; round < 20; ++round) {
+      mm_b(zeta, gamma, inner);
+      const std::vector<int> old = atom;
+      mash_step(zeta, gamma, eng);
+      if (eng || atom == old) break;
+    }
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
@@ -892,7 +908,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       vm.pi_move(pi);
       const auto t1 = std::chrono::steady_clock::now();
       if (stage == 2) {  // each pi: sigma2_k free first, then the atoms from the nearest of that fit
-        vm.cont = true;
+        vm.cont = true; vm.revive_zeros();
         sigma = F.run(st, nv, bv, pi, vm, sigma, c.grid_max_iter, nullptr).sigma;
         vm.cont = false; vm.atom.clear();
       }
@@ -904,9 +920,10 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
         score(st, rb, bsb);
         rr = bsb > 0 ? rb / std::sqrt(bsb) : 0.;
       }
-      const double crit = pseudo ? rr : r.elbo;  // pseudo r: only r > 0 can be chosen
+      const double elbo = r.elbo + vm.logw();  // the MASH objective: ELBO + sum_k log w_{m_k}
+      const double crit = pseudo ? rr : elbo;  // pseudo r: only r > 0 can be chosen
       gstage.push_back(stage); gcut.push_back(c.cutoffs[ic]); gpi.push_back(pi); gsig.push_back(sigma);
-      gh2.push_back(r.h2); gr.push_back(rr); grb.push_back(rb); gelbo.push_back(r.elbo); git.push_back(r.iters);
+      gh2.push_back(r.h2); gr.push_back(rr); grb.push_back(rb); gelbo.push_back(elbo); git.push_back(r.iters);
       gconv.push_back(r.converged); gpar.push_back(vm.par);
       gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
       const double rr_ = crit;

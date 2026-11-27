@@ -1,8 +1,8 @@
 # Partition truth simulated from the variance model of viprs_annot itself: E[beta_j^2] = sigma2_0 + sum_c A_jc sigma2_c,
 # sigma2_c = ratio_c sigma2_0 (the ratios of DESIGN, e.g. on the MASH atoms 1, 10, 100), the intercept on every SNP.
 # One causal set of proportion PI over all SNPs; a causal SNP's effect is the sum of independent components, the
-# intercept ~ N(0, kappa sigma2_0 / PI) and per category c ~ N(0, A_jc kappa sigma2_c / PI) (A_jc = membership of c, the
-# largest of its annotation columns / 100), with the slab class kappa (shares MIX, relative variances MIXVAR, E kappa = 1)
+# intercept ~ N(0, kappa sigma2_0 / PI) and per category c ~ N(0, A_jc kappa sigma2_c / PI) (A_jc = the sum of its
+# annotation columns / 100: every column of c has sigma2 = ratio_c sigma2_0, additive as in the model), with the slab class kappa (shares MIX, relative variances MIXVAR, E kappa = 1)
 # common to the components of the SNP; sigma2_0 is set so that beta' R beta = h2 exactly. Realised component h2
 # (beta_c' R beta_c) is printed and saved.
 # b_hat = X (X' beta) + X z / sqrt(n), z ~ N(0, I_k), X = U Lambda^{1/2}; R is never formed.
@@ -18,7 +18,7 @@
 # the design variance E[beta_j^2] of each SNP, for the model-definition truth of eval_var.py), oracle.tsv (annotation,
 # sigma2, pi: the oracle of run_var.R method ORACLE, the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k on the
 # design columns fitted to v_design by the likelihood stationarity sum_j A_jk (v_j - h2_j) / h2_j^2 = 0 (MM steps to
-# convergence, every SNP); pi the realised share of causal SNPs), categories.tsv
+# convergence, every SNP); pi = PI, the pi of the slab variances), categories.tsv
 # (name, columns, ratio, design h2 = sigma2_c sum_j A_jc, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
 # / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
 import os, sys, numpy as np, pandas as pd
@@ -74,7 +74,7 @@ else:
 for nm, cc, _ in cats:
     miss = [c for c in cc if c not in cols]
     if miss: raise SystemExit(f"DESIGN names unknown columns: {miss}")
-memb = np.stack([A[:, [cols.index(c) for c in cc]].max(1) for _, cc, _ in cats], 1)   # M x C membership
+memb = np.stack([A[:, [cols.index(c) for c in cc]].sum(1) for _, cc, _ in cats], 1)   # M x C: sum of its columns (additive, as the model)
 ratio = np.array([r for _, _, r in cats])
 
 # the variance model itself: causal with probability PI everywhere, slab class common to the components of a SNP,
@@ -132,7 +132,7 @@ for it in range(100000):
     hh = Ao @ s2; N_ = Ao.T @ (vdes / hh ** 2); D_ = Ao.T @ (1 / hh)
     r_ = np.divide(N_, D_, out=np.ones_like(N_), where=D_ > 0); s2 = s2 * np.sqrt(r_)
     if np.max(np.abs(r_[s2 > 0] - 1)) < 1e-8: break
-pd.DataFrame(dict(annotation=["intercept"] + oc, sigma2=s2, pi=float(causal.mean()))).to_csv(f"{out}/oracle.tsv", sep="\t", index=False)
+pd.DataFrame(dict(annotation=["intercept"] + oc, sigma2=s2, pi=pi)).to_csv(f"{out}/oracle.tsv", sep="\t", index=False)
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], ratio=np.r_[ratio, 1.], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))

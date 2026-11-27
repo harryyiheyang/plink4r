@@ -18,14 +18,15 @@
 #' [viprs_annot_control()]) sets the first atoms (nearest on the log scale).
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
-#' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every fit), each fit
-#' scored by r = eta' valid / sqrt(eta' R eta). Stage 1, the eigen cutoff (as [sbayesrc()]): a chain over `cutoffs`
+#' Hyperparameters by VI. Stage 1 on one PUMAS split (the same pseudo training / validation data for every fit), each fit
+#' scored by r = eta' valid / sqrt(eta' R eta), sigma2_k free. Stage 1, the eigen cutoff (as [sbayesrc()]): a chain over `cutoffs`
 #' (default 0.995, 0.999) from the lowest up, each level warm-started from the one below, at the fixed pi `cut_pi`
 #' (default 0.01); the largest cutoff unless a smaller one has r / r_largest > `rel_r_min` (SBayesRC rule). Stage 2, pi
 #' at the chosen cutoff, warm-started from its stage-1 fit: the pi grid of [viprs()] ascending on
-#' all data, each point warm-started from the last (sigma2_k carried over); the converged point of the largest ELBO is
-#' refitted to full convergence (`pi_by = "pseudo_r"`: the grid on the PUMAS training half, scored like stage 1, the
-#' best point refitted on all data). pi and sigma2_k are not chosen jointly by one criterion (weakly identified).
+#' all data, each point warm-started from the last (sigma2_k fitted free first, then the MASH atoms); the converged point
+#' of the largest ELBO + sum_k log w_{m_k} is refitted to full convergence (`pi_by = "pseudo_r"`: the grid on the PUMAS
+#' training half, scored like stage 1, the best point refitted on all data). The output sigma2_k of the Gibbs fit is
+#' its mean over the draws.
 #' `sigma2_init` sets the sigma2_k of the first fit of each stage, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
 #' with Rao-Blackwell means; sigma2_k by the same M-step on stochastic-approximation averages of gamma_j and zeta_j,
@@ -136,7 +137,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param start_scale,start_zero_share,start_total_min with `sigma2_init` (e.g. ldsc_strat()), h the LDSC h2: negative
 #'   values set to 0; every sigma2_k times `start_scale`; a column at 0 (the intercept included) set so that its h2
 #'   (sum_j A_jk sigma2_k) is `start_zero_share` h; then all scaled up so that the start h2 is at least
-#'   `start_total_min` h (sigma2_k = 0 is a fixed point of the M-step, so no column may start at 0).
+#'   `start_total_min` h (sigma2_k = 0 is a fixed point of the free MM step of stage 1).
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
 #' @param fix_sigma2 TRUE keeps sigma2_k at the start (no M-step; a diagnostic with the true values as `sigma2_init`,
@@ -155,6 +156,9 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                                 start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
                                 gibbs_burn = 100L, gibbs_draws = 300L, fix_sigma2 = FALSE,
                                 mash_grid = c(0, 1, 10, 100), mash_w = c(0.5, 0.3, 0.1, 0.1)) {
+  mash_grid <- as.numeric(mash_grid); mash_w <- as.numeric(mash_w)
+  if (length(mash_grid) < 2 || length(mash_grid) != length(mash_w) || mash_grid[1] != 0 || is.unsorted(mash_grid, strictly = TRUE) ||
+      any(mash_w <= 0)) stop("mash_grid: 0 first, then strictly increasing positive atoms; mash_w: one positive weight per atom")
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
                              rel_r_min = as.numeric(rel_r_min), cut_pi = as.numeric(cut_pi), pi_by = match.arg(pi_by),
