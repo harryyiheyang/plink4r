@@ -15,13 +15,14 @@
 #' back on the intercept.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
-#' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every eigen cutoff and pi):
-#' for each cutoff in `cutoffs` (default 0.995, 0.999) the pi grid of [viprs()] ascending, each point warm-started from
-#' the last (sigma2_k carried over); `sigma2_init` sets the sigma2_k of the first grid point of each cutoff, e.g. the
-#' stratified LDSC estimates of [ldsc_strat()].
-#' Each (cutoff, pi) is scored by r = eta' valid / sqrt(eta' R eta); per cutoff its best converged pi, across cutoffs
-#' the largest cutoff unless a smaller one has r / r_largest > `rel_r_min` (SBayesRC rule). The chosen (cutoff, pi) is
-#' refitted by VI on all data.
+#' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every fit), each fit
+#' scored by r = eta' valid / sqrt(eta' R eta). Stage 1, the eigen cutoff (as [sbayesrc()]): each cutoff in `cutoffs`
+#' (default 0.995, 0.999) fitted at the fixed pi `cut_pi` (default 0.01); the largest cutoff unless a smaller one has
+#' r / r_largest > `rel_r_min` (SBayesRC rule). Stage 2, pi at the chosen cutoff: the pi grid of [viprs()] ascending on
+#' all data, each point warm-started from the last (sigma2_k carried over); the converged point of the largest ELBO is
+#' refitted to full convergence (`pi_by = "pseudo_r"`: the grid on the PUMAS training half, scored like stage 1, the
+#' best point refitted on all data). pi and sigma2_k are not chosen jointly by one criterion (weakly identified).
+#' `sigma2_init` sets the sigma2_k of the first fit of each stage, e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
 #' with Rao-Blackwell means; sigma2_k and sigma by stochastic approximation of the same M-step. BETA is the mean of
 #' the conditional posterior means m_j over the draws and BETA_k the mean of w_jk m_j (w_jk of each sweep), so the
@@ -50,9 +51,9 @@
 #'   column as its Shapley value in beta' R beta: the mean over the draws of beta^(k)' R beta, cross terms split evenly
 #'   between the two columns, so the values add up to the total) with `h2_shapley_sd` (sd over the draws);
 #'   `var_shapley` (the same for the output PRS, b_k' R b: they add up to b' R b, the PRS variance on the panel),
-#'   `grid` (one row per (cutoff, pi) with its pseudo-validation r), `grid_sigma2` (sigma2_k at each grid point),
-#'   `cutoff` and `best_pseudo_r` (the chosen point), `n_bins`,
-#'   `n_suppressed`, and those of [viprs()].
+#'   `grid` (one row per fit: stage, cutoff, pi, its pseudo-validation r (NaN for ELBO fits on all data) and ELBO),
+#'   `grid_sigma2` (sigma2_k at each grid point), `cutoff`, `best_pseudo_r` (stage 1, the chosen cutoff) and
+#'   `best_pi_crit` (stage 2: ELBO or pseudo r of the chosen pi), `n_bins`, `n_suppressed`, and those of [viprs()].
 #' @export
 viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, sigma2_init = NULL,
                         fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {
@@ -106,6 +107,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   colnames(gs) <- nm
   attr(out, "grid_sigma2") <- gs
   attr(out, "best_pseudo_r") <- res$extra$best_pseudo_r
+  attr(out, "best_pi_crit") <- res$extra$best_pi_crit
   attr(out, "cutoff") <- res$extra$cutoff
   attr(out, "pumas_xi") <- res$extra$pumas_xi
   .prs_write(out, output)
@@ -120,12 +122,15 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @param mix_prop prior shares of the slab classes (small, medium, large), fixed; normalized to sum 1.
 #' @param mix_var relative variances of the slab classes; one class (`mix_prop = 1, mix_var = 1`) is the Gaussian
 #'   slab of [viprs()].
-#' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) searched jointly with pi; one value fixes the
+#' @param cutoffs eigen cutoffs (eigenvalue variance kept per block) compared at pi = `cut_pi`; one value fixes the
 #'   cutoff; a value at or above the panel's stored cutoff keeps every stored pair.
 #' @param rel_r_min a smaller cutoff is taken when its r / r_largest exceeds this.
-#' @param start_lift,start_scale with `sigma2_init`: each annotation sigma2_k raised to at least the equal start
-#'   (all sigma2_k equal, sum_j h2_j = the LDSC h2), then times `start_scale`, so that no annotation starts near 0
-#'   (sigma2_k = 0 is a fixed point of the M-step).
+#' @param cut_pi the fixed pi of the cutoff choice (stage 1).
+#' @param pi_by criterion of the pi grid at the chosen cutoff (stage 2): "elbo" (all data) or "pseudo_r".
+#' @param start_scale,start_zero_share,start_total_min with `sigma2_init` (e.g. ldsc_strat()), h the LDSC h2: negative
+#'   values set to 0; every sigma2_k times `start_scale`; a column at 0 (the intercept included) set so that its h2
+#'   (sum_j A_jk sigma2_k) is `start_zero_share` h; then all scaled up so that the start h2 is at least
+#'   `start_total_min` h (sigma2_k = 0 is a fixed point of the M-step, so no column may start at 0).
 #' @param gibbs_burn,gibbs_draws sweeps of the final Gibbs fit before and after burn-in; `gibbs_draws = 0` keeps the
 #'   VI refit as the final fit.
 #' @param a0,b0 Inverse-Gamma(a0, b0) prior of each sigma2_k: sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)).
@@ -133,13 +138,15 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
-                                cutoffs = c(0.995, 0.999), rel_r_min = 1.25,
-                                start_lift = TRUE, start_scale = 2,
+                                cutoffs = c(0.995, 0.999), rel_r_min = 1.25, cut_pi = 0.01, pi_by = c("elbo", "pseudo_r"),
+                                start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
                                 gibbs_burn = 100L, gibbs_draws = 300L, a0 = 0, b0 = 0) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
-                             rel_r_min = as.numeric(rel_r_min), start_lift = isTRUE(start_lift),
-                             start_scale = as.numeric(start_scale), gibbs_burn = as.integer(gibbs_burn),
+                             rel_r_min = as.numeric(rel_r_min), cut_pi = as.numeric(cut_pi), pi_by = match.arg(pi_by),
+                             start_scale = as.numeric(start_scale),
+                             start_zero_share = as.numeric(start_zero_share), start_total_min = as.numeric(start_total_min),
+                             gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
                              a0 = as.numeric(a0), b0 = as.numeric(b0)))
 }

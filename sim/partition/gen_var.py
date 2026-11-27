@@ -1,7 +1,7 @@
 # Partition truth by the variance route (the model of viprs_annot): one causal set of proportion PI over all SNPs,
 # annotated or not, raised inside small categories to at least MIN_CAUSAL expected causal SNPs; a causal SNP's
-# effect is the sum of independent components: the intercept beta_j^(0), t(RESID_DF) with unit variance, on every
-# causal SNP of the base set (rate PI), and beta_j^(c) ~ N(0, A_jc sigma2_c) for each category (A_jc = membership
+# effect is the sum of independent components: the intercept beta_j^(0), t(RESID_DF) with unit variance, on the
+# causal SNPs of the base set (rate PI) outside every design category, and beta_j^(c) ~ N(0, A_jc sigma2_c) for each category (A_jc = membership
 # of category c, the largest of its annotation columns / 100) with the slab class (shares MIX, relative variances
 # MIXVAR) common to the categories of the SNP. Each component is rescaled so that its genetic variance beta_c' R beta_c equals h2 * share_c,
 # then the total so that beta' R beta = h2 exactly (the cross terms between components make the realised component
@@ -10,11 +10,11 @@
 # usage: python gen_var.py <ld_dir> <snp_table: tsv with ID, block, ld_index, A1, A2, freq> <out_dir> <seed>
 #   env: NGWAS (300000), H2 (0.3), PI (0.01), BLOCKS ("1-100" or "" = all), MIX ("0.6,0.3,0.1"),
 #        MIXVAR ("0.01,0.1,1"), RESID_DF (3), MIN_CAUSAL (100: expected causal SNPs per category at least; 0 = off),
-#        ANNOT: tsv / parquet with ID and annotation columns (0-100 or 0-1); without it K (3) random 0/1 columns
-#               t1..tK on PT (0.1) of the SNPs each, not overlapping,
+#        ANNOT: tsv / parquet with ID and annotation columns (0-100 or 0-1); without it random 0/1 columns (K, PT,
+#               SEG, DECOY, NOISE: see below),
 #        DESIGN: categories and h2 shares, "name=col1+col2:share,..." (intercept: 1 - the sum), e.g.
-#               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every random column at
-#               (1 - RESID) / K, RESID (0.2).
+#               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every column (random annotations: the targets t1..tK) at
+#               (1 - RESID) / their number, RESID (0.2).
 # writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), categories.tsv
 # (name, columns, design h2, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
 # / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
@@ -46,17 +46,29 @@ if env("ANNOT"):
     a = a.reindex(snp.ID)[cols].fillna(0).astype(float)
     if a.values.max() > 1: a = a / 100.
 else:
-    K = int(env("K", "3")); pt = float(env("PT", "0.1"))
-    t = rng.choice(K + 1, size=M, p=[pt] * K + [1 - K * pt])
+    # random annotations in runs of SEG neighbouring SNPs (annotations follow genomic regions, so neighbours in LD
+    # share them): K targets t1..tK of coverage PT each, not overlapping; DECOY = 1 adds per target a large column
+    # big<k> (the target plus 25% of all runs, like an enhancer set) and a partial one part<k> (half of the target
+    # runs plus PT / 2 others); NOISE unrelated columns of coverage PT
+    K = int(env("K", "3")); pt = float(env("PT", "0.1")); seg = int(env("SEG", "10"))
+    run = np.arange(M) // seg; ns = int(run.max()) + 1
+    ts = rng.choice(K + 1, size=ns, p=[pt] * K + [1 - K * pt])
     cols = [f"t{k+1}" for k in range(K)]
-    a = pd.DataFrame({c: (t == k).astype(float) for k, c in enumerate(cols)})
+    a = {c: (ts == k)[run].astype(float) for k, c in enumerate(cols)}
+    if int(env("DECOY", "0")):
+        for k in range(K):
+            a[f"big{k+1}"] = ((ts == k) | (rng.random(ns) < 0.25))[run].astype(float)
+            a[f"part{k+1}"] = (((ts == k) & (rng.random(ns) < 0.5)) | (rng.random(ns) < pt / 2))[run].astype(float)
+    for i in range(int(env("NOISE", "0"))): a[f"n{i+1}"] = (rng.random(ns) < pt)[run].astype(float)
+    cols = list(a); a = pd.DataFrame(a)
 A = a.values
 if env("DESIGN"):
     cats = []
     for item in env("DESIGN").split(","):
         nm, rest = item.split("="); cc, sh = rest.split(":"); cats.append((nm, cc.split("+"), float(sh)))
 else:
-    r = float(env("RESID", "0.2")); cats = [(c, [c], (1 - r) / len(cols)) for c in cols]
+    tc = [c for c in cols if c[0] == "t"] if not env("ANNOT") else cols   # random annotations: the targets only
+    r = float(env("RESID", "0.2")); cats = [(c, [c], (1 - r) / len(tc)) for c in tc]
 for nm, cc, _ in cats:
     miss = [c for c in cc if c not in cols]
     if miss: raise SystemExit(f"DESIGN names unknown columns: {miss}")
@@ -65,7 +77,7 @@ if share_r < 0: raise SystemExit("DESIGN shares sum above 1")
 memb = np.stack([A[:, [cols.index(c) for c in cc]].max(1) for _, cc, _ in cats], 1)   # M x C membership
 
 causal = rng.random(M) < pi
-causal0 = causal.copy()   # base causal set (rate PI everywhere): carries the intercept, so sigma2_0 is the same per SNP
+causal0 = causal.copy()   # base causal set (rate PI everywhere)
 # coverage-stratified causal set: each category gets at least MIN_CAUSAL expected causal SNPs among its members
 # (extra causal SNPs drawn there with p = (MIN_CAUSAL - PI m_c) / (m_c (1 - PI)), m_c = members), so that sigma2_c is
 # estimable (the extra SNPs carry the category components only, not the intercept); 0 turns it off
@@ -78,7 +90,8 @@ cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
 for i in range(len(cats)): C[:, i] = sc * np.sqrt(memb[:, i]) * rng.standard_normal(M)
-C[:, -1] = np.where(causal0, rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
+# intercept: on the base causal SNPs outside every design category, uniformly
+C[:, -1] = np.where(causal0 & (memb.max(1) == 0), rng.standard_t(df, M) / np.sqrt(df / (df - 2)), 0.)
 
 def gram(V):
     # V' R V over the blocks (one pass, X not kept), plus the X' V per block for later

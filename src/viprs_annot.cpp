@@ -23,11 +23,12 @@
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
-// Eigen cutoff and pi searched jointly by VI on one PUMAS split (fit_path): xi is drawn once on the full panel, the
-// truncated panel of each cutoff uses its leading entries, so every (cutoff, pi) is scored on the same pseudo
-// validation, r = eta' valid / sqrt(eta' R eta). Per cutoff the pi grid runs ascending with warm start (sigma2_k carried
-// over when pi moves); its best converged point is kept. Across cutoffs (as sbayesrc()): the largest cutoff unless a
-// smaller one has r / r_largest > rel_r_min. The chosen (cutoff, pi) is refitted on all data, then the Gibbs fit.
+// Eigen cutoff, then pi, by VI on one PUMAS split (fit_path): xi is drawn once on the full panel, the truncated
+// panel of each cutoff uses its leading entries, so every fit is scored on the same pseudo validation,
+// r = eta' valid / sqrt(eta' R eta). Stage 1, the cutoff (as sbayesrc()): each cutoff fitted at the fixed pi cut_pi
+// (default 0.01); the largest cutoff unless a smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen
+// cutoff: the pi grid ascending on all data with warm start (sigma2_k carried over when pi moves); the converged point
+// of the largest ELBO is refitted to full convergence, then the Gibbs fit.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -55,10 +56,10 @@ struct ViprsControl {
   bool use_active;
   int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
-  double rel_r_min;
-  bool start_lift;     // given start (sigma2_init): each annotation sigma2_k at least that of the equal start
-  double start_scale;  // given start: annotation sigma2_k times this (after the lift)
-  std::vector<double> cutoffs;  // eigen cutoffs searched jointly with pi (one value: fixed)
+  double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
+  bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
+  double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
+  std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap, a0, b0;
   unsigned long long seed;
@@ -98,8 +99,12 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.gibbs_draws = Rcpp::as<int>(c["gibbs_draws"]);
   x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
   x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
-  x.start_lift = Rcpp::as<bool>(c["start_lift"]);
+  x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
+  if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
+  x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
   x.start_scale = Rcpp::as<double>(c["start_scale"]);
+  x.start_zero_share = Rcpp::as<double>(c["start_zero_share"]);
+  x.start_total_min = Rcpp::as<double>(c["start_total_min"]);
   if (x.cutoffs.empty()) Rcpp::stop("cutoffs: at least one eigen cutoff");
   for (double v : x.cutoffs) if (!(v > 0 && v <= 1)) Rcpp::stop("cutoffs must be in (0, 1]");
   std::sort(x.cutoffs.begin(), x.cutoffs.end());
@@ -328,21 +333,27 @@ struct VarModel {
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // start from given sigma2_k (e.g. stratified LDSC tau_k): annotation values cut at 0; returns sum_j h2_j over the
-  // SNPs not suppressed, or 0 when the intercept is not positive (then nothing is set)
-  // lift > 0 (start_lift): each annotation sigma2_k at least lift, then times scale (start_scale)
-  double start_at(const std::vector<double>& s2, double pi_, double lift = 0., double scale = 1.) {
-    if (!(s2[0] > 0)) return 0.;
-    std::vector<double> p(K);
-    p[0] = s2[0];
-    for (int k = 1; k < K; ++k) p[k] = scale * std::max(std::max(s2[k], 0.), lift);
-    double tot = 0;
+  // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
+  // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
+  // (start_zero_share) of h0; then all scaled up so that sum_j h2_j is at least total_min (start_total_min) times h0.
+  // Returns sum_j h2_j over the SNPs not suppressed.
+  double start_at(const std::vector<double>& s2, double pi_, double h0, double scale, double zero_share, double total_min) {
+    std::vector<double> sa(K, 0.);  // sum_j A_jk over the SNPs not suppressed
     for (int64_t j = 0; j < M; ++j) {
       if (sup[j]) continue;
-      double h = p[0];
+      sa[0] += 1.;
       const double* r = row(j);
-      for (int k = 1; k < K; ++k) h += r[k - 1] * p[k];
-      tot += h;
+      for (int k = 1; k < K; ++k) sa[k] += r[k - 1];
+    }
+    std::vector<double> p(K);
+    for (int k = 0; k < K; ++k)
+      p[k] = s2[k] > 0 ? scale * s2[k] : (sa[k] > 0 ? zero_share * h0 / sa[k] : 0.);
+    double tot = 0;
+    for (int k = 0; k < K; ++k) tot += sa[k] * p[k];
+    if (tot > 0 && tot < total_min * h0) {
+      const double f = total_min * h0 / tot;
+      for (double& x : p) x *= f;
+      tot *= f;
     }
     par = p; pi = pi_;
     set_all();
@@ -454,6 +465,8 @@ struct Fitter {
     std::vector<int64_t> nvis(P.nb, 0);
     double out[10];
     std::vector<double> zeta(M);
+    int64_t n_free = 0;  // SNPs not suppressed (the suppressed ones are outside the model, as in stats())
+    for (int64_t j = 0; j < M; ++j) n_free += !vm.sup[j];
     vtx(P, st.eta.data(), st.s.data(), threads);
     std::fill(st.active.begin(), st.active.end(), 1);
     double prev_elbo = -INFINITY, prev_sg = NAN, elbo = NAN, sigma_g = 0;
@@ -491,7 +504,7 @@ struct Fitter {
       const double lik = !fixed_sigma ? -std::log(2 * M_PI * sigma) - 1.
                                       : -std::log(2 * M_PI * sigma) - (1. / sigma) * (1. - 2. * eb + sigma_g);
       elbo = .5 * n_max * lik;
-      elbo += -glg + sg_sum * std::log(pi) - g1lg1 + (M - sg_sum) * std::log1p(-pi);
+      elbo += -glg + sg_sum * std::log(pi) - g1lg1 + (n_free - sg_sum) * std::log1p(-pi);
       elbo += prior;
       const double max_diff = *std::max_element(bmax.begin(), bmax.end());
       if (!std::isfinite(elbo)) { msg = "ELBO undefined"; break; }
@@ -643,31 +656,20 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // start h2 (sigma = 1 - it)
 double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0, double pi, const ViprsControl& c) {
   if (!s2_init.empty()) {
-    double lift = 0.;
-    if (c.start_lift) {  // the sigma2 of the equal start (all sigma2_k equal, sum_j h2_j = the LDSC h2)
-      double sa = 0;
-      for (int64_t j = 0; j < vm.M; ++j) {
-        sa += 1.;
-        const double* r = vm.row(j);
-        for (int k = 1; k < vm.K; ++k) sa += r[k - 1];
-      }
-      lift = h2_0 / sa;
-    }
-    const double tot = vm.start_at(s2_init, pi, lift, c.start_scale);
-    if (tot > 0) return std::min(std::max(tot, c.h2_min), c.h2_max);
-    Rcpp::warning("sigma2_init: the intercept is not positive, the LDSC start is used");
+    const double tot = vm.start_at(s2_init, pi, h2_0, c.start_scale, c.start_zero_share, c.start_total_min);
+    return std::min(std::max(tot, c.h2_min), c.h2_max);
   }
   vm.start(h2_0, pi);
   return h2_0;
 }
 
-// Joint search of the eigen cutoff and pi by VI on one PUMAS split: the panel is read once with every stored pair (P0);
-// xi is drawn once per block (Fitter::pumas), the panel at a smaller cutoff uses its leading entries, so every cutoff
-// trains on the same pseudo data. For each cutoff (ascending): the pi grid ascending with warm start (state and
-// variance model carried over; early stop after stop_after consecutive drops), each point scored on the validation
-// half of P0 with R of P0, r = b' valid / sqrt(b' R b). Per cutoff the best converged point with r > 0; across cutoffs
-// the largest cutoff unless a smaller one has |r / r_largest| > rel_r_min (SBayesRC rule). Refit of the chosen point on
-// all data at its cutoff, then the final Gibbs fit.
+// Cutoff, then pi, by VI on one PUMAS split: the panel is read once with every stored pair (P0); xi is drawn once per
+// block (Fitter::pumas), the panel at a smaller cutoff uses its leading entries, so every cutoff trains on the same
+// pseudo data, and every fit is scored on the validation half of P0 with R of P0, r = b' valid / sqrt(b' R b).
+// Stage 1: one fit per cutoff at pi = cut_pi; the largest cutoff unless a smaller one has |r / r_largest| > rel_r_min
+// (SBayesRC rule). Stage 2: at the chosen cutoff the pi grid ascending on all data with warm start (state and variance
+// model carried over; early stop after stop_after consecutive ELBO drops); the converged point of the largest ELBO,
+// refitted to full convergence, then the final Gibbs fit.
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
                     const std::vector<double>& s2_init, const std::vector<std::string>& files,
@@ -696,83 +698,101 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     vtx(*P0, st.eta.data(), s0.data(), threads);
     for (float x : s0) bsb += (double)x * x;
   };
-  std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gsec;
-  std::vector<int> git, gconv;
+  std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gelbo, gsec;
+  std::vector<int> gstage, git, gconv;
   std::vector<std::vector<double>> gpar;
   struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0; State st{0, 0, 0.}; std::vector<double> par; };
-  std::vector<Best> best(nc);
-  std::unique_ptr<EigenPanel<T>> Pbest;  // truncated panel of the best cutoff so far (null: P0)
-  int ibest = -1;
   double h2_0 = 0;
-  for (int ic = 0; ic < nc; ++ic) {
-    std::unique_ptr<EigenPanel<T>> Pi;
-    if (ks[ic] != P0->k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ic], threads)));
-    const EigenPanel<T>& P = Pi ? *Pi : *P0;
+  // pi path on panel P at cutoff ic (ascending, warm start), each point recorded in the grid table. Stage 1: fitted on
+  // the PUMAS training half, the best converged point with pseudo r > 0. Stage 2: fitted on all data, the converged
+  // point of the largest ELBO (pi_by = "pseudo_r": as stage 1)
+  auto path = [&](const EigenPanel<T>& P, int ic, int stage, const std::vector<double>& grid) {
     Fitter<T> F(P, c, in.n, in.z, threads);
     const double h0 = F.h2_ldsc();
-    if (ic == nc - 1) h2_0 = h0;
-    const std::vector<double> grid = F.pi_grid();
     std::vector<float> train, valid, n_tr;
     std::vector<double> xi;
-    F.pumas(train, valid, n_tr, xi);
+    const bool pseudo = stage == 1 || !c.pi_by_elbo;
+    if (pseudo) F.pumas(train, valid, n_tr, xi);
+    const float* nv = pseudo ? n_tr.data() : in.n.data();
+    const float* bv = pseudo ? train.data() : P.bt.data();
     State st(P.M, P.S, grid[0]);
     for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
     VarModel vm(P.M, K, A, sup, threads);
     double sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
+    Best bb;
     double best_here = -INFINITY;
     int drops = 0;
     for (double pi : grid) {
       vm.pi_move(pi);
       const auto t1 = std::chrono::steady_clock::now();
-      const RunResult r = F.run(st, n_tr.data(), train.data(), pi, vm, sigma, c.grid_max_iter, nullptr);
+      const RunResult r = F.run(st, nv, bv, pi, vm, sigma, c.grid_max_iter, nullptr);
       sigma = r.sigma;
-      double rb, bsb;
-      score(st, rb, bsb);
-      const double rr = bsb > 0 ? rb / std::sqrt(bsb) : 0.;
-      gcut.push_back(c.cutoffs[ic]); gpi.push_back(pi); gsig.push_back(sigma); gh2.push_back(r.h2); gr.push_back(rr);
-      grb.push_back(rb); git.push_back(r.iters); gconv.push_back(r.converged); gpar.push_back(vm.par);
-      gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
-      if (r.converged && rr > 0 && rr > best[ic].r) {
-        best[ic].have = true; best[ic].r = rr; best[ic].pi = pi; best[ic].sigma = sigma; best[ic].st = st;
-        best[ic].par = vm.par;
+      double rb = NAN, rr = NAN;
+      if (pseudo) {
+        double bsb;
+        score(st, rb, bsb);
+        rr = bsb > 0 ? rb / std::sqrt(bsb) : 0.;
       }
-      if (rr > best_here) { best_here = rr; drops = 0; }
+      const double crit = pseudo ? rr : r.elbo;  // pseudo r: only r > 0 can be chosen
+      gstage.push_back(stage); gcut.push_back(c.cutoffs[ic]); gpi.push_back(pi); gsig.push_back(sigma);
+      gh2.push_back(r.h2); gr.push_back(rr); grb.push_back(rb); gelbo.push_back(r.elbo); git.push_back(r.iters);
+      gconv.push_back(r.converged); gpar.push_back(vm.par);
+      gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
+      const double rr_ = crit;
+      if (r.converged && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bb.r) {
+        bb.have = true; bb.r = rr_; bb.pi = pi; bb.sigma = sigma; bb.st = st; bb.par = vm.par;
+      }
+      if (crit > best_here) { best_here = crit; drops = 0; }
       else if (c.stop_after && ++drops >= c.stop_after) break;
       Rcpp::checkUserInterrupt();
     }
-    // keep this cutoff's panel only while it is the provisional choice (smallest cutoff with the best r so far)
-    if (best[ic].have && (ibest < 0 || best[ic].r > best[ibest].r)) { ibest = ic; Pbest = std::move(Pi); }
+    return bb;
+  };
+  // stage 1: the cutoff at pi = cut_pi
+  std::vector<Best> bc(nc);
+  int ibest = -1;
+  for (int ic = 0; ic < nc; ++ic) {
+    std::unique_ptr<EigenPanel<T>> Pi;
+    if (ks[ic] != P0->k) Pi.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ic], threads)));
+    bc[ic] = path(Pi ? *Pi : *P0, ic, 1, std::vector<double>{c.cut_pi});
+    if (bc[ic].have && (ibest < 0 || bc[ic].r > bc[ibest].r)) ibest = ic;
   }
-  // SBayesRC rule across cutoffs: base = the largest cutoff with a usable point
   int ib = -1;
-  for (int ic = nc - 1; ic >= 0 && ib < 0; --ic) if (best[ic].have) ib = ic;
-  if (ib < 0) Rcpp::stop("no grid point converged with a positive pseudo r");
+  for (int ic = nc - 1; ic >= 0 && ib < 0; --ic) if (bc[ic].have) ib = ic;
+  if (ib < 0) Rcpp::stop("no cutoff converged with a positive pseudo r at pi = cut_pi");
   int ich = ib;
-  if (ibest >= 0 && ibest != ib && best[ibest].r / best[ib].r > c.rel_r_min) ich = ibest;
+  if (ibest >= 0 && ibest != ib && bc[ibest].r / bc[ib].r > c.rel_r_min) ich = ibest;
+  // stage 2: pi at the chosen cutoff
   std::unique_ptr<EigenPanel<T>> Pc;
-  if (ich == ibest) Pc = std::move(Pbest);
-  else if (ks[ich] != P0->k) Pc.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ich], threads)));
-  Pbest.reset();
-  if (Pc) P0.reset();
+  if (ks[ich] != P0->k) { Pc.reset(new EigenPanel<T>(plink4r::truncate_eigen_panel(*P0, ks[ich], threads))); }
   const EigenPanel<T>& P = Pc ? *Pc : *P0;
+  Best best;
+  {
+    Fitter<T> Fg(P, c, in.n, in.z, threads);
+    best = path(P, ich, 2, Fg.pi_grid());
+  }
+  if (!best.have)
+    Rcpp::stop(c.pi_by_elbo ? "no pi of the grid converged at the chosen cutoff"
+                            : "no pi of the grid converged with a positive pseudo r at the chosen cutoff");
+  if (Pc) P0.reset();
   Fitter<T> F(P, c, in.n, in.z, threads);
-  if (Pc) h2_0 = F.h2_ldsc();
+  h2_0 = F.h2_ldsc();
   VarModel bvm(P.M, K, A, sup, threads);
-  bvm.par = best[ich].par; bvm.pi = best[ich].pi; bvm.set_all();
-  State bst = best[ich].st;
-  RunResult res = F.run(bst, in.n.data(), P.bt.data(), best[ich].pi, bvm, best[ich].sigma, c.max_iter, nullptr);
+  bvm.par = best.par; bvm.pi = best.pi; bvm.set_all();
+  State bst = best.st;
+  RunResult res = F.run(bst, in.n.data(), P.bt.data(), best.pi, bvm, best.sigma, c.max_iter, nullptr);
   GibbsOut G;
   if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, bst, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
   const int ng = gpi.size();
   Rcpp::NumericMatrix gcoef(ng, K);
   for (int g = 0; g < ng; ++g) for (int k = 0; k < K; ++k) gcoef(g, k) = gpar[g][k];
   Rcpp::DataFrame tab = Rcpp::DataFrame::create(
-      Rcpp::_["cutoff"] = gcut, Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2,
-      Rcpp::_["pseudo_r"] = gr, Rcpp::_["rb"] = grb, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
+      Rcpp::_["stage"] = gstage, Rcpp::_["cutoff"] = gcut, Rcpp::_["pi"] = gpi, Rcpp::_["sigma"] = gsig, Rcpp::_["h2"] = gh2,
+      Rcpp::_["pseudo_r"] = gr, Rcpp::_["rb"] = grb, Rcpp::_["elbo"] = gelbo, Rcpp::_["iters"] = git, Rcpp::_["converged"] = gconv,
       Rcpp::_["seconds"] = gsec);
   return pack(F, bst, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef,
-                                 Rcpp::_["best_pseudo_r"] = best[ich].r, Rcpp::_["n_bins"] = n_bins,
+                                 Rcpp::_["best_pseudo_r"] = bc[ich].r, Rcpp::_["best_pi_crit"] = best.r, Rcpp::_["n_bins"] = n_bins,
                                  Rcpp::_["cutoff"] = c.cutoffs[ich],
                                  Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
                                  Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi0.begin(), xi0.end())));

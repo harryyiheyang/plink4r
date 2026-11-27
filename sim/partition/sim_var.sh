@@ -12,7 +12,8 @@
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 # CASE (env): main (default; methods V A1 AM AMV AML, directory var_<design>_s<seed>), noskip (AM without the LD-bin
 # suppression, noskip_<design>_s<seed>), truecols (AM given only the annotation columns of the design,
-# truecols_<design>_s<seed>). GIBBS_DRAWS (env, default 300) is passed on to run_var.R. Submit: sbatch sim_var.sh;
+# truecols_<design>_s<seed>). GIBBS_DRAWS (env, default 300) and PI_BY (env, default elbo) are passed on to run_var.R.
+# Submit: sbatch sim_var.sh;
 # CASE=noskip sbatch sim_var.sh; CASE=truecols GIBBS_DRAWS=500 sbatch sim_var.sh
 # Shared across tasks and cases (made once: the ref table and LD bins under a lock, annot.tsv and snps.tsv renamed
 # into place): ref_1-100.tsv, ldbin0.98_1-100.bin, annot.tsv, snps.tsv.
