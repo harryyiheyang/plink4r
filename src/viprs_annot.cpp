@@ -719,7 +719,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
     VarModel vm(P.M, K, A, sup, threads);
     double sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
-    Best bb;
+    Best bb, bn;  // bn: the best point when none converged (stage 2 falls back on it with a warning)
     double best_here = -INFINITY;
     int drops = 0;
     for (double pi : grid) {
@@ -741,10 +741,17 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       const double rr_ = crit;
       if ((r.converged || stage == 1) && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bb.r) {
         bb.have = true; bb.r = rr_; bb.pi = pi; bb.sigma = sigma; bb.st = st; bb.par = vm.par;
+      } else if (!bb.have && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bn.r) {
+        bn.have = true; bn.r = rr_; bn.pi = pi; bn.sigma = sigma; bn.st = st; bn.par = vm.par;
       }
       if (crit > best_here) { best_here = crit; drops = 0; }
       else if (c.stop_after && ++drops >= c.stop_after) break;
       Rcpp::checkUserInterrupt();
+    }
+    if (!bb.have && bn.have) {
+      Rcpp::warning("no pi of the grid converged in grid_max_iter iterations; the best unconverged point (pi = %g) is "
+                    "refitted", bn.pi);
+      return bn;
     }
     return bb;
   };
