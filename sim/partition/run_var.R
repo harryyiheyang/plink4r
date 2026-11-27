@@ -8,7 +8,7 @@
 # env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit of A1, AM, AML; default 300),
 #      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 0.995,0.999),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
-#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), COLS (annotation columns given to the model, comma or +
+#      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), SELECT (annotation selection: none or ssl), COLS (annotation columns given to the model, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
 #      the LD-bin suppression, comma separated; "" none, unset every 0/1 column), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
@@ -50,16 +50,16 @@ if ("AML" %in% meth) {
   cat("ldsc_strat", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "s\n")
 }
 gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300")); pb <- Sys.getenv("PI_BY", "elbo")
-ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000"))
+ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000")); sl <- Sys.getenv("SELECT", "none")
 co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else c(0.995, 0.999)
 fit <- function(k) switch(k,
   V = viprs(ss, a[1], ref = rf, threads = 4),
   A1 = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                   control = viprs_annot_control(mix_prop = 1, mix_var = 1, gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4),
+                   control = viprs_annot_control(mix_prop = 1, mix_var = 1, gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
   AM = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                   control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4),
+                   control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
   AMV = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                    control = viprs_annot_control(gibbs_draws = 0, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4),
+                    control = viprs_annot_control(gibbs_draws = 0, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4),
   AMT = {  # diagnostic: AM at the model-definition truth of AM (AM_mtruth.tsv of eval_var.py), sigma2_k and pi fixed
     mt <- fread(file.path(a[3], "AM_mtruth.tsv"))
     viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
@@ -68,7 +68,7 @@ fit <- function(k) switch(k,
                                               cutoffs = max(co), pi_grid = mt$pi[1], cut_pi = mt$pi[1]), threads = 4)
   },
   AML = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip,
-                    sigma2_init = ls, control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm), threads = 4))
+                    sigma2_init = ls, control = viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, select = sl), threads = 4))
 for (k in meth) {
   f <- tm(fit(k)); r <- ids[f[[1]], on = .(Block, Index)]
   bc <- grep("^BETA_STD", names(r), value = TRUE)
@@ -79,6 +79,8 @@ for (k in meth) {
                            file.path(a[3], paste0(k, "_h2.tsv")), sep = "\t")
   cat(k, "time", round(f[[2]], 1), "pi", signif(attr(f[[1]], "hyp")$pi, 3), "h2", round(attr(f[[1]], "hyp")$h2, 3),
       "suppressed", if (is.null(attr(f[[1]], "n_suppressed"))) 0 else attr(f[[1]], "n_suppressed"), "\n")
+  if (!is.null(attr(f[[1]], "ssl"))) cat(k, "ssl", paste(names(attr(f[[1]], "ssl")), signif(attr(f[[1]], "ssl"), 3), collapse = " "),
+                                         "zero columns", sum(attr(f[[1]], "sigma2") == 0), "\n")
   g <- attr(f[[1]], "grid")
   if (!is.null(g)) { cat(k, "grid (cutoff", attr(f[[1]], "cutoff"), "chosen)\n"); options(width = 200); print(as.data.frame(g), digits = 4, row.names = FALSE) }
 }
