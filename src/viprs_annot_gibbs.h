@@ -111,7 +111,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     if (!c.fix_sigma2) {
       std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);  // MASH atoms drawn (not MAP)
       vm.mstep_elbo(zbar.data(), gbar.data(), 10, &meng);
-      if (vm.sel == 2 && it > burn)
+      if (it > burn)
         for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.pm[(size_t)kk * vm.grid.size()];
     }
     vm.set_all();

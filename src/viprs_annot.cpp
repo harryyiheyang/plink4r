@@ -60,9 +60,7 @@ struct ViprsControl {
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
   bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
   bool fix_sigma2;  // sigma2_k kept at the start (diagnostic: no M-step)
-  int select;       // annotation selection on sigma2_k (k >= 1): 1 SSL, 2 MASH atoms
   std::vector<double> mash_grid, mash_w;  // MASH: sigma2_k in mash_grid * b with prior weights mash_w
-  double ssl_ratio, ssl_gs, ssl_gr, ssl_ba, ssl_bb;  // lambda0 = ratio lambda1; Gamma(gs, gr) of lambda1; Beta(ba, bb) of theta
   double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
   std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
@@ -103,11 +101,8 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.cutoffs = Rcpp::as<std::vector<double>>(c["cutoffs"]);
   x.rel_r_min = Rcpp::as<double>(c["rel_r_min"]);
   x.cut_pi = Rcpp::as<double>(c["cut_pi"]);
-  { const std::string sl = Rcpp::as<std::string>(c["select"]); x.select = sl == "mash" ? 2 : 1; }
   x.mash_grid = Rcpp::as<std::vector<double>>(c["mash_grid"]); x.mash_w = Rcpp::as<std::vector<double>>(c["mash_w"]);
   if (x.mash_grid.size() != x.mash_w.size() || x.mash_grid.empty()) Rcpp::stop("mash_grid and mash_w must have the same length");
-  { const std::vector<double> g = Rcpp::as<std::vector<double>>(c["ssl_gamma"]), b = Rcpp::as<std::vector<double>>(c["ssl_beta"]);
-    x.ssl_ratio = Rcpp::as<double>(c["ssl_ratio"]); x.ssl_gs = g[0]; x.ssl_gr = g[1]; x.ssl_ba = b[0]; x.ssl_bb = b[1]; }
   if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
   x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
   x.fix_sigma2 = Rcpp::as<bool>(c["fix_sigma2"]);
@@ -309,16 +304,7 @@ struct VarModel {
   std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
   double pi = 1;
   int threads;
-  // SSL on s_k = sigma2_k / sb (k >= 1): prior theta Exp(lambda1) + (1 - theta) Exp(lambda0), lambda0 = ratio lambda1;
-  // sb the per-SNP scale (the LDSC h2 over the SNPs not suppressed, set at the start); lambda1 and theta by EB
-  int sel = 1;
-  double sb = 0, l1 = 0.5, th = 0.5, ratio = 10, gs = 2, gr = 1, ba = 1, bb = 1;
-  double pstar(double s_) const {  // posterior probability of the slab (large-variance) part for s_k = s_
-    const double l0 = ratio * l1, a = th * l1 * std::exp(-l1 * s_), b = (1 - th) * l0 * std::exp(-l0 * s_);
-    return a + b > 0 ? a / (a + b) : 1.;
-  }
-  double lstar(double s_) const { const double p = pstar(s_); return l1 * p + ratio * l1 * (1 - p); }
-  // MASH atoms (sel = 2): sigma2_k = grid[m_k] mb for k >= 1, mb = sigma2_0 (the intercept, by the ELBO); m_k by the largest
+  // MASH atoms: sigma2_k = grid[m_k] mb for k >= 1, mb = sigma2_0 (the intercept, by the ELBO); m_k by the largest
   // F(sigma2_k = grid[m] mb) + log w_m (VI: MAP), or drawn from p_km proportional to its exponential (Gibbs, eng given);
   // pm: p_km of the last M-step (K x atoms, row k = 0 unused)
   std::vector<double> grid, lw, pm;
@@ -424,7 +410,7 @@ struct VarModel {
   // 1e-20.
   template <typename G>
   void mstep_elbo(const double* zeta, const G* gamma, int inner = 10, std::mt19937_64* eng = nullptr) {
-    if (sel == 2 && (int)atom.size() != K) mash_init();
+    if ((int)atom.size() != K) mash_init();
     for (int it = 0; it < inner; ++it) {
       std::vector<double> NU(2 * K, 0.);
 #ifdef _OPENMP
@@ -450,44 +436,16 @@ struct VarModel {
 #endif
         for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
       }
-      if (sel == 2) {
-        // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
-        // a_j = 1 + sum_k A_jk grid[m_k]: MM step with N = N_0 + sum_k grid[m_k] N_k, D likewise
-        double Nb = NU[0], Db = NU[K];
-        for (int k = 1; k < K; ++k) { Nb += grid[atom[k]] * NU[k]; Db += grid[atom[k]] * NU[K + k]; }
-        if (Db > 0 && Nb > 0) par[0] *= std::sqrt(Nb / Db);
-        par[0] = std::max(par[0], 1e-20); mb = par[0];
-        for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
-        set_all();
-        continue;
-      }
-      for (int k = 0; k < K; ++k) {
-        if (!(NU[K + k] > 0)) continue;
-        if (k > 0) {
-          // SSL: penalized MM step s <- s sqrt(N / (D + 2 lambda* / sb)); a column at 0 is revived only when the
-          // KKT condition fails at 0 (sb (N - D) > 2 lambda*(0), N and D at sigma2_k = 0)
-          const double ls = lstar(par[k] / sb);
-          if (par[k] == 0.) {
-            if (sb * (NU[k] - NU[K + k]) > 2 * ls) par[k] = 1e-3 * sb;
-          } else {
-            par[k] *= std::sqrt(NU[k] / (NU[K + k] + 2 * ls / sb));
-            if (par[k] < 1e-8 * sb) par[k] = 0.;
-          }
-        } else {  // the intercept: unpenalized MM step
-          par[k] *= std::sqrt(NU[k] / NU[K + k]);
-        }
-      }
-      par[0] = std::max(par[0], 1e-20);  // the intercept stays positive (h2_j > 0, finite float tau)
+      // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
+      // a_j = 1 + sum_k A_jk grid[m_k]: MM step with N = N_0 + sum_k grid[m_k] N_k, D likewise
+      double Nb = NU[0], Db = NU[K];
+      for (int k = 1; k < K; ++k) { Nb += grid[atom[k]] * NU[k]; Db += grid[atom[k]] * NU[K + k]; }
+      if (Db > 0 && Nb > 0) par[0] *= std::sqrt(Nb / Db);
+      par[0] = std::max(par[0], 1e-20); mb = par[0];
+      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
       set_all();
     }
-    if (sel == 2) mash_step(zeta, gamma, eng);
-    if (sel == 1 && K > 1) {
-      // EB: lambda1 <- (sum p* + gs - 1) / (sum p* s + gr) (Gamma(gs, gr)), theta <- (sum p* + ba - 1) / (K - 1 + ba + bb - 2)
-      double sp = 0, sps = 0;
-      for (int k = 1; k < K; ++k) { const double s_ = par[k] / sb, p = pstar(s_); sp += p; sps += p * s_; }
-      l1 = std::max(1e-6, (sp + gs - 1) / (sps + gr));
-      th = std::min(0.999, std::max(1e-3, (sp + ba - 1) / ((K - 1) + ba + bb - 2)));
-    }
+    mash_step(zeta, gamma, eng);
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
@@ -826,14 +784,10 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gelbo, gsec;
   std::vector<int> gstage, git, gconv;
   std::vector<std::vector<double>> gpar;
-  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0, l1 = 0.5, th = 0.5, mb = 0; State st{0, 0, 0.}; std::vector<double> par; };
+  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0, mb = 0; State st{0, 0, 0.}; std::vector<double> par; };
   double h2_0 = 0;
-  int64_t n_free = 0;
-  for (int64_t j = 0; j < P0->M; ++j) n_free += !sup[j];
-  // selection settings of a variance model; sb = h0 / (SNPs not suppressed), the average per-SNP h2 of the LDSC start
-  auto setsel = [&](VarModel& v, double h0) {
-    v.sel = c.select; v.ratio = c.ssl_ratio; v.gs = c.ssl_gs; v.gr = c.ssl_gr; v.ba = c.ssl_ba; v.bb = c.ssl_bb;
-    v.sb = h0 / std::max<int64_t>(n_free, 1);
+  // MASH settings of a variance model
+  auto setsel = [&](VarModel& v) {
     v.grid = c.mash_grid; v.lw.clear();
     for (double w : c.mash_w) v.lw.push_back(w > 0 ? std::log(w) : -INFINITY);
   };
@@ -852,11 +806,11 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     const float* bv = pseudo ? train.data() : P.bt.data();
     State st(P.M, P.S, grid[0]);
     VarModel vm(P.M, K, A, sup, threads);
-    setsel(vm, h0);
+    setsel(vm);
     double sigma;
     if (init) {
       st = init->st; st.s.assign(P.S, 0.f);
-      vm.par = init->par; vm.pi = grid[0]; vm.l1 = init->l1; vm.th = init->th; vm.mb = init->mb; vm.set_all();
+      vm.par = init->par; vm.pi = grid[0]; vm.mb = init->mb; vm.set_all();
       sigma = init->sigma;
     } else {
       for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
@@ -883,9 +837,9 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
       const double rr_ = crit;
       if ((r.converged || stage == 1) && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bb.r) {
-        bb.have = true; bb.r = rr_; bb.pi = pi; bb.sigma = sigma; bb.st = st; bb.par = vm.par; bb.l1 = vm.l1; bb.th = vm.th; bb.mb = vm.mb;
+        bb.have = true; bb.r = rr_; bb.pi = pi; bb.sigma = sigma; bb.st = st; bb.par = vm.par; bb.mb = vm.mb;
       } else if (!bb.have && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bn.r) {
-        bn.have = true; bn.r = rr_; bn.pi = pi; bn.sigma = sigma; bn.st = st; bn.par = vm.par; bn.l1 = vm.l1; bn.th = vm.th; bn.mb = vm.mb;
+        bn.have = true; bn.r = rr_; bn.pi = pi; bn.sigma = sigma; bn.st = st; bn.par = vm.par; bn.mb = vm.mb;
       }
       // early stop: only converged points count (as only they can be chosen)
       if (r.converged) {
@@ -938,8 +892,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   Fitter<T> F(P, c, in.n, in.z, threads);
   h2_0 = F.h2_ldsc();
   VarModel bvm(P.M, K, A, sup, threads);
-  setsel(bvm, h2_0);
-  bvm.par = best.par; bvm.pi = best.pi; bvm.l1 = best.l1; bvm.th = best.th; bvm.mb = best.mb; bvm.set_all();
+  setsel(bvm);
+  bvm.par = best.par; bvm.pi = best.pi; bvm.mb = best.mb; bvm.set_all();
   State bst = best.st;
   RunResult res = F.run(bst, in.n.data(), P.bt.data(), best.pi, bvm, best.sigma, c.max_iter, nullptr);
   GibbsOut G;
@@ -953,8 +907,6 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       Rcpp::_["seconds"] = gsec);
   return pack(F, bst, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef,
-                                 Rcpp::_["ssl"] = Rcpp::NumericVector::create(Rcpp::_["lambda1"] = bvm.l1, Rcpp::_["theta"] = bvm.th,
-                                                                         Rcpp::_["scale"] = bvm.sb),
                                  Rcpp::_["mash"] = Rcpp::List::create(
                                      Rcpp::_["scale"] = bvm.mb,
                                      Rcpp::_["atom"] = Rcpp::IntegerVector(bvm.atom.begin(), bvm.atom.end()),
