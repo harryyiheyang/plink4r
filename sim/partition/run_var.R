@@ -2,7 +2,8 @@
 #   and sim_dir/<method>_h2.tsv (annotation, h2_shapley = Shapley value of the column in beta' R beta, its sd,
 #   var_shapley = b_k' R b, h2_share = model share)
 # Methods (one path each: VI chooses the cutoff and pi, the final fit is Gibbs + RB; intercept sigma2_0 on every SNP):
-#   ORACLE viprs_annot given only the design columns, sigma2_k and pi fixed at the oracle of gen_var.py (oracle.tsv);
+#   ORACLE viprs_annot with sigma2_k and pi fixed at the oracle of gen_var.py (oracle.tsv: the design columns; every
+#   other column at 0);
 #   MASH viprs_annot (MASH prior on sigma2_k) started at ldsc_strat(); MASH_PI the same with pi fixed at the truth of
 #   oracle.tsv (no pi grid). Eigen cutoff: CUTOFFS, default 1 (every component of
 #   eigen.bin, the panel the data are simulated from: no cutoff choice).
@@ -11,7 +12,7 @@
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
 #      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), COLS (annotation columns given to MASH, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
-#      the LD-bin suppression, comma separated; default none, as the data are simulated from the model on every SNP), METHODS (default all),
+#      the LD-bin suppression, comma separated; "" none, unset every column, as gen_var.py with BINS), METHODS (default all),
 #      LDSCORE (parquet / tsv of precomputed stratified LD scores by ID for the ldsc_strat() start: a base column
 #      L2 / L_base / base / baseL2 and one column per annotation named L_<annot>, L2_<annot>, <annot>L2 or <annot>;
 #      unset: ld_score()).
@@ -26,7 +27,7 @@ an0 <- an   # every column (ORACLE takes the design columns from it)
 if (nzchar(Sys.getenv("COLS"))) an <- an[, c("Block", "Index", strsplit(Sys.getenv("COLS"), "[,+]")[[1]]), with = FALSE]
 bins <- Sys.getenv("BINS", file.path(dirname(a[2]), "ldbin0.98.bin"))
 if (!file.exists(bins)) ld_bins(a[1], r2 = 0.98, ref = rf, output = bins, threads = 4)
-skip <- setdiff(strsplit(Sys.getenv("SKIP", ""), ",")[[1]], "")   # default none: the data are simulated without suppression
+skip <- if (Sys.getenv("SKIP", "\001") == "\001") NULL else setdiff(strsplit(Sys.getenv("SKIP"), ",")[[1]], "")
 meth <- strsplit(Sys.getenv("METHODS", "ORACLE,MASH,MASH_PI"), ",")[[1]]
 tm <- function(e) { t0 <- Sys.time(); x <- e; list(x, as.numeric(difftime(Sys.time(), t0, units = "secs"))) }
 ls <- NULL
@@ -58,9 +59,13 @@ ctl <- function(...) viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs =
 pt <- function() { p <- fread(file.path(a[3], "oracle.tsv"))$pi[1]; list(pi_grid = p, cut_pi = p) }
 fit <- function(k) switch(k,
   ORACLE = {
-    o <- fread(file.path(a[3], "oracle.tsv")); oa <- an0[, c("Block", "Index", setdiff(o$annotation, "intercept")), with = FALSE]
-    viprs_annot(ss, a[1], annot = oa, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = setNames(o$sigma2, o$annotation),
-                control = ctl(fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0, pi_grid = o$pi[1], cut_pi = o$pi[1]),
+    # every column (the same LD-bin suppression as the data), sigma2 at the oracle: the design columns as in oracle.tsv,
+    # the others 0
+    o <- fread(file.path(a[3], "oracle.tsv")); ac0 <- setdiff(names(an0), c("Block", "Index"))
+    s2 <- setNames(rep(0, length(ac0) + 1), c("intercept", ac0)); s2[o$annotation] <- o$sigma2
+    viprs_annot(ss, a[1], annot = an0, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = s2,
+                control = ctl(fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0, start_zero_share = 0,
+                              pi_grid = o$pi[1], cut_pi = o$pi[1]),
                 threads = 4)
   },
   MASH = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,

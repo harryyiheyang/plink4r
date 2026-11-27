@@ -9,6 +9,7 @@
 # usage: python gen_var.py <ld_dir> <snp_table: tsv with ID, block, ld_index, A1, A2, freq> <out_dir> <seed>
 #   env: NGWAS (300000), H2 (0.3), PI (0.01), BLOCKS ("1-100" or "" = all), MIX ("0.6,0.3,0.1"),
 #        MIXVAR ("0.01,0.1,1"),
+#        BINS: LD-bin file of the panel (ld_bins(); the same as the fit): LD-bin suppression of the truth (below),
 #        ANNOT: tsv / parquet with ID and annotation columns (0-100 or 0-1); without it random 0/1 columns (K, PT,
 #               SEG, DECOY, NOISE: see below),
 #        DESIGN: categories and variance ratios sigma2_c / sigma2_0, "name=col1+col2:ratio,...", e.g.
@@ -31,7 +32,8 @@ mix = np.array([float(x) for x in env("MIX", "0.6,0.3,0.1").split(",")]); mix /=
 mv = np.array([float(x) for x in env("MIXVAR", "0.01,0.1,1").split(",")]); kap = mv / (mix * mv).sum()
 rng = np.random.default_rng(seed); os.makedirs(out, exist_ok=True)
 
-snp = pd.read_csv(tab, sep="\t")
+snp = pd.read_csv(tab, sep="\t").sort_values(["block", "ld_index"]).reset_index(drop=True)
+snp["prow"] = np.arange(len(snp))   # row in the panel order (block, ld_index): the index of the LD-bin file
 bl = env("BLOCKS", "")
 blocks = sorted(snp.block.unique())
 if bl:
@@ -64,6 +66,16 @@ else:
     for i in range(int(env("NOISE", "0"))): a[f"n{i+1}"] = (rng.random(ns) < pt)[run].astype(float)
     cols = list(a); a = pd.DataFrame(a)
 A = a.values
+# LD-bin suppression as in the fit (viprs_annot, sbayesrc): in a bin (BINS, int16 per panel SNP, -1 = none) with an
+# annotated member (nonzero in any column), the members without annotation are not causal (beta_j = 0); they are left
+# out of the oracle fit and of the model-definition truth (suppressed.npy)
+sup = np.zeros(M, bool)
+if env("BINS"):
+    bid = np.fromfile(env("BINS"), dtype="<i2")
+    if len(bid) != int(snp.prow.max()) + 1: raise SystemExit("BINS: one int16 per SNP of the snp table (the panel) expected")
+    bid = bid[snp.prow.values].astype(np.int64); ann_ = A.max(1) > 0
+    key = snp.block.values.astype(np.int64) * 100000 + bid
+    hit = set(key[(bid >= 0) & ann_]); sup = (bid >= 0) & ~ann_ & np.isin(key, list(hit))
 if env("DESIGN"):
     cats = []
     for item in env("DESIGN").split(","):
@@ -80,7 +92,7 @@ ratio = np.array([r for _, _, r in cats])
 # the variance model itself: causal with probability PI everywhere, slab class common to the components of a SNP,
 # component c ~ N(0, memb_c ratio_c kappa / PI), intercept ~ N(0, kappa / PI) on every causal SNP; so
 # E[beta_j^2] = sigma2_0 (1 + sum_c memb_jc ratio_c), sigma2_c = ratio_c sigma2_0 (sigma2_0 set by h2 below)
-causal = rng.random(M) < pi
+causal = (rng.random(M) < pi) & ~sup
 cls = rng.choice(len(mix), size=M, p=mix)
 sc = np.where(causal, np.sqrt(kap[cls] / pi), 0.)
 C = np.zeros((M, len(cats) + 1))
@@ -100,7 +112,7 @@ beta = C.sum(1)
 Q, T = gram(np.c_[C, beta])
 f = np.sqrt(h2 / Q[-1, -1]); C *= f; beta *= f
 s20 = f * f                                                           # sigma2_0
-vdes = s20 * (1. + memb @ ratio)                                      # design variance E[beta_j^2]
+vdes = s20 * (1. + memb @ ratio) * ~sup                                      # design variance E[beta_j^2]
 target = np.r_[ratio * s20 * memb.sum(0), s20 * M]                    # design h2 sigma2_c sum_j memb_jc (no LD)
 own = np.diag(Q)[:-1] * f * f                                         # beta_c' R beta_c: h2 of each component
 bh = np.empty(M)
@@ -123,18 +135,19 @@ if not env("ANNOT") or not os.path.exists(f"{sh}/annot.tsv"):
 if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"):
     tmp = f"{sh}/snps.tsv.{os.getpid()}"
     snp[["ID", "block", "ld_index"]].to_csv(tmp, sep="\t", index=False); os.replace(tmp, f"{sh}/snps.tsv")
-np.save(f"{out}/beta_comp.npy", C.astype(np.float32)); np.save(f"{out}/v_design.npy", vdes.astype(np.float32))
+np.save(f"{out}/suppressed.npy", sup); np.save(f"{out}/beta_comp.npy", C.astype(np.float32)); np.save(f"{out}/v_design.npy", vdes.astype(np.float32))
 # oracle variance model on the design columns (the same MM fit as the model-definition truth of eval_var.py)
 oc = list(dict.fromkeys(sum([cc for _, cc, _ in cats], [])))
-Ao = np.c_[np.ones(M), A[:, [cols.index(c) for c in oc]]]
-s2 = np.full(Ao.shape[1], vdes.sum() / Ao.sum())
+Ao = np.c_[np.ones(M), A[:, [cols.index(c) for c in oc]]][~sup]; vo = vdes[~sup]
+s2 = np.full(Ao.shape[1], vo.sum() / Ao.sum())
 for it in range(100000):
-    hh = Ao @ s2; N_ = Ao.T @ (vdes / hh ** 2); D_ = Ao.T @ (1 / hh)
+    hh = Ao @ s2; N_ = Ao.T @ (vo / hh ** 2); D_ = Ao.T @ (1 / hh)
     r_ = np.divide(N_, D_, out=np.ones_like(N_), where=D_ > 0); s2 = s2 * np.sqrt(r_)
     if np.max(np.abs(r_[s2 > 0] - 1)) < 1e-8: break
 pd.DataFrame(dict(annotation=["intercept"] + oc, sigma2=s2, pi=pi)).to_csv(f"{out}/oracle.tsv", sep="\t", index=False)
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], ratio=np.r_[ratio, 1.], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
+print(int(sup.sum()), "SNPs suppressed (LD bins)" if env("BINS") else "SNPs suppressed (no BINS)")
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))
 print("causal per category", dict(zip(names[:-1], [int((causal & (memb[:, i] > 0)).sum()) for i in range(memb.shape[1])])))
 print("h2 design  ", dict(zip(names, np.round(target, 4))))

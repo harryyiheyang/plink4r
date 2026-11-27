@@ -7,7 +7,7 @@
 # Model-definition truth (per method, for the columns the method was given, read from <method>_h2.tsv and annot.tsv of
 # SHARED): sigma2_k of the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k fitted to the design variance
 # v_j = E[beta_j^2] of gen_var.py (v_design.npy) by the likelihood stationarity sum_j A_jk (v_j - h2_j) / h2_j^2 = 0
-# (MM steps to convergence; every SNP, the LD-bin suppression is not known here); the true Shapley value of column k is
+# (MM steps to convergence; the SNPs not suppressed, suppressed.npy of gen_var.py); the true Shapley value of column k is
 # then (w_k beta)' R beta with w_jk = A_jk sigma2_k / h2_j and the true beta (k = 0 the intercept on every SNP).
 # _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth" (for ORACLE: its own fixed sigma2_k).
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
@@ -34,15 +34,16 @@ ann = None
 def model_truth(acols, beta, Rb, tol=1e-8, maxit=100000):
     global ann
     if ann is None: ann = pd.read_csv(os.path.join(os.environ.get("SHARED", sim), "annot.tsv"), sep="\t").set_index("ID").reindex(snp.ID).fillna(0)
-    A = np.c_[np.ones(len(snp)), ann[acols].values.astype(float)]
-    v = np.load(f"{sim}/v_design.npy").astype(float)
+    keep = ~np.load(f"{sim}/suppressed.npy") if os.path.exists(f"{sim}/suppressed.npy") else np.ones(len(snp), bool)
+    A = np.c_[np.ones(len(snp)), ann[acols].values.astype(float)][keep]
+    v = np.load(f"{sim}/v_design.npy").astype(float)[keep]
     s2 = np.full(A.shape[1], v.sum() / A.sum())
     for it in range(maxit):
         h = A @ s2; N = A.T @ (v / h ** 2); D = A.T @ (1 / h)
         r = np.divide(N, D, out=np.ones_like(N), where=D > 0); s2 = s2 * np.sqrt(r)
         if np.max(np.abs(r[s2 > 0] - 1)) < tol: break
     h = A @ s2; W = A * s2 / h[:, None]
-    return dict(zip(["intercept"] + list(acols), W.T @ (beta * Rb))), s2
+    return dict(zip(["intercept"] + list(acols), W.T @ (beta * Rb)[keep])), s2
 def r2(i, j): return Q[i, j] ** 2 / (Q[i, i] * Q[j, j]) if Q[i, i] * Q[j, j] > 0 else float("nan")
 tot = L[("true", "total")]
 tsh = {nm: Q[L[("true", nm)], tot] for nm in names}

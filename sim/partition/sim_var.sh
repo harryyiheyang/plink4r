@@ -37,7 +37,8 @@ D=var_${d}_s$seed; M="ORACLE MASH MASH_PI"
 BINS=ldbin0.98_1-100.bin
 rm -rf $D; mkdir -p $D
 flock shared.lock bash -c "[ -f ref_1-100.tsv ] || python3 make_ref.py $LD 1-100 ref_1-100.tsv"
-ANNOT=$AN/annot_9M_all_20261122.parquet DESIGN="${DES[$d]}" PI=0.01 NGWAS=300000 BLOCKS=1-100 \
+flock shared.lock bash -c "[ -f $BINS ] || Rscript -e 'plink4r::ld_bins(\"$LD\", r2 = 0.98, ref = data.table::fread(\"ref_1-100.tsv\")[, .(CHR = chr, BP37 = bp37, A1, A2, A1Freq = freq, Block = block, Index = ld_index)], output = \"$BINS\", threads = 4)'"
+BINS=$BINS ANNOT=$AN/annot_9M_all_20261122.parquet DESIGN="${DES[$d]}" PI=0.01 NGWAS=300000 BLOCKS=1-100 \
   python3 gen_var.py $LD ref_1-100.tsv $D $seed > $D/gen.txt
 run() { METHODS="${M// /,}" LDSCORE=$AN/ldscore_9M_all_20261122.parquet BINS=$BINS \
   Rscript run_var.R $LD ref_1-100.tsv $D > $D/run.txt; }
