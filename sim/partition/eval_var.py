@@ -2,11 +2,12 @@
 # BETA_STD_<col> of its columns) for the true category genetic value, and the Shapley heritability ratio
 # _h2 = estimated (h2_shapley of <method>_h2.tsv, summed over the columns of the category: Shapley values add up)
 # / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley".
-# usage: python eval_var.py <ld_dir> <sim_dir> <method>...
+# usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
 import sys, os, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from sim_io import read_X
 ld, sim = sys.argv[1], sys.argv[2]
-snp = pd.read_csv(f"{sim}/snps.tsv", sep="\t"); C = np.load(f"{sim}/beta_comp.npy")
+snp = pd.read_csv(os.path.join(os.environ.get("SHARED", sim), "snps.tsv"), sep="\t")
+C = np.load(f"{sim}/beta_comp.npy").astype(float)
 cat = pd.read_csv(f"{sim}/categories.tsv", sep="\t", keep_default_na=False)
 names = list(cat.name); cols = [c.split("+") if c else ["intercept"] for c in cat["columns"]]
 vecs, labels = [C[:, i] for i in range(C.shape[1])] + [C.sum(1)], [("true", nm) for nm in names] + [("true", "total")]

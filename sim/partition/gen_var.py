@@ -15,8 +15,9 @@
 #        DESIGN: categories and h2 shares, "name=col1+col2:share,..." (intercept: 1 - the sum), e.g.
 #               "coding=High+Moderate:0.5,liver=Hepatocyte_Cholangiocyte:0.3"; default every random column at
 #               (1 - RESID) / K, RESID (0.2).
-# writes trait.ma, annot.tsv (ID, Block, Index and the annotation columns / 100), beta_comp.npy (M x (C + 1): the
-# categories, then intercept), categories.tsv (name, columns, design h2, realised h2 = beta_c' R beta_c), snps.tsv.
+# writes to out_dir trait.ma, beta_comp.npy (float32, M x (C + 1): the categories, then intercept), categories.tsv
+# (name, columns, design h2, realised h2 = beta_c' R beta_c); annot.tsv (ID, Block, Index and the annotation columns
+# / 100) and snps.tsv to SHARED (env, default out_dir; random annotations: always out_dir) unless already there.
 import os, sys, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sim_io import read_X
@@ -106,9 +107,14 @@ names = [nm for nm, _, _ in cats] + ["intercept"]
 a1, a2 = ("A1", "A2") if "A1" in snp else ("alt", "ref")
 fr = snp["freq"] if "freq" in snp else snp.get("AF_PanUKB", snp.get("A1Freq"))
 pd.DataFrame(dict(SNP=snp.ID, A1=snp[a1], A2=snp[a2], freq=fr, b=bh, se=1 / np.sqrt(n), p=0.5, N=n)).to_csv(f"{out}/trait.ma", sep="\t", index=False)
-ann = a.reset_index(drop=True).copy(); ann.insert(0, "Index", snp.ld_index.values); ann.insert(0, "Block", snp.block.values)
-ann.insert(0, "ID", snp.ID.values); ann.to_csv(f"{out}/annot.tsv", sep="\t", index=False)
-np.save(f"{out}/beta_comp.npy", C); snp[["ID", "block", "ld_index"]].to_csv(f"{out}/snps.tsv", sep="\t", index=False)
+# annot.tsv and snps.tsv do not change between seeds with ANNOT: written once to SHARED (default out_dir) if missing
+sh = env("SHARED", out) if env("ANNOT") else out
+os.makedirs(sh, exist_ok=True)
+if not env("ANNOT") or not os.path.exists(f"{sh}/annot.tsv"):
+    ann = a.reset_index(drop=True).copy(); ann.insert(0, "Index", snp.ld_index.values); ann.insert(0, "Block", snp.block.values)
+    ann.insert(0, "ID", snp.ID.values); ann.astype({c: "float32" for c in cols}).to_csv(f"{sh}/annot.tsv", sep="\t", index=False)
+if not env("ANNOT") or not os.path.exists(f"{sh}/snps.tsv"): snp[["ID", "block", "ld_index"]].to_csv(f"{sh}/snps.tsv", sep="\t", index=False)
+np.save(f"{out}/beta_comp.npy", C.astype(np.float32))
 pd.DataFrame(dict(name=names, columns=["+".join(cc) for _, cc, _ in cats] + [""], design=target,
                   h2=own)).to_csv(f"{out}/categories.tsv", sep="\t", index=False)
 print(M, "SNPs", len(blocks), "blocks;", int(causal.sum()), "causal; unannotated SNPs", int((A.max(1) == 0).sum()))
