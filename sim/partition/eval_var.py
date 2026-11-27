@@ -4,6 +4,11 @@
 # / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley"; _vs: the same
 # with var_shapley (b_c' R b of the output posterior means instead of the mean over the draws); _or: the
 # oracle ratio, the estimated per-SNP share BETA_c / BETA applied to the true beta (w_c beta)' R beta / truth.
+# Model-definition truth (per method, for the columns the method was given, read from <method>_h2.tsv and annot.tsv of
+# SHARED): the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k fitted to the true beta by the M-step of
+# viprs_annot with beta known, sigma2_k <- sum_j (w_jk^2 beta_j^2 + w_jk (1 - w_jk) h2_j) / sum_j A_jk,
+# w_jk = A_jk sigma2_k / h2_j; the true Shapley value of column k is then (w_k beta)' R beta (k = 0 the intercept on
+# every SNP). _mh2 = estimated h2_shapley / this truth; printed as "<method> model truth".
 # usage: python eval_var.py <ld_dir> <sim_dir> <method>...   env SHARED: directory of snps.tsv (default sim_dir)
 import sys, os, numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from sim_io import read_X
@@ -24,6 +29,17 @@ for b, g in snp.groupby("block", sort=True):
     X = read_X(os.path.join(ld, f"block{b}.eigen.bin"))[g.ld_index.values]
     T = X.T @ V[g.index.values]; Q += T.T @ T; Rb[g.index.values] = X @ T[:, len(names)]
 L = {lab: i for i, lab in enumerate(labels)}
+ann = None
+def model_truth(acols, beta, Rb, iters=500):
+    global ann
+    if ann is None: ann = pd.read_csv(os.path.join(os.environ.get("SHARED", sim), "annot.tsv"), sep="\t").set_index("ID").reindex(snp.ID).fillna(0)
+    A = np.c_[np.ones(len(snp)), ann[acols].values.astype(float)]
+    sa = A.sum(0); s2 = np.full(A.shape[1], (beta ** 2).sum() / sa.sum())
+    for _ in range(iters):
+        h = A @ s2; W = np.divide(A * s2, h[:, None], out=np.zeros_like(A), where=h[:, None] > 0)
+        s2 = np.where(sa > 0, (W ** 2 * (beta ** 2)[:, None] + W * (1 - W) * h[:, None]).sum(0) / sa, 0.)
+    h = A @ s2; W = np.divide(A * s2, h[:, None], out=np.zeros_like(A), where=h[:, None] > 0)
+    return dict(zip(["intercept"] + list(acols), W.T @ (beta * Rb)))
 def r2(i, j): return Q[i, j] ** 2 / (Q[i, i] * Q[j, j]) if Q[i, i] * Q[j, j] > 0 else float("nan")
 tot = L[("true", "total")]
 tsh = {nm: Q[L[("true", nm)], tot] for nm in names}
@@ -34,6 +50,9 @@ for m in sys.argv[3:]:
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
         ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h, hv = ht.h2_shapley, ht.var_shapley
+        mt = model_truth([k for k in ht.index if k != "intercept"], V[:, tot], Rb)
+        print(m, "model truth", {nm: round(float(sum(mt.get(c, 0.) for c in cc)), 4) for nm, cc in zip(names, cols)},
+              "other", round(float(sum(v for k, v in mt.items() if k not in set(sum(cols, [])))), 4))
     for nm, cc in zip(names, cols):
         if (m, nm) not in L: continue
         i, j = L[(m, nm)], L[("true", nm)]
@@ -41,6 +60,8 @@ for m in sys.argv[3:]:
         if h is not None:
             out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
             out[nm + "_vs"] = round(float(hv.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
+            tm = sum(mt.get(c, 0.) for c in cc)
+            out[nm + "_mh2"] = round(float(h.reindex(cc).fillna(0).sum() / tm), 3) if tm > 0 else float("nan")
         # oracle: the estimated allocation share w = BETA_k / BETA of each SNP applied to the true beta
         bt_ = V[:, L[(m, "total")]]; w = np.divide(V[:, i], bt_, out=np.zeros_like(bt_), where=np.abs(bt_) > 1e-12)
         out[nm + "_or"] = round(float((w * V[:, tot]) @ Rb / tsh[nm]), 3)
