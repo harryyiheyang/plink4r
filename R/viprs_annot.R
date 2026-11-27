@@ -112,6 +112,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   attr(out, "best_pseudo_r") <- res$extra$best_pseudo_r
   attr(out, "best_pi_crit") <- res$extra$best_pi_crit
   attr(out, "ssl") <- res$extra$ssl
+  attr(out, "mash") <- res$extra$mash
   attr(out, "cutoff") <- res$extra$cutoff
   attr(out, "pumas_xi") <- res$extra$pumas_xi
   .prs_write(out, output)
@@ -146,13 +147,20 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
 #'   (a column at 0 stays there while b (N_k - D_k) <= 2 lambda*_k(0)); lambda1 and theta by EB after each M-step,
 #'   lambda1 <- (sum p* + g1 - 1) / (sum p* s + g2) with Gamma(`ssl_gamma`) and theta <- (sum p* + a - 1) / (K + a + b - 2)
 #'   with Beta(`ssl_beta`). The result has attribute `ssl` (lambda1, theta, scale b).
+#'   "mash": atomic prior sigma2_k in `mash_grid` x sigma2_0 (default 0, 1, 10, 100 times the intercept) with fixed
+#'   weights `mash_w` (default 0.5, 0.3, 0.1, 0.1); sigma2_0 by the ELBO (MM step of the column
+#'   a_j = 1 + sum_k A_jk grid[m_k]); each
+#'   column's atom m_k by the largest F(sigma2_k = grid[m] b) + log w_m in VI (MAP; atom 0 is an exact zero), drawn from
+#'   p_km proportional to exp(F + log w_m) in the Gibbs fit. Attribute `mash`: scale (sigma2_0), the final atoms (0-based), pzero
+#'   (the Gibbs mean of p(m_k = 0)), draws.
 #' @return a list.
 #' @export
 viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1), mix_var = c(0.01, 0.1, 1),
                                 cutoffs = c(0.995, 0.999), rel_r_min = 1.25, cut_pi = 0.01, pi_by = c("elbo", "pseudo_r"),
                                 start_scale = 1.3, start_zero_share = 0.05, start_total_min = 1.3,
                                 gibbs_burn = 100L, gibbs_draws = 300L, fix_sigma2 = FALSE,
-                                select = c("none", "ssl"), ssl_ratio = 10, ssl_gamma = c(2, 1), ssl_beta = c(1, 1)) {
+                                select = c("none", "ssl", "mash"), ssl_ratio = 10, ssl_gamma = c(2, 1), ssl_beta = c(1, 1),
+                                mash_grid = c(0, 1, 10, 100), mash_w = c(0.5, 0.3, 0.1, 0.1)) {
   c(viprs_control(...), list(bin_r2 = as.numeric(bin_r2), mix_prop = as.numeric(mix_prop),
                              mix_var = as.numeric(mix_var), cutoffs = as.numeric(cutoffs),
                              rel_r_min = as.numeric(rel_r_min), cut_pi = as.numeric(cut_pi), pi_by = match.arg(pi_by),
@@ -161,7 +169,8 @@ viprs_annot_control <- function(..., bin_r2 = 0.98, mix_prop = c(0.6, 0.3, 0.1),
                              gibbs_burn = as.integer(gibbs_burn),
                              gibbs_draws = as.integer(gibbs_draws),
                              fix_sigma2 = isTRUE(fix_sigma2), select = match.arg(select), ssl_ratio = as.numeric(ssl_ratio),
-                             ssl_gamma = as.numeric(ssl_gamma), ssl_beta = as.numeric(ssl_beta)))
+                             ssl_gamma = as.numeric(ssl_gamma), ssl_beta = as.numeric(ssl_beta),
+                             mash_grid = as.numeric(mash_grid), mash_w = as.numeric(mash_w)))
 }
 
 # sigma2_k of the first grid point (intercept first, then cols), or numeric(0) for the LDSC start

@@ -18,6 +18,7 @@ struct GibbsOut {
   std::vector<double> bmean, pip;  // RB mean of beta_j (standardized), mean slab probability
   std::vector<double> part;        // M x K row-major: mean of w_jk m_j
   std::vector<double> phi, phi2;   // per column: mean and mean square of phi_k over the draws
+  std::vector<double> pzero;       // MASH: mean over the draws of p(m_k = 0) (the posterior probability of sigma2_k = 0)
   double sigma = 0, h2 = 0;        // mean of sigma and of beta'R beta / (beta'R beta + sigma) over the draws
   int draws = 0;
 };
@@ -35,7 +36,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
   vtx(P, beta.data(), s.data(), threads);
   GibbsOut o;
   o.bmean.assign(M, 0.); o.pip.assign(M, 0.); o.part.assign((size_t)M * K, 0.);
-  o.phi.assign(K, 0.); o.phi2.assign(K, 0.);
+  o.phi.assign(K, 0.); o.phi2.assign(K, 0.); o.pzero.assign(K, 0.);
   o.draws = draws;
   std::vector<double> q(M, 0.);
   for (int it = 1; it <= burn + draws; ++it) {
@@ -107,7 +108,12 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     // stochastic approximation of the statistics (gamma_j, zeta_j), then the M-step on the averages (averaging the
     // updated sigma2 would solve E[N_k / D_k] = 1 instead of E[N_k] = E[D_k])
     for (int64_t j = 0; j < M; ++j) { gbar[j] = (1. - a) * gbar[j] + a * g[j]; zbar[j] = (1. - a) * zbar[j] + a * zeta[j]; }
-    if (!c.fix_sigma2) vm.mstep_elbo(zbar.data(), gbar.data());
+    if (!c.fix_sigma2) {
+      std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);  // MASH atoms drawn (not MAP)
+      vm.mstep_elbo(zbar.data(), gbar.data(), 10, &meng);
+      if (vm.sel == 2 && it > burn)
+        for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.pm[(size_t)kk * vm.grid.size()];
+    }
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;
     if (ns > 0. && std::isfinite(ns)) sigma = (1. - a) * sigma + a * ns;
@@ -117,6 +123,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     for (auto& x : o.bmean) x *= inv;
     for (auto& x : o.pip) x *= inv;
     for (auto& x : o.part) x *= inv;
+    for (auto& x : o.pzero) x *= inv;
     for (int kk = 0; kk < K; ++kk) { o.phi[kk] *= inv; o.phi2[kk] *= inv; }
     o.sigma *= inv; o.h2 *= inv;
   }
