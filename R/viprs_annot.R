@@ -11,8 +11,9 @@
 #' w_jk = A_jk sigma2_k / h2_j and E[(beta_j^(k))^2] = w_jk^2 zeta_j + w_jk (1 - w_jk) h2_j (zeta_j the posterior
 #' second moment of beta_j on the scale of h2_j),
 #' sigma2_k <- (S_k + 2 b0) / (sum_j A_jk + 2 (a0 + 1)), S_k = sum_j E[(beta_j^(k))^2] (Inverse-Gamma(a0, b0) prior).
-#' No floor: an annotation at sigma2_k = 0 (e.g. a negative LDSC start cut at 0) stays 0 (b0 = 0) and its SNPs fall
-#' back on the intercept.
+#' No floor: sigma2_k = 0 is a fixed point of the M-step, so the start (see `start_*` of [viprs_annot_control()]) gives
+#' every column, the intercept included, a positive value. `mstep = "elbo"` replaces this update by the stationarity
+#' condition of the ELBO.
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
 #' Hyperparameters by VI on one PUMAS split (the same pseudo training / validation data for every fit), each fit
@@ -39,7 +40,8 @@
 #'   SNPs not in `annot` get 0.
 #' @param sigma2_init NULL (all sigma2_k equal, sum_j h2_j = the naive LDSC h2), the output of [ldsc_strat()] with the
 #'   same annotations (tau_c; its Base row, named Residual, is the intercept), or a numeric vector named `intercept`
-#'   and the annotation names. Annotation values are cut at 0; the intercept must be > 0 (else the LDSC start).
+#'   and the annotation names; negative values set to 0, then the start rule of `start_scale`, `start_zero_share`,
+#'   `start_total_min` (a zero column, the intercept included, gets a positive start).
 #' @param bin_file LD-bin list (default `ld_dir`/ldbin<bin_r2>.bin, from [ld_bins()]; must exist).
 #' @param skip_annot annotation columns that make a SNP annotated (any nonzero value) for the LD-bin suppression:
 #'   NULL (default) every column, character(0) no suppression.

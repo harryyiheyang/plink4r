@@ -8,7 +8,7 @@
 # Variance-route partition simulation on PanUKB_EUR_ld blocks 1-100 with the real annotations (run from
 # /home/yxy1234/plink4r_test/partition_sim; plink4r installed per task (below); scripts of sim/partition here). One array task per
 # design and seed (2 designs x 3 seeds; task = 3 * design + seed - 1), all in parallel. Two designs (h2 shares;
-# intercept = 20%, t(3) effects on the base causal set); PI = 0.01 causal (at least MIN_CAUSAL = 100 per category),
+# intercept = 20%, t(3) effects on the base causal SNPs outside every design category); PI = 0.01 causal (at least MIN_CAUSAL = 100 per category),
 # 6:3:1 slab mixture, N = 300000, h2 = 0.3.
 # CASE (env): main (default; methods V A1 AM AMV AML, directory var_<design>_s<seed>), noskip (AM without the LD-bin
 # suppression, noskip_<design>_s<seed>), truecols (AM given only the annotation columns of the design,
