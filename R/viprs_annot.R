@@ -12,8 +12,8 @@
 #' of Fm = -1/2 sum_j (log h2_j + E[beta_j^2] / h2_j) over the SNPs not suppressed. MASH prior on the annotation
 #' variances: sigma2_k = a_k sigma2_0, a_k in `mash_grid` (0, 1, 10, 100) with fixed weights `mash_w` (0.5, 0.3, 0.1,
 #' 0.1) common to every annotation; VI averages over a_k with q(a_k = m) proportional to w_m exp(Fm(a_k = m)) (the other
-#' columns at their mean) and uses E_q[a_k]; sigma2_0 by monotone MM steps on Fm; the Gibbs fit keeps sigma2_0 and draws
-#' a_k from q.
+#' columns at their mean) and uses E_q[a_k]; sigma2_0 by monotone MM steps on Fm; the Gibbs fit repeats the M-step on
+#' stochastic-approximation averages of the Rao-Blackwell second moments (sigma2_0 by MM, a_k drawn from q).
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
 #' Hyperparameters by VI. Stage 1, the eigen cutoff (as [sbayesrc()]) on one PUMAS split (the same pseudo training /
@@ -25,7 +25,7 @@
 #' full convergence. The output sigma2_k of the Gibbs fit is its mean over the draws.
 #' `sigma2_init` sets the sigma2_k of the first fit (stage 1, lowest cutoff; later fits are warm-started), e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
-#' with Rao-Blackwell means; the atoms a_k drawn from q on stochastic-approximation averages of E[beta_j^2], sigma by
+#' with Rao-Blackwell means; sigma2_0 and the atoms a_k from stochastic-approximation averages of E[beta_j^2], sigma by
 #' stochastic approximation. BETA is the mean of the conditional posterior means m_j over the draws and
 #' BETA_k the mean of w_jk m_j (w_jk of each sweep), so the columns still sum to BETA.
 #'

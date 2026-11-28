@@ -426,12 +426,12 @@ struct VarModel {
     set_all();
   }
   // M-step of the variance model on Fm (above) with the MASH prior: VI alternates `inner` MM steps on sigma2_0 with
-  // the update of q(a_k), until cbar changes by less than 1e-6 (at most 20 rounds). Gibbs (eng): sigma2_0 kept, a_k
-  // drawn from q.
+  // the update of q(a_k), until cbar changes by less than 1e-6 (at most 20 rounds). Gibbs (eng): `inner` MM steps on
+  // sigma2_0, then a_k drawn from q (e: the stochastic-approximation average of the RB second moments).
   void mstep(const double* e, int inner = 10, std::mt19937_64* eng = nullptr) {
     if (fixed) return;
     if ((int)cbar.size() != K) { cbar.assign(K, 0.); for (int k = 1; k < K; ++k) cbar[k] = par[k] / par[0]; }
-    if (eng) { update_q(e, eng); return; }
+    if (eng) { mm_s0(e, inner); update_q(e, eng); return; }
     for (int round = 0; round < 20; ++round) {
       mm_s0(e, inner);
       if (update_q(e, nullptr) < 1e-6) break;
@@ -887,7 +887,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   return pack(F, bst, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef,
                                  Rcpp::_["mash"] = Rcpp::List::create(
-                                     Rcpp::_["sigma2_0"] = bvm.par[0],  // Gibbs keeps sigma2_0 of the VI refit
+                                     Rcpp::_["sigma2_0"] = bvm.par[0],  // Gibbs: the mean over the draws
                                      Rcpp::_["q"] = qmat, Rcpp::_["mean_atom"] = Rcpp::NumericVector(cbvi.begin(), cbvi.end()),
                                      Rcpp::_["pzero_gibbs"] = Rcpp::NumericVector(G.pzero.begin(), G.pzero.end()),
                                      Rcpp::_["draws"] = G.draws),

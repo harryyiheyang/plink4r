@@ -1,11 +1,12 @@
 // Final fit of viprs_annot() by a short Gibbs sampler with Rao-Blackwell means (PartitionPRS). Included by
 // viprs_annot.cpp inside its anonymous namespace, after the VI parts it reuses (EigenPanel, State, VarModel, mix_post,
 // ViprsControl). The VI path chooses pi (grid, warm start) and gives the start (effects, sigma2_0, q(a_k), sigma); here,
-// at that pi, with sigma2_0 kept:
+// at that pi:
 //   per sweep and SNP j (blocks in parallel, own random stream per block and sweep): the conditional posterior of
 //   beta_j given the others (spike + slab, mix_post), its mean m_j (Rao-Blackwell), then a draw of beta_j and the
-//   update of s = V' beta; after the sweep the MASH atoms a_k drawn from q(a_k) of the M-step objective
-//   (VarModel::mstep) on the stochastic-approximation average of the RB second moments E[beta_j^2 | others], and sigma = 1 - 2 beta'bt + beta'R beta by stochastic approximation (step 1 during burn-in,
+//   update of s = V' beta; after the sweep the M-step (VarModel::mstep: MM steps on sigma2_0, then the MASH atoms a_k
+//   drawn from q(a_k)) on the stochastic-approximation average of the RB second moments E[beta_j^2 | others] (VI
+//   second moments are too small under LD), and sigma = 1 - 2 beta'bt + beta'R beta by stochastic approximation (step 1 during burn-in,
 //   1 / (t - burn + 1) after, as sbayesrc()).
 // After burn-in, per sweep: m_j, w_jk m_j (w_jk = A_jk sigma2_k / h2_j of that sweep; the columns sum to m_j in every
 // sweep, so their means sum to the mean of m_j) and the Shapley value of column k in beta' R beta,
@@ -103,8 +104,7 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
       o.sigma += sigma; o.h2 += ss / (ss + sigma);
       (void)t;
     }
-    // the MASH atoms drawn from q(a_k) of the M-step objective on the stochastic-approximation average of the RB
-    // second moments (sigma2_0 kept)
+    // the M-step on the stochastic-approximation average of the RB second moments: sigma2_0 by MM, the atoms drawn
     const double ae = it == 1 ? 1. : a;  // the first sweep starts the average
     for (int64_t j = 0; j < M; ++j) ebar[j] = (1. - ae) * ebar[j] + ae * e[j];
     if (!c.fix_sigma2) {
