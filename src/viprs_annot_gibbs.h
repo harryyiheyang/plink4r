@@ -1,12 +1,12 @@
 // Final fit of viprs_annot() by a short Gibbs sampler with Rao-Blackwell means (PartitionPRS). Included by
 // viprs_annot.cpp inside its anonymous namespace, after the VI parts it reuses (EigenPanel, State, VarModel, mix_post,
-// ViprsControl). The VI path chooses pi (grid, warm start) and gives the start (effects, sigma2_k, sigma); here, at
-// that pi:
+// ViprsControl). The VI path chooses pi (grid, warm start) and gives the start (effects, sigma2_0, q(a_k), sigma); here,
+// at that pi, with sigma2_0 kept:
 //   per sweep and SNP j (blocks in parallel, own random stream per block and sweep): the conditional posterior of
-//   beta_j given the others (spike + slab classes, mix_post), its mean m_j (Rao-Blackwell) and its zeta_j (the M-step
-//   statistic of viprs_annot.cpp), then a draw of beta_j (spike, class, normal) and the update of s = V' beta;
-//   after the sweep the variance model (VarModel::mstep_elbo on the averaged statistics) and sigma = 1 - 2 beta'bt + beta'R beta, by
-//   stochastic approximation: step 1 during burn-in, 1 / (t - burn + 1) after (as sbayesrc()).
+//   beta_j given the others (spike + slab, mix_post), its mean m_j (Rao-Blackwell), then a draw of beta_j and the
+//   update of s = V' beta; after the sweep the MASH atoms a_k drawn from q(a_k) of the M-step objective
+//   (VarModel::mstep) on the stochastic-approximation average of the RB second moments E[beta_j^2 | others], and sigma = 1 - 2 beta'bt + beta'R beta by stochastic approximation (step 1 during burn-in,
+//   1 / (t - burn + 1) after, as sbayesrc()).
 // After burn-in, per sweep: m_j, w_jk m_j (w_jk = A_jk sigma2_k / h2_j of that sweep; the columns sum to m_j in every
 // sweep, so their means sum to the mean of m_j) and the Shapley value of column k in beta' R beta,
 // phi_k = beta^(k)' R beta = sum_j w_jk beta_j (V_j . s) (sum_k phi_k = beta' R beta exactly; the cross terms
@@ -17,8 +17,8 @@
 struct GibbsOut {
   std::vector<double> bmean, pip;  // RB mean of beta_j (standardized), mean slab probability
   std::vector<double> part;        // M x K row-major: mean of w_jk m_j
-  std::vector<double> phi, phi2;   // per column: mean and mean square of phi_k over the draws
-  std::vector<double> pzero;       // MASH: mean over the draws of p(m_k = 0) (the posterior probability of sigma2_k = 0)
+  std::vector<double> phi;         // per column: mean of phi_k over the draws
+  std::vector<double> pzero;       // MASH: mean over the draws of q(a_k = 0)
   double sigma = 0, h2 = 0;        // mean of sigma and of beta'R beta / (beta'R beta + sigma) over the draws
   int draws = 0;
 };
@@ -31,12 +31,11 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
   const char* sup = vm.sup.data();
   const float lp = (float)(std::log(vm.pi) - std::log1p(-vm.pi));
   std::vector<float> beta(st0.eta), m(M, 0.f), g(M, 0.f), s(P.S, 0.f);
-  std::vector<double> zeta(M, 0.);
-  std::vector<double> gbar(M, 0.), zbar(M, 0.);  // stochastic approximation of gamma_j, zeta_j (M-step statistics)
+  std::vector<double> e(M, 0.), ebar(M, 0.);  // RB second moment E[beta_j^2 | others] of the sweep, its stochastic approximation
   vtx(P, beta.data(), s.data(), threads);
   GibbsOut o;
   o.bmean.assign(M, 0.); o.pip.assign(M, 0.); o.part.assign((size_t)M * K, 0.);
-  o.phi.assign(K, 0.); o.phi2.assign(K, 0.); o.pzero.assign(K, 0.);
+  o.phi.assign(K, 0.); o.pzero.assign(K, 0.);
   o.draws = draws;
   std::vector<double> psum(K, 0.);  // sigma2_k summed over the draws (reported: the posterior mean)
   std::vector<double> q(M, 0.);
@@ -59,12 +58,10 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
         const float D = n[j] * r / sg;
         float psi[16], vt[16], m_;
         const float gj = mix_post(D, n[j] * P.d[j] / sg, vm.tau[j], vm.ltau[j], lp, c, m_, psi, vt);
-        double zs = 0;
-        for (int i = 0; i < C; ++i) {
-          const double mc = (double)D / vt[i];
-          zs += psi[i] * (mc * mc + 1. / vt[i]) / c.kap[i];
-        }
-        m[j] = gj * m_; g[j] = gj; zeta[j] = gj * zs;
+        m[j] = gj * m_; g[j] = gj;
+        double e2 = 0;
+        for (int i = 0; i < C; ++i) { const double mc = (double)D / vt[i]; e2 += psi[i] * (mc * mc + 1. / vt[i]); }
+        e[j] = gj * e2;
         float bn = 0.f;
         if (U01(eng) < gj) {
           float u = U01(eng), acc = 0.f;
@@ -102,18 +99,18 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
           ph[kk] += w * beta[j] * q[j];
         }
       }
-      for (int kk = 0; kk < K; ++kk) { o.phi[kk] += ph[kk]; o.phi2[kk] += ph[kk] * ph[kk]; }
+      for (int kk = 0; kk < K; ++kk) o.phi[kk] += ph[kk];
       o.sigma += sigma; o.h2 += ss / (ss + sigma);
       (void)t;
     }
-    // stochastic approximation of the statistics (gamma_j, zeta_j), then the M-step on the averages (averaging the
-    // updated sigma2 would solve E[N_k / D_k] = 1 instead of E[N_k] = E[D_k])
-    for (int64_t j = 0; j < M; ++j) { gbar[j] = (1. - a) * gbar[j] + a * g[j]; zbar[j] = (1. - a) * zbar[j] + a * zeta[j]; }
+    // the MASH atoms drawn from q(a_k) of the M-step objective on the stochastic-approximation average of the RB
+    // second moments (sigma2_0 kept)
+    for (int64_t j = 0; j < M; ++j) ebar[j] = (1. - a) * ebar[j] + a * e[j];
     if (!c.fix_sigma2) {
-      std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);  // MASH atoms drawn (not MAP)
-      vm.mstep_elbo(zbar.data(), gbar.data(), 10, &meng);
+      std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);
+      vm.mstep(ebar.data(), 10, &meng);
       if (it > burn) {
-        for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.pm[(size_t)kk * vm.grid.size()];
+        for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.q[(size_t)kk * vm.grid.size()];
         for (int kk = 0; kk < K; ++kk) psum[kk] += vm.par[kk];
       }
     }
@@ -127,9 +124,9 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     for (auto& x : o.pip) x *= inv;
     for (auto& x : o.part) x *= inv;
     for (auto& x : o.pzero) x *= inv;
-    for (int kk = 0; kk < K; ++kk) { o.phi[kk] *= inv; o.phi2[kk] *= inv; }
+    for (int kk = 0; kk < K; ++kk) o.phi[kk] *= inv;
     o.sigma *= inv; o.h2 *= inv;
-    if (!c.fix_sigma2) { for (int kk = 0; kk < K; ++kk) vm.par[kk] = psum[kk] * inv; vm.mb = vm.par[0]; vm.set_all(); }
+    if (!c.fix_sigma2) { for (int kk = 0; kk < K; ++kk) vm.par[kk] = psum[kk] * inv; vm.set_all(); }
   }
   return o;
 }

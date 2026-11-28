@@ -1,14 +1,15 @@
 # usage: Rscript run_var.R <ld_dir> <snp_table> <sim_dir>  -> sim_dir/<method>.tsv (ID, BETA_STD, BETA_STD_<annot>)
-#   and sim_dir/<method>_h2.tsv (annotation, h2_shapley = Shapley value of the column in beta' R beta, its sd,
-#   var_shapley = b_k' R b, h2_share = model share)
+#   and sim_dir/<method>_h2.tsv (annotation, h2_shapley = Shapley value of the column in beta' R beta, h2_share =
+#   model share)
 # Methods (one path each: VI chooses the cutoff and pi, the final fit is Gibbs + RB; intercept sigma2_0 on every SNP):
 #   ORACLE viprs_annot with sigma2_k and pi fixed at the oracle of gen_var.py (oracle.tsv: the design columns; every
 #   other column at 0);
 #   MASH viprs_annot (MASH prior on sigma2_k) started at ldsc_strat(); MASH_PI the same with pi fixed at the truth of
-#   oracle.tsv (no pi grid). Eigen cutoff: CUTOFFS, default 1 (every component of
+#   oracle.tsv (no pi grid); BASE viprs_annot with the intercept only (no annotation, no suppression): the
+#   baseline the annotated fits must not fall below. Eigen cutoff: CUTOFFS, default 1 (every component of
 #   eigen.bin, the panel the data are simulated from: no cutoff choice).
 # env: SHARED (directory of annot.tsv, default sim_dir), GIBBS_DRAWS (draws of the final Gibbs fit; default 300),
-#      PI_BY (criterion of the pi grid: elbo (default) or pseudo_r), CUTOFFS (eigen cutoffs, default 1),
+#      CUTOFFS (eigen cutoffs, default 1),
 #      GRID_EXTEND (pi grid points above the official top, default 4), GRID_MAX_ITER (iterations per grid point, default
 #      1000: at 200 the 57-column fits stop unconverged for pi >= 0.015), COLS (annotation columns given to MASH, comma or +
 #      separated; unset all), BINS (LD-bin file r2 > 0.98 for the snp table; made with ld_bins() when missing), SKIP (annotation columns of
@@ -28,7 +29,7 @@ if (nzchar(Sys.getenv("COLS"))) an <- an[, c("Block", "Index", strsplit(Sys.gete
 bins <- Sys.getenv("BINS", file.path(dirname(a[2]), "ldbin0.98.bin"))
 if (!file.exists(bins)) ld_bins(a[1], r2 = 0.98, ref = rf, output = bins, threads = 4)
 skip <- if (Sys.getenv("SKIP", "\001") == "\001") NULL else setdiff(strsplit(Sys.getenv("SKIP"), ",")[[1]], "")
-meth <- strsplit(Sys.getenv("METHODS", "ORACLE,MASH,MASH_PI"), ",")[[1]]
+meth <- strsplit(Sys.getenv("METHODS", "BASE,ORACLE,MASH,MASH_PI"), ",")[[1]]
 tm <- function(e) { t0 <- Sys.time(); x <- e; list(x, as.numeric(difftime(Sys.time(), t0, units = "secs"))) }
 ls <- NULL
 if (any(c("MASH", "MASH_PI") %in% meth)) {
@@ -52,10 +53,10 @@ if (any(c("MASH", "MASH_PI") %in% meth)) {
   ls <- ldsc_strat(ss, L)
   cat("ldsc_strat", round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 1), "s\n")
 }
-gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300")); pb <- Sys.getenv("PI_BY", "elbo")
+gd <- as.integer(Sys.getenv("GIBBS_DRAWS", "300"))
 ge <- as.integer(Sys.getenv("GRID_EXTEND", "4")); gm <- as.integer(Sys.getenv("GRID_MAX_ITER", "1000"))
 co <- if (nzchar(Sys.getenv("CUTOFFS"))) as.numeric(strsplit(Sys.getenv("CUTOFFS"), ",")[[1]]) else 1
-ctl <- function(...) viprs_annot_control(gibbs_draws = gd, pi_by = pb, cutoffs = co, grid_extend = ge, grid_max_iter = gm, ...)
+ctl <- function(...) viprs_annot_control(gibbs_draws = gd, cutoffs = co, grid_extend = ge, grid_max_iter = gm, ...)
 pt <- function() { p <- fread(file.path(a[3], "oracle.tsv"))$pi[1]; list(pi_grid = p, cut_pi = p) }
 fit <- function(k) switch(k,
   ORACLE = {
@@ -64,10 +65,12 @@ fit <- function(k) switch(k,
     o <- fread(file.path(a[3], "oracle.tsv")); ac0 <- setdiff(names(an0), c("Block", "Index"))
     s2 <- setNames(rep(0, length(ac0) + 1), c("intercept", ac0)); s2[o$annotation] <- o$sigma2
     viprs_annot(ss, a[1], annot = an0, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = s2,
-                control = ctl(fix_sigma2 = TRUE, start_scale = 1, start_total_min = 0, start_zero_share = 0,
+                control = ctl(fix_sigma2 = TRUE, start_scale = 1, start_zero_share = 0,
                               pi_grid = o$pi[1], cut_pi = o$pi[1]),
                 threads = 4)
   },
+  BASE = viprs_annot(ss, a[1], annot = an[, .(Block, Index)], ref = rf, bin_file = bins, skip_annot = character(0),
+                     control = ctl(), threads = 4),
   MASH = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
                      control = ctl(), threads = 4),
   MASH_PI = viprs_annot(ss, a[1], annot = an, ref = rf, bin_file = bins, skip_annot = skip, sigma2_init = ls,
@@ -78,14 +81,14 @@ for (k in meth) {
   bc <- grep("^BETA_STD", names(r), value = TRUE)
   fwrite(r[, c("ID", bc), with = FALSE], file.path(a[3], paste0(k, ".tsv")), sep = "\t")
   hp <- attr(f[[1]], "h2_shapley")
-  if (!is.null(hp)) fwrite(data.table(annotation = names(hp), h2_shapley = hp, h2_shapley_sd = attr(f[[1]], "h2_shapley_sd"),
-                                      var_shapley = attr(f[[1]], "var_shapley"), h2_share = attr(f[[1]], "h2_share")),
+  if (!is.null(hp)) fwrite(data.table(annotation = names(hp), h2_shapley = hp, h2_share = attr(f[[1]], "h2_share")),
                            file.path(a[3], paste0(k, "_h2.tsv")), sep = "\t")
   cat(k, "time", round(f[[2]], 1), "pi", signif(attr(f[[1]], "hyp")$pi, 3), "h2", round(attr(f[[1]], "hyp")$h2, 3),
       "suppressed", if (is.null(attr(f[[1]], "n_suppressed"))) 0 else attr(f[[1]], "n_suppressed"), "\n")
   ms_ <- attr(f[[1]], "mash")
-  if (!is.null(ms_) && length(ms_$atom) > 1) cat(k, "mash scale", signif(ms_$scale, 3), "atoms", paste(ms_$atom[-1], collapse = ""),
-                                                "pzero", paste(round(ms_$pzero[-1], 2), collapse = " "), "\n")
+  if (!is.null(ms_) && length(ms_$mean_atom) > 1 && !all(ms_$q == 0))
+    cat(k, "mash sigma2_0", signif(ms_$sigma2_0, 3), "\n  E_q[a_k]", paste(round(ms_$mean_atom[-1], 2), collapse = " "),
+        "\n  q(a_k=0)", paste(round(ms_$q[-1, 1], 2), collapse = " "), "\n  pzero_gibbs", paste(round(ms_$pzero_gibbs[-1], 2), collapse = " "), "\n")
   g <- attr(f[[1]], "grid")
   if (!is.null(g)) { cat(k, "grid (cutoff", attr(f[[1]], "cutoff"), "chosen)\n"); options(width = 200); print(as.data.frame(g), digits = 4, row.names = FALSE) }
 }

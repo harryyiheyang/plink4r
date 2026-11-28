@@ -1,8 +1,7 @@
 # Per category (categories.tsv of gen_var.py): prediction R2 of the category's partitioned PRS (the sum of the
 # BETA_STD_<col> of its columns) for the true category genetic value, and the Shapley heritability ratio
 # _h2 = estimated (h2_shapley of <method>_h2.tsv, summed over the columns of the category: Shapley values add up)
-# / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley"; _vs: the same
-# with var_shapley (b_c' R b of the output posterior means instead of the mean over the draws); _or: the
+# / true Shapley value beta_c' R beta (beta the true total effect); true values printed as "true shapley"; _or: the
 # oracle ratio, the estimated per-SNP share BETA_c / BETA applied to the true beta (w_c beta)' R beta / truth.
 # Model-definition truth (per method, for the columns the method was given, read from <method>_h2.tsv and annot.tsv of
 # SHARED): sigma2_k of the variance model h2_j = sigma2_0 + sum_k A_jk sigma2_k fitted to the design variance
@@ -53,7 +52,7 @@ for m in sys.argv[3:]:
     out = {"total": round(float(r2(L[(m, "total")], L[("true", "total")])), 3)}
     h = None
     if os.path.exists(f"{sim}/{m}_h2.tsv"):
-        ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h, hv = ht.h2_shapley, ht.var_shapley
+        ht = pd.read_csv(f"{sim}/{m}_h2.tsv", sep="\t").set_index("annotation"); h = ht.h2_shapley
         ac = [k for k in ht.index if k != "intercept"]; mt, _ = model_truth(ac, V[:, tot], Rb)
         print(m, "model truth", {nm: round(float(sum(mt.get(c, 0.) for c in cc)), 4) for nm, cc in zip(names, cols)},
               "other", round(float(sum(v for k, v in mt.items() if k not in set(sum(cols, [])))), 4))
@@ -63,7 +62,6 @@ for m in sys.argv[3:]:
         out[nm] = round(float(r2(i, j)), 3)
         if h is not None:
             out[nm + "_h2"] = round(float(h.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
-            out[nm + "_vs"] = round(float(hv.reindex(cc).fillna(0).sum() / tsh[nm]), 3)
             tm = sum(mt.get(c, 0.) for c in cc)
             out[nm + "_mh2"] = round(float(h.reindex(cc).fillna(0).sum() / tm), 3) if tm > 0 else float("nan")
         # oracle: the estimated allocation share w = BETA_k / BETA of each SNP applied to the true beta

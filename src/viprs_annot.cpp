@@ -2,19 +2,19 @@
 // annotation-specific components (PartitionPRS, Research Design D.1.2). Top layer: the package's annotation VIPRS
 // functional unit, built on vi_panel.h / vi_store.h / ld_bins.h; copied from viprs.cpp and edited.
 // Model: beta_j = sum_k beta_j^(k), beta_j^(k) independent with variance A_jk sigma2_k (A_jk >= 0; k = 0 is the
-// intercept, A_j0 = 1 for every SNP), so h2_j = Var(beta_j) = sigma2_0 + sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
-// spike and slab with fixed pi; the slab is a mixture of C classes with fixed shares p_c (mix_prop, default small /
-// medium / large = 6 : 3 : 1) and variances kap_c h2_j / pi (mix_var relative, normalized to sum_c p_c kap_c = 1),
-// so Var(beta_j) = h2_j. Coordinate update (D_j = n_j r_j / sigma; tau_j = pi / h2_j):
+// intercept, A_j0 = 1 for every SNP), so h2_j = E[beta_j^2] = sigma2_0 + sum_k A_jk sigma2_k. Prior on beta_j: VIPRS
+// spike and slab, one pi (chosen on the grid); the slab N(0, h2_j / pi) (default; mix_prop / mix_var allow a fixed
+// mixture of C classes with shares p_c and variances kap_c h2_j / pi, sum_c p_c kap_c = 1). Coordinate update
+// (D_j = n_j r_j / sigma; tau_j = pi / h2_j):
 //   vt_jc = n_j d_j / sigma + tau_j / kap_c,  u_c = log p_c + .5 D_j^2 / vt_jc + .5 (log tau_j - log kap_c - log vt_jc)
-//   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc
-// (one class: the VIPRS update with tau_j in place of tau).
-// M-step: the sigma2-dependent ELBO part -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j), zeta_j = gamma_j sum_c
-// psi_jc (mu_jc^2 + 1 / vt_jc) / kap_c, maximized by MM steps (VarModel::mstep_elbo) under the MASH prior
-// sigma2_k = grid[m_k] sigma2_0 (atoms mash_grid, fixed weights mash_w): sigma2_0 by MM on the column
-// a_j = 1 + sum_k A_jk grid[m_k], the atoms by the MAP of ELBO + log w (VI) or drawn (Gibbs). Each VI fit of stage 1 and
-// each pi of stage 2 first fits sigma2_k free (the warm-up), the atoms then start at the nearest of that fit. Start:
-// sigma2_init (e.g. ldsc_strat() tau) or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
+//   gamma_j = sigmoid(logit(pi) + logsumexp_c u_c), psi_jc = softmax(u)_c, eta_j = gamma_j sum_c psi_jc D_j / vt_jc.
+// M-step (Research Design D.1.2): sigma2_k <- S_k / sum_j A_jk, S_k = sum_j [w_jk^2 E[beta_j^2] + w_jk (1 - w_jk) h2_j],
+// whose fixed point sum_j A_jk (E[beta_j^2] - h2_j) / h2_j^2 = 0 is the stationary point of
+// Fm = -1/2 sum_j (log h2_j + E[beta_j^2] / h2_j) (SNPs not suppressed); MASH prior on the annotation variances,
+// sigma2_k = a_k sigma2_0, a_k in mash_grid (0, 1, 10, 100) with fixed weights mash_w common to every annotation: VI
+// keeps q(a_k) proportional to w_m exp(Fm(a_k = m)) (the other columns at their mean) and uses the mean E_q[a_k],
+// sigma2_0 by MM steps on Fm (VarModel::mstep); the Gibbs fit draws a_k from q. Start: sigma2_init (e.g.
+// ldsc_strat() tau) or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
 // Search by VI (below); final fit at the chosen pi by a short Gibbs sampler with Rao-Blackwell means
 // (viprs_annot_gibbs.h; gibbs_draws = 0: the VI refit). Output: posterior mean b_j and its MMSE allocation
 // b_j^(k) = w_jk b_j (Gibbs: the mean over the draws of w_jk m_j; sum_k b_j^(k) = b_j, k = 0 the intercept part), the
@@ -22,13 +22,13 @@
 // LD-bin suppression (as sbayesrc()): inside an LD bin (ld_bins.h) with at least one annotated member (nonzero in
 // any of the columns skip_cols), the members without annotation are fixed at gamma_j = 0 (beta_j = 0, never updated,
 // no residual update) and left out of the M-step.
-// Eigen cutoff, then pi, by VI on one PUMAS split (fit_path): xi is drawn once on the full panel, the truncated
-// panel of each cutoff uses its leading entries, so every fit is scored on the same pseudo validation,
-// r = eta' valid / sqrt(eta' R eta). Stage 1, the cutoff (as sbayesrc()): a chain over the cutoffs from the lowest up,
-// each level warm-started from the one below, at the fixed pi cut_pi (default 0.01); the largest cutoff unless a
-// smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen cutoff, warm-started from its stage-1 fit: the
-// pi grid ascending on all data with warm start (sigma2_k carried over when pi moves); the converged point of the
-// largest MASH objective (ELBO + sum_k log w_{m_k}) is refitted to full convergence, then the Gibbs fit.
+// Eigen cutoff, then pi, by VI. Stage 1, the cutoff (as sbayesrc()) on one PUMAS split (xi drawn once on the full
+// panel, the truncated panel of each cutoff uses its leading entries), r = eta' valid / sqrt(eta' R eta): a chain over
+// the cutoffs from the lowest up, each level warm-started from the one below, at the fixed pi cut_pi (default 0.01);
+// the largest cutoff unless a smaller one has r / r_largest > rel_r_min. Stage 2, pi at the chosen cutoff,
+// warm-started from its stage-1 fit: the pi grid ascending on all data with warm start (sigma2_k carried over when pi
+// moves); the converged point of the largest ELBO + E_q[log w(a)] - E_q[log q(a)] is refitted to full convergence,
+// then the Gibbs fit.
 // [[Rcpp::depends(RcppEigen)]]
 #include <RcppEigen.h>
 #include <algorithm>
@@ -54,13 +54,12 @@ namespace {
 
 struct ViprsControl {
   bool use_active;
-  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, stop_after, pi_steps, grid_extend,
+  int full_every, refresh_every, min_iter, patience, max_iter, grid_max_iter, pi_steps, grid_extend,
       gibbs_burn, gibbs_draws;
   double rel_r_min, cut_pi;  // cut_pi: the fixed pi of the cutoff choice
-  bool pi_by_elbo;  // stage 2 criterion: ELBO on all data (true) or pseudo r on the PUMAS split
   bool fix_sigma2;  // sigma2_k kept at the start (diagnostic: no M-step)
   std::vector<double> mash_grid, mash_w;  // MASH: sigma2_k in mash_grid * b with prior weights mash_w
-  double start_scale, start_zero_share, start_total_min;  // given start (sigma2_init): see VarModel::start_at
+  double start_scale, start_zero_share;  // given start (sigma2_init): see VarModel::start_at
   std::vector<double> cutoffs;  // eigen cutoffs compared at pi = cut_pi (one value: fixed)
   double act_tol, x_tol, f_tol, prop_train, sigma_fixed, h2_min, h2_max, pi_lo_count, pi_lo_min, pi_hi_count,
       pi_hi_max, pi_cap;
@@ -79,7 +78,6 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.patience = Rcpp::as<int>(c["patience"]);
   x.max_iter = Rcpp::as<int>(c["max_iter"]);
   x.grid_max_iter = Rcpp::as<int>(c["grid_max_iter"]);
-  x.stop_after = Rcpp::as<int>(c["stop_after"]);
   x.pi_steps = Rcpp::as<int>(c["pi_steps"]);
   x.grid_extend = Rcpp::as<int>(c["grid_extend"]);
   x.act_tol = Rcpp::as<double>(c["act_tol"]);
@@ -103,11 +101,9 @@ ViprsControl read_control(const Rcpp::List& c) {
   x.mash_grid = Rcpp::as<std::vector<double>>(c["mash_grid"]); x.mash_w = Rcpp::as<std::vector<double>>(c["mash_w"]);
   if (x.mash_grid.size() != x.mash_w.size() || x.mash_grid.empty()) Rcpp::stop("mash_grid and mash_w must have the same length");
   if (!(x.cut_pi > 0 && x.cut_pi < 1)) Rcpp::stop("cut_pi must be in (0, 1)");
-  x.pi_by_elbo = Rcpp::as<std::string>(c["pi_by"]) == "elbo";
   x.fix_sigma2 = Rcpp::as<bool>(c["fix_sigma2"]);
   x.start_scale = Rcpp::as<double>(c["start_scale"]);
   x.start_zero_share = Rcpp::as<double>(c["start_zero_share"]);
-  x.start_total_min = Rcpp::as<double>(c["start_total_min"]);
   if (x.cutoffs.empty()) Rcpp::stop("cutoffs: at least one eigen cutoff");
   for (double v : x.cutoffs) if (!(v > 0 && v <= 1)) Rcpp::stop("cutoffs must be in (0, 1]");
   std::sort(x.cutoffs.begin(), x.cutoffs.end());
@@ -248,7 +244,7 @@ void vz(const EigenPanel<T>& P, const float* z, float* y, int threads) {
 // log vt (VIPRS).
 void stats(int64_t M, const float* d, const float* n, const float* bt, const float* bv, const State& st, int64_t S,
            const float* tau, const float* ltau, const char* sup, const ViprsControl& c, float sigma, double* out,
-           double* zeta, int threads) {
+           double* zeta, double* e2v, int threads) {
   double a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0, a8 = 0, a9 = 0;
   const double lo = 1e-12;
   const int C = (int)c.kap.size();
@@ -258,7 +254,7 @@ void stats(int64_t M, const float* d, const float* n, const float* bt, const flo
 #pragma omp parallel for reduction(+ : a0, a1, a2, a3, a4, a6, a7, a8, a9) num_threads(threads)
 #endif
   for (int64_t j = 0; j < M; ++j) {
-    if (sup[j]) { zeta[j] = 0; continue; }  // beta_j = 0 throughout: no term
+    if (sup[j]) { zeta[j] = 0; e2v[j] = 0; continue; }  // beta_j = 0 throughout: no term
     float psi[16], vt[16], m_;
     const float D = mu[j];
     mix_post(D, n[j] * d[j] / sigma, tau[j], ltau[j], 0.f, c, m_, psi, vt);
@@ -275,6 +271,7 @@ void stats(int64_t M, const float* d, const float* n, const float* bt, const flo
     a0 += gamma[j];
     a1 += z;
     zeta[j] = z;
+    e2v[j] = gamma[j] * e2;  // E[beta_j^2 | data]
     a2 += d[j] * gamma[j] * e2;
     a3 += (double)eta[j] * bt[j];
     a4 += (double)d[j] * eta[j] * eta[j];
@@ -303,35 +300,18 @@ struct VarModel {
   std::vector<float> tau, ltau;  // tau_j = pi / h2_j and log tau_j, as used by the sweep
   double pi = 1;
   int threads;
-  // MASH atoms: sigma2_k = grid[m_k] mb for k >= 1, mb = sigma2_0 (the intercept, by the ELBO); m_k by the largest
-  // F(sigma2_k = grid[m] mb) + log w_m (VI: MAP), or drawn from p_km proportional to its exponential (Gibbs, eng given);
-  // pm: p_km of the last M-step (K x atoms, row k = 0 unused)
-  bool cont = false;  // warm-up: sigma2_k free (no atoms); the atoms start at the nearest of the free fit
-  std::vector<double> grid, lw, pm;
-  std::vector<int> atom;
-  double mb = 0;
-  void mash_init() {
-    mb = par[0];
-    atom.assign(K, 0); pm.assign((size_t)K * grid.size(), 0.);
-    // nearest atom of the current sigma2_k on the log scale; atom 0 below the geometric midpoint g1 sqrt(g1 / g2)
-    // under the first positive atom g1 (g2 the next; g1 / sqrt(10) if there is none)
-    const double g1 = grid[1], z0 = grid.size() > 2 ? g1 * std::sqrt(g1 / grid[2]) : g1 / std::sqrt(10.);
-    for (int k = 1; k < K; ++k) {
-      int best = 0;
-      if (par[k] > z0 * mb) {
-        double bd = INFINITY;
-        for (size_t m = 1; m < grid.size(); ++m) {
-          const double d = std::fabs(std::log(par[k] / (grid[m] * mb)));
-          if (d < bd) { bd = d; best = (int)m; }
-        }
-      }
-      atom[k] = best; par[k] = grid[best] * mb;
-    }
-    set_all();
-  }
-  // sigma2-dependent ELBO part of the SNPs with A_jk > 0 when sigma2_k = v (h2_j of the others kept)
-  template <typename G>
-  double fcol(int k, double v, const double* zeta, const G* gamma) const {
+  // MASH prior on the annotation variances: sigma2_k = a_k sigma2_0, a_k in grid (0, 1, 10, 100) with fixed prior
+  // weights w (log: lw), common to every annotation. VI keeps q(a_k) (q, K x atoms, row 0 unused) and uses its mean
+  // cbar_k = E_q[a_k] (par[k] = cbar_k sigma2_0); Gibbs draws a_k (cbar_k = the drawn atom). fixed: sigma2_k given
+  // (no MASH, e.g. the oracle).
+  std::vector<double> grid, lw, q, cbar;
+  bool fixed = false;
+  // M-step objective (Research Design D.1.2): Fm = -1/2 sum_j (log h2_j + e_j / h2_j) over the SNPs not suppressed,
+  // e_j = E[beta_j^2 | data] the posterior second moment (spike included). Its stationarity in sigma2_k,
+  // sum_j A_jk (e_j - h2_j) / h2_j^2 = 0, is the fixed point of the update sigma2_k <- S_k / sum_j A_jk,
+  // S_k = sum_j [w_jk^2 e_j + w_jk (1 - w_jk) h2_j] (0/1 annotations). Here: the part of the SNPs with A_jk > 0 when
+  // sigma2_k = v (h2_j of the others kept).
+  double fcol(int k, double v, const double* e) const {
     double f = 0;
 #ifdef _OPENMP
 #pragma omp parallel for reduction(+ : f) num_threads(threads)
@@ -341,40 +321,25 @@ struct VarModel {
       const double a = row(j)[k - 1];
       if (a == 0.) continue;
       const double h = h2[j] - a * par[k] + a * v;
-      f += -.5 * ((double)gamma[j] * std::log(h) + pi * zeta[j] / h);
+      f += -.5 * (std::log(h) + e[j] / h);
     }
     return f;
   }
-  // the sigma2-dependent ELBO part plus the log prior weights of the atoms (the MASH objective of VI)
-  template <typename G>
-  double ftot(const double* zeta, const G* gamma) const {
+  // E_q[log w(a_k)] - E_q[log q(a_k)] summed over the annotations: the MASH part of the ELBO (0 when fixed)
+  double mash_kl() const {
     double f = 0;
-#ifdef _OPENMP
-#pragma omp parallel for reduction(+ : f) num_threads(threads)
-#endif
-    for (int64_t j = 0; j < M; ++j) {
-      if (sup[j]) continue;
-      f += -.5 * ((double)gamma[j] * std::log(h2[j]) + pi * zeta[j] / h2[j]);
-    }
-    for (int k = 1; k < K; ++k) f += lw[atom[k]];
+    if (fixed || (int)q.size() != K * (int)grid.size()) return 0;
+    const size_t A_ = grid.size();
+    for (int k = 1; k < K; ++k)
+      for (size_t m = 0; m < A_; ++m) {
+        const double p = q[(size_t)k * A_ + m];
+        if (p > 0) f += p * (lw[m] - std::log(p));
+      }
     return f;
   }
-  // sum_k log w_{m_k}: the atom prior term of the MASH objective (0 in the warm-up)
-  double logw() const {
-    double f = 0;
-    if (!cont && (int)atom.size() == K) for (int k = 1; k < K; ++k) f += lw[atom[k]];
-    return f;
-  }
-  // a column at 0 gets one atom level under the first positive one (so the free warm-up can move it; it maps back to
-  // atom 0 unless the data raise it)
-  void revive_zeros() {
-    const double v = par[0] * grid[1] * (grid.size() > 2 ? grid[1] / grid[2] : .1);
-    for (int k = 1; k < K; ++k) if (!(par[k] > 0)) par[k] = v;
-    set_all();
-  }
-  // MM steps on sigma2_0 with the atoms fixed (column a_j = 1 + sum_k A_jk grid[m_k])
-  template <typename G>
-  void mm_b(const double* zeta, const G* gamma, int steps) {
+  // MM steps on sigma2_0 with cbar fixed (h2_j = sigma2_0 abar_j, abar_j = 1 + sum_k A_jk cbar_k):
+  // sigma2_0 <- sigma2_0 sqrt(sum_j abar_j e_j / h2_j^2 / sum_j abar_j / h2_j) (Fm never decreases)
+  void mm_s0(const double* e, int steps) {
     for (int it = 0; it < steps; ++it) {
       double Nb = 0, Db = 0;
 #ifdef _OPENMP
@@ -382,74 +347,49 @@ struct VarModel {
 #endif
       for (int64_t j = 0; j < M; ++j) {
         if (sup[j]) continue;
-        double a = 1.;
-        const double* r = row(j);
-        for (int k = 1; k < K; ++k) a += r[k - 1] * grid[atom[k]];
-        const double h = h2[j];
-        Nb += a * pi * zeta[j] / (h * h); Db += a * (double)gamma[j] / h;
+        const double h = h2[j], a = h / par[0];
+        Nb += a * e[j] / (h * h); Db += a / h;
       }
       if (Db > 0 && Nb > 0) par[0] *= std::sqrt(Nb / Db);
-      par[0] = std::max(par[0], 1e-20); mb = par[0];
-      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * mb;
+      par[0] = std::max(par[0], 1e-20);
+      for (int k = 1; k < K; ++k) par[k] = cbar[k] * par[0];
       set_all();
     }
   }
-  // VI: column-wise MAP of the atoms, then a joint move that cannot be made column by column: every nonzero atom one
-  // level up (down) with sigma2_0 scaled down (up) by the ratio of the levels, sigma2_0 refitted (MM) and the atoms
-  // re-chosen; the state of the largest objective (ftot) is kept. Gibbs (eng given): the atoms drawn column-wise.
-  template <typename G>
-  void mash_step(const double* zeta, const G* gamma, std::mt19937_64* eng) {
-    mash_cols(zeta, gamma, eng);
-    if (eng || grid.size() < 3) return;
-    const int A_ = (int)grid.size();
-    std::vector<int> a0 = atom;
-    std::vector<double> p0 = par;
-    double f0 = ftot(zeta, gamma), mb0 = mb;
-    for (int d : {-1, 1}) {
-      std::vector<int> a1 = a0;
-      bool ok = false, in = true;
-      for (int k = 1; k < K; ++k) if (a0[k] > 0) { ok = true; a1[k] = a0[k] + d; if (a1[k] < 1 || a1[k] >= A_) in = false; }
-      if (!ok || !in) continue;
-      int i = 1; while (i < A_ && grid[i] <= 0) ++i;
-      if (i + 1 >= A_) continue;
-      atom = a1; par[0] = mb0 * (d > 0 ? grid[i] / grid[i + 1] : grid[i + 1] / grid[i]);
-      for (int k = 1; k < K; ++k) par[k] = grid[atom[k]] * par[0];
-      mb = par[0]; set_all();
-      mm_b(zeta, gamma, 20); mash_cols(zeta, gamma, nullptr); mm_b(zeta, gamma, 20);
-      const double f1 = ftot(zeta, gamma);
-      if (f1 > f0) { f0 = f1; a0 = atom; p0 = par; mb0 = mb; }
-    }
-    atom = a0; par = p0; mb = mb0; set_all();
-  }
-  template <typename G>
-  void mash_cols(const double* zeta, const G* gamma, std::mt19937_64* eng) {
-    if ((int)atom.size() != K) mash_init();
+  // q(a_k) of each annotation in turn, the others at their current mean: q(a_k = m) proportional to
+  // w_m exp(Fm(sigma2_k = grid[m] sigma2_0)); VI: cbar_k = E_q[a_k]; Gibbs (eng): a_k drawn from q, cbar_k = the draw.
+  // Returns the largest change of cbar_k.
+  double update_q(const double* e, std::mt19937_64* eng) {
     const size_t A_ = grid.size();
+    if (q.size() != (size_t)K * A_) q.assign((size_t)K * A_, 0.);
+    double dmax = 0;
+    std::vector<double> u(A_);
     for (int k = 1; k < K; ++k) {
-      std::vector<double> u(A_);
       double um = -INFINITY;
-      for (size_t m = 0; m < A_; ++m) { u[m] = fcol(k, grid[m] * mb, zeta, gamma) + lw[m]; um = std::max(um, u[m]); }
+      for (size_t m = 0; m < A_; ++m) { u[m] = fcol(k, grid[m] * par[0], e) + lw[m]; um = std::max(um, u[m]); }
       double z = 0;
       for (size_t m = 0; m < A_; ++m) { u[m] = std::exp(u[m] - um); z += u[m]; }
-      int pick = 0;
+      double cb = 0;
+      for (size_t m = 0; m < A_; ++m) { q[(size_t)k * A_ + m] = u[m] / z; cb += u[m] / z * grid[m]; }
       if (eng) {
         double x = std::uniform_real_distribution<double>(0., z)(*eng);
-        for (pick = 0; pick < (int)A_ - 1 && (x -= u[pick]) > 0; ++pick) {}
-      } else {
-        for (size_t m = 1; m < A_; ++m) if (u[m] > u[pick]) pick = (int)m;
+        size_t pick = 0;
+        for (; pick < A_ - 1 && (x -= u[pick]) > 0; ++pick) {}
+        cb = grid[pick];
       }
-      for (size_t m = 0; m < A_; ++m) pm[(size_t)k * A_ + m] = u[m] / z;
-      atom[k] = pick;
-      const double nv = grid[pick] * mb;
-      if (nv != par[k]) {  // update h2_j of the members
+      dmax = std::max(dmax, std::fabs(cb - cbar[k]) / std::max(cbar[k], 1.));
+      const double nv = cb * par[0];
+      if (nv != par[k]) {  // h2_j of the members
 #ifdef _OPENMP
 #pragma omp parallel for num_threads(threads)
 #endif
         for (int64_t j = 0; j < M; ++j) { const double a = row(j)[k - 1]; if (a != 0.) h2[j] += a * (nv - par[k]); }
         par[k] = nv;
       }
+      cbar[k] = cb;
     }
     set_all();
+    return dmax;
   }
 
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
@@ -484,59 +424,23 @@ struct VarModel {
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // ELBO form: the sigma2-dependent part of the ELBO, -1/2 sum_j (gamma_j log h2_j + pi zeta_j / h2_j) over the SNPs
-  // not suppressed, by the MM step sigma2_k <- sigma2_k sqrt(N_k / D_k), N_k = sum_j A_jk pi zeta_j / h2_j^2,
-  // D_k = sum_j A_jk gamma_j / h2_j (log h2_j bounded by its tangent, 1 / h2_j by Jensen: the ELBO never decreases;
-  // fixed point N_k = D_k, the stationarity condition), `inner` steps with h2_j recomputed; the intercept floored at
-  // 1e-20.
-  template <typename G>
-  void mstep_elbo(const double* zeta, const G* gamma, int inner = 10, std::mt19937_64* eng = nullptr) {
-    if (!cont && (int)atom.size() != K) mash_init();
-    for (int it = 0; it < (cont ? inner : 0); ++it) {
-      std::vector<double> NU(2 * K, 0.);
-#ifdef _OPENMP
-#pragma omp parallel num_threads(threads)
-#endif
-      {
-        std::vector<double> loc(2 * K, 0.);
-#ifdef _OPENMP
-#pragma omp for nowait
-#endif
-        for (int64_t j = 0; j < M; ++j) {
-          if (sup[j]) continue;
-          const double h = h2[j], u = pi * zeta[j] / (h * h), v = (double)gamma[j] / h;
-          const double* r = row(j);
-          for (int k = 0; k < K; ++k) {
-            const double a = k ? r[k - 1] : 1.;
-            if (a == 0.) continue;
-            loc[k] += a * u; loc[K + k] += a * v;
-          }
-        }
-#ifdef _OPENMP
-#pragma omp critical
-#endif
-        for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
-      }
-      // warm-up (cont): sigma2_k free, the MM step per column
-      for (int k = 0; k < K; ++k) if (NU[K + k] > 0) par[k] *= std::sqrt(NU[k] / NU[K + k]);
-      par[0] = std::max(par[0], 1e-20); set_all();
-    }
-    if (cont) return;
-    // MASH: the atoms are multiples of the intercept, sigma2_k = grid[m_k] sigma2_0, so sigma2_0 is one column
-    // a_j = 1 + sum_k A_jk grid[m_k] (mm_b); VI alternates mm_b and the atoms (mash_step) until no atom changes
-    // (at most 20 rounds); Gibbs (eng): one round, the atoms drawn
+  // M-step of the variance model on Fm (above) with the MASH prior: VI alternates `inner` MM steps on sigma2_0 with
+  // the update of q(a_k), until cbar changes by less than 1e-6 (at most 20 rounds). Gibbs (eng): sigma2_0 kept, a_k
+  // drawn from q.
+  void mstep(const double* e, int inner = 10, std::mt19937_64* eng = nullptr) {
+    if (fixed) return;
+    if ((int)cbar.size() != K) { cbar.assign(K, 0.); for (int k = 1; k < K; ++k) cbar[k] = par[k] / par[0]; }
+    if (eng) { update_q(e, eng); return; }
     for (int round = 0; round < 20; ++round) {
-      mm_b(zeta, gamma, inner);
-      const std::vector<int> old = atom;
-      mash_step(zeta, gamma, eng);
-      if (eng || atom == old) break;
+      mm_s0(e, inner);
+      if (update_q(e, nullptr) < 1e-6) break;
     }
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
-  // (start_zero_share) of h0; then all scaled up so that sum_j h2_j is at least total_min (start_total_min) times h0.
+  // (start_zero_share) of h0.
   // Returns sum_j h2_j over the SNPs not suppressed.
-  double start_at(const std::vector<double>& s2, double pi_, double h0, double scale, double zero_share, double total_min) {
+  double start_at(const std::vector<double>& s2, double pi_, double h0, double scale, double zero_share) {
     std::vector<double> sa(K, 0.);  // sum_j A_jk over the SNPs not suppressed
     for (int64_t j = 0; j < M; ++j) {
       if (sup[j]) continue;
@@ -549,11 +453,6 @@ struct VarModel {
       p[k] = s2[k] > 0 ? scale * s2[k] : (sa[k] > 0 ? zero_share * h0 / sa[k] : 0.);
     double tot = 0;
     for (int k = 0; k < K; ++k) tot += sa[k] * p[k];
-    if (tot > 0 && tot < total_min * h0) {
-      const double f = total_min * h0 / tot;
-      for (double& x : p) x *= f;
-      tot *= f;
-    }
     par = p; pi = pi_;
     set_all();
     return tot;
@@ -628,7 +527,7 @@ struct Fitter {
     std::vector<float> bmax(P.nb, 0.f);
     std::vector<int64_t> nvis(P.nb, 0);
     double out[10];
-    std::vector<double> zeta(M);
+    std::vector<double> zeta(M), e2v(M);
     int64_t n_free = 0;  // SNPs not suppressed (the suppressed ones are outside the model, as in stats())
     for (int64_t j = 0; j < M; ++j) n_free += !vm.sup[j];
     vtx(P, st.eta.data(), st.s.data(), threads);
@@ -644,11 +543,11 @@ struct Fitter {
       if (full) ++sweeps_full; else ++sweeps_part;
       force_full = false;
       if (it % c.refresh_every == 0) vtx(P, st.eta.data(), st.s.data(), threads);
-      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), threads);
+      stats(M, P.d.data(), nv, bt, bv, st, P.S, vm.tau.data(), vm.ltau.data(), vm.sup.data(), c, (float)sigma, out, zeta.data(), e2v.data(), threads);
       const double sg_sum = out[0], sdz = out[2], eb = out[3], sde2 = out[4], ss = out[5], glg = out[6],
                    g1lg1 = out[7], glvt = out[8];
       if (!c.fix_sigma2) {
-        vm.mstep_elbo(zeta.data(), st.gamma.data());
+        vm.mstep(e2v.data());
       }
       // prior part of the ELBO with the updated variance model (as VIPRS 0.1.5 with the updated tau)
       double glt = 0, tz = 0;
@@ -764,13 +663,9 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
   for (int b = 0; b < P.nb; ++b)
     for (int64_t j = P.snp_off[b]; j < P.snp_off[b + 1]; ++j)
       q[j] = RowStore<T>::dot(P.row(b, j), sb.data() + P.s_off[b], P.k[b]);
-  Rcpp::NumericVector vsh(K), hsh(K), hsd(K);
-  for (int64_t j = 0; j < M; ++j)
-    for (int k = 0; k < K; ++k) vsh[k] += part(j, k) * q[j];
-  for (int k = 0; k < K; ++k) {
-    hsh[k] = gib ? G.phi[k] : vsh[k];
-    hsd[k] = gib ? std::sqrt(std::max(G.phi2[k] - G.phi[k] * G.phi[k], 0.)) : NA_REAL;
-  }
+  Rcpp::NumericVector hsh(K);
+  if (gib) for (int k = 0; k < K; ++k) hsh[k] = G.phi[k];
+  else for (int64_t j = 0; j < M; ++j) for (int k = 0; k < K; ++k) hsh[k] += part(j, k) * q[j];
   Rcpp::List hyp = Rcpp::List::create(
       Rcpp::_["pi"] = res.pi, Rcpp::_["sigma"] = gib ? G.sigma : res.sigma, Rcpp::_["h2"] = gib ? G.h2 : res.h2,
       Rcpp::_["elbo"] = res.elbo, Rcpp::_["iters"] = res.iters,
@@ -783,7 +678,7 @@ Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const
                             Rcpp::_["H2_SNP"] = h2j, Rcpp::_["PART_STD"] = part,
                             Rcpp::_["sigma2"] = Rcpp::NumericVector(vm.par.begin(), vm.par.end()),
                             Rcpp::_["h2_annot"] = h2_annot(vm), Rcpp::_["h2_shapley"] = hsh,
-                            Rcpp::_["h2_shapley_sd"] = hsd, Rcpp::_["var_shapley"] = vsh, Rcpp::_["hyp"] = hyp,
+                            Rcpp::_["hyp"] = hyp,
                             Rcpp::_["extra"] = extra);
 }
 
@@ -822,7 +717,7 @@ Inputs read_inputs(Rcpp::IntegerVector blocks, Rcpp::List keep, Rcpp::NumericVec
 // start h2 (sigma = 1 - it)
 double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0, double pi, const ViprsControl& c) {
   if (!s2_init.empty()) {
-    const double tot = vm.start_at(s2_init, pi, h2_0, c.start_scale, c.start_zero_share, c.start_total_min);
+    const double tot = vm.start_at(s2_init, pi, h2_0, c.start_scale, c.start_zero_share);
     return std::min(std::max(tot, c.h2_min), c.h2_max);
   }
   vm.start(h2_0, pi);
@@ -835,9 +730,8 @@ double start_model(VarModel& vm, const std::vector<double>& s2_init, double h2_0
 // Stage 1: a chain over the cutoffs in ascending order at pi = cut_pi, each level warm-started from the one below
 // (max_iter iterations, scored converged or not); the largest cutoff unless a smaller one has |r / r_largest| >
 // rel_r_min (SBayesRC rule). Stage 2: at the chosen cutoff, from its stage-1 fit, the pi grid ascending on all data
-// with warm start (state and variance model carried over; early stop after stop_after consecutive ELBO drops among
-// the converged points); the converged point of the largest ELBO, refitted to full convergence, then the final Gibbs
-// fit.
+// with warm start (state and variance model carried over); the converged point of the largest ELBO (plus the MASH part),
+// refitted to full convergence, then the final Gibbs fit.
 template <typename T>
 Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const std::vector<char>& sup, double n_bins,
                     const std::vector<double>& s2_init, const std::vector<std::string>& files,
@@ -869,49 +763,45 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gelbo, gsec;
   std::vector<int> gstage, git, gconv;
   std::vector<std::vector<double>> gpar;
-  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0, mb = 0; State st{0, 0, 0.}; std::vector<double> par; };
+  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0; State st{0, 0, 0.}; std::vector<double> par, cbar, q; };
   double h2_0 = 0;
-  // MASH settings of a variance model
+  // MASH settings of a variance model (fix_sigma2: sigma2_k kept at the start, no MASH)
   auto setsel = [&](VarModel& v) {
-    v.grid = c.mash_grid; v.lw.clear();
+    v.grid = c.mash_grid; v.lw.clear(); v.fixed = c.fix_sigma2;
     for (double w : c.mash_w) v.lw.push_back(w > 0 ? std::log(w) : -INFINITY);
+  };
+  auto keep = [&](Best& o, const VarModel& v, double r, double pi, double sigma, const State& st) {
+    o.have = true; o.r = r; o.pi = pi; o.sigma = sigma; o.st = st; o.par = v.par; o.cbar = v.cbar; o.q = v.q;
   };
   // pi path on panel P at cutoff ic (ascending, warm start), each point recorded in the grid table. Stage 1: fitted on
   // the PUMAS training half with max_iter iterations, scored converged or not (as the fixed chain of SBayesRC). Stage 2: fitted on all data, the converged
-  // point of the largest ELBO (pi_by = "pseudo_r": as stage 1)
+  // point of the largest ELBO
   // init: warm start (effects, sigma2_k, sigma of an earlier fit; s = V' eta is recomputed on this panel)
   auto path = [&](const EigenPanel<T>& P, int ic, int stage, const std::vector<double>& grid, const Best* init) {
     Fitter<T> F(P, c, in.n, in.z, threads);
     const double h0 = F.h2_ldsc();
     std::vector<float> train, valid, n_tr;
     std::vector<double> xi;
-    const bool pseudo = stage == 1 || !c.pi_by_elbo;
+    const bool pseudo = stage == 1;
     if (pseudo) F.pumas(train, valid, n_tr, xi);
     const float* nv = pseudo ? n_tr.data() : in.n.data();
     const float* bv = pseudo ? train.data() : P.bt.data();
     State st(P.M, P.S, grid[0]);
     VarModel vm(P.M, K, A, sup, threads);
-    setsel(vm); vm.cont = stage == 1;
+    setsel(vm);
     double sigma;
     if (init) {
       st = init->st; st.s.assign(P.S, 0.f);
-      vm.par = init->par; vm.pi = grid[0]; vm.mb = init->mb; vm.set_all();
+      vm.par = init->par; vm.cbar = init->cbar; vm.q = init->q; vm.pi = grid[0]; vm.set_all();
       sigma = init->sigma;
     } else {
       for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
       sigma = 1. - start_model(vm, s2_init, h0, grid[0], c);
     }
     Best bb, bn;  // bn: the best point when none converged (stage 2 falls back on it with a warning)
-    double best_here = -INFINITY;
-    int drops = 0;
     for (double pi : grid) {
       vm.pi_move(pi);
       const auto t1 = std::chrono::steady_clock::now();
-      if (stage == 2) {  // each pi: sigma2_k free first, then the atoms from the nearest of that fit
-        vm.cont = true; vm.revive_zeros();
-        sigma = F.run(st, nv, bv, pi, vm, sigma, c.grid_max_iter, nullptr).sigma;
-        vm.cont = false; vm.atom.clear();
-      }
       const RunResult r = F.run(st, nv, bv, pi, vm, sigma, stage == 1 ? c.max_iter : c.grid_max_iter, nullptr);
       sigma = r.sigma;
       double rb = NAN, rr = NAN;
@@ -920,7 +810,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
         score(st, rb, bsb);
         rr = bsb > 0 ? rb / std::sqrt(bsb) : 0.;
       }
-      const double elbo = r.elbo + vm.logw();  // the MASH objective: ELBO + sum_k log w_{m_k}
+      const double elbo = r.elbo + vm.mash_kl();  // ELBO with the MASH part E_q[log w(a)] - E_q[log q(a)]
       const double crit = pseudo ? rr : elbo;  // pseudo r: only r > 0 can be chosen
       gstage.push_back(stage); gcut.push_back(c.cutoffs[ic]); gpi.push_back(pi); gsig.push_back(sigma);
       gh2.push_back(r.h2); gr.push_back(rr); grb.push_back(rb); gelbo.push_back(elbo); git.push_back(r.iters);
@@ -928,14 +818,9 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
       gsec.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count());
       const double rr_ = crit;
       if ((r.converged || stage == 1) && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bb.r) {
-        bb.have = true; bb.r = rr_; bb.pi = pi; bb.sigma = sigma; bb.st = st; bb.par = vm.par; bb.mb = vm.mb;
+        keep(bb, vm, rr_, pi, sigma, st);
       } else if (!bb.have && std::isfinite(rr_) && (!pseudo || rr_ > 0) && rr_ > bn.r) {
-        bn.have = true; bn.r = rr_; bn.pi = pi; bn.sigma = sigma; bn.st = st; bn.par = vm.par; bn.mb = vm.mb;
-      }
-      // early stop: only converged points count (as only they can be chosen)
-      if (r.converged) {
-        if (crit > best_here) { best_here = crit; drops = 0; }
-        else if (c.stop_after && ++drops >= c.stop_after) break;
+        keep(bn, vm, rr_, pi, sigma, st);
       }
       Rcpp::checkUserInterrupt();
     }
@@ -977,18 +862,22 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     best = path(P, ich, 2, Fg.pi_grid(), &bc[ich]);  // warm from the stage-1 fit of the chosen cutoff
   }
   if (!best.have)
-    Rcpp::stop(c.pi_by_elbo ? "no pi of the grid converged at the chosen cutoff"
-                            : "no pi of the grid converged with a positive pseudo r at the chosen cutoff");
+    Rcpp::stop("no pi of the grid converged at the chosen cutoff");
   if (Pc) P0.reset();
   Fitter<T> F(P, c, in.n, in.z, threads);
   h2_0 = F.h2_ldsc();
   VarModel bvm(P.M, K, A, sup, threads);
   setsel(bvm);
-  bvm.par = best.par; bvm.pi = best.pi; bvm.mb = best.mb; bvm.set_all();
+  bvm.par = best.par; bvm.cbar = best.cbar; bvm.q = best.q; bvm.pi = best.pi; bvm.set_all();
   State bst = best.st;
   RunResult res = F.run(bst, in.n.data(), P.bt.data(), best.pi, bvm, best.sigma, c.max_iter, nullptr);
+  const std::vector<double> qvi = bvm.q, cbvi = bvm.cbar;
   GibbsOut G;
   if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, bst, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
+  // q(a_k) of the VI refit (rows: annotations, intercept row 0 unused; columns: the atoms)
+  const int na = (int)c.mash_grid.size();
+  Rcpp::NumericMatrix qmat(K, na);
+  if (qvi.size() == (size_t)K * na) for (int k = 0; k < K; ++k) for (int m = 0; m < na; ++m) qmat(k, m) = qvi[(size_t)k * na + m];
   const int ng = gpi.size();
   Rcpp::NumericMatrix gcoef(ng, K);
   for (int g = 0; g < ng; ++g) for (int k = 0; k < K; ++k) gcoef(g, k) = gpar[g][k];
@@ -999,14 +888,13 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   return pack(F, bst, res, bvm, G, in.af, h2_0,
               Rcpp::List::create(Rcpp::_["grid"] = tab, Rcpp::_["grid_sigma2"] = gcoef,
                                  Rcpp::_["mash"] = Rcpp::List::create(
-                                     Rcpp::_["scale"] = bvm.mb,
-                                     Rcpp::_["atom"] = Rcpp::IntegerVector(bvm.atom.begin(), bvm.atom.end()),
-                                     Rcpp::_["pzero"] = Rcpp::NumericVector(G.pzero.begin(), G.pzero.end()),
+                                     Rcpp::_["sigma2_0"] = bvm.par[0],  // Gibbs keeps sigma2_0 of the VI refit
+                                     Rcpp::_["q"] = qmat, Rcpp::_["mean_atom"] = Rcpp::NumericVector(cbvi.begin(), cbvi.end()),
+                                     Rcpp::_["pzero_gibbs"] = Rcpp::NumericVector(G.pzero.begin(), G.pzero.end()),
                                      Rcpp::_["draws"] = G.draws),
                                  Rcpp::_["best_pseudo_r"] = bc[ich].r, Rcpp::_["best_pi_crit"] = best.r, Rcpp::_["n_bins"] = n_bins,
                                  Rcpp::_["cutoff"] = c.cutoffs[ich],
-                                 Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end()),
-                                 Rcpp::_["pumas_xi"] = Rcpp::NumericVector(xi0.begin(), xi0.end())));
+                                 Rcpp::_["suppressed"] = Rcpp::LogicalVector(sup.begin(), sup.end())));
 }
 
 }  // namespace
