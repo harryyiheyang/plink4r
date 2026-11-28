@@ -88,6 +88,7 @@ for (k in meth) {
   ms_ <- attr(f[[1]], "mash")
   if (!is.null(ms_) && length(ms_$mean_atom) > 1 && !all(ms_$q == 0))
     cat(k, "mash sigma2_0", signif(ms_$sigma2_0, 3), "\n  E_q[a_k]", paste(round(ms_$mean_atom[-1], 2), collapse = " "),
+        "\n  E_k", paste(round(ms_$enrichment[-1], 2), collapse = " "), "\n  se_k", paste(round(ms_$enrichment_se[-1], 2), collapse = " "),
         "\n  q(a_k=0)", paste(round(ms_$q[-1, 1], 2), collapse = " "), "\n  pzero_gibbs", paste(round(ms_$pzero_gibbs[-1], 2), collapse = " "), "\n")
   g <- attr(f[[1]], "grid")
   if (!is.null(g)) { cat(k, "grid (cutoff", attr(f[[1]], "cutoff"), "chosen)\n"); options(width = 200); print(as.data.frame(g), digits = 4, row.names = FALSE) }

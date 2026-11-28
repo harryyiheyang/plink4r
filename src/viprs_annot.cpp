@@ -11,8 +11,9 @@
 // M-step (Research Design D.1.2): sigma2_k <- S_k / sum_j A_jk, S_k = sum_j [w_jk^2 E[beta_j^2] + w_jk (1 - w_jk) h2_j],
 // whose fixed point sum_j A_jk (E[beta_j^2] - h2_j) / h2_j^2 = 0 is the stationary point of
 // Fm = -1/2 sum_j (log h2_j + E[beta_j^2] / h2_j) (SNPs not suppressed); MASH prior on the annotation variances,
-// sigma2_k = a_k sigma2_0, a_k in mash_grid (0, 1, 10, 100) with fixed weights mash_w common to every annotation: VI
-// keeps q(a_k) proportional to w_m exp(Fm(a_k = m)) (the other columns at their mean) and uses the mean E_q[a_k],
+// sigma2_k = a_k sigma2_0, a_k in mash_grid (0, 1, 10, 100) with fixed weights mash_w common to every annotation, on
+// the enrichment: E_k = sigma2_k / sigma2_0 of the free fit with its standard error se_k (sandwich over the LD blocks),
+// one observation per annotation, q(a_k = m) proportional to w_m N(E_k; grid[m], se_k^2); VI uses the mean E_q[a_k],
 // sigma2_0 by MM steps on Fm (VarModel::mstep); the Gibbs fit draws a_k from q. Start: sigma2_init (e.g.
 // ldsc_strat() tau) or all sigma2_k equal with sum_j h2_j = the naive LDSC h2.
 // Search by VI (below); final fit at the chosen pi by a short Gibbs sampler with Rao-Blackwell means
@@ -309,21 +310,107 @@ struct VarModel {
   // M-step objective (Research Design D.1.2): Fm = -1/2 sum_j (log h2_j + e_j / h2_j) over the SNPs not suppressed,
   // e_j = E[beta_j^2 | data] the posterior second moment (spike included). Its stationarity in sigma2_k,
   // sum_j A_jk (e_j - h2_j) / h2_j^2 = 0, is the fixed point of the update sigma2_k <- S_k / sum_j A_jk,
-  // S_k = sum_j [w_jk^2 e_j + w_jk (1 - w_jk) h2_j] (0/1 annotations). Here: the part of the SNPs with A_jk > 0 when
-  // sigma2_k = v (h2_j of the others kept).
-  double fcol(int k, double v, const double* e) const {
-    double f = 0;
+  // S_k = sum_j [w_jk^2 e_j + w_jk (1 - w_jk) h2_j] (0/1 annotations).
+  // MASH on the enrichment: the free fit fpar (every sigma2_k by MM on Fm) gives E_k = fpar_k / fpar_0 and its standard
+  // error se_k (sandwich over the LD blocks blk: I^-1 (sum_b g_b g_b') I^-1, g_b the gradient of the SNPs of block b,
+  // I = 1/2 sum_j a_j a_j' / h2_j^2; delta method for the ratio), one observation per annotation; then
+  // q(a_k = m) proportional to w_m N(E_k; grid[m], se_k^2).
+  std::vector<int> blk;  // LD block of each SNP
+  int nblk = 0;
+  std::vector<double> fpar, enr, enr_se;  // free fit, E_k, se_k (reported)
+  void free_fit(const double* e, int steps) {
+    if ((int)fpar.size() != K) fpar = par;
+    for (int k = 0; k < K; ++k) if (!(fpar[k] > 0)) fpar[k] = 1e-3 * fpar[0];  // 0 is a fixed point of the MM step
+    std::vector<double> hf(M);
+    for (int it = 0; it < steps; ++it) {
+      std::vector<double> NU(2 * K, 0.);
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+ : f) num_threads(threads)
+#pragma omp parallel num_threads(threads)
 #endif
+      {
+        std::vector<double> loc(2 * K, 0.);
+#ifdef _OPENMP
+#pragma omp for nowait
+#endif
+        for (int64_t j = 0; j < M; ++j) {
+          if (sup[j]) continue;
+          const double* r = row(j);
+          double h = fpar[0];
+          for (int k = 1; k < K; ++k) h += r[k - 1] * fpar[k];
+          const double u = e[j] / (h * h), v = 1. / h;
+          loc[0] += u; loc[K] += v;
+          for (int k = 1; k < K; ++k) { const double a = r[k - 1]; if (a != 0.) { loc[k] += a * u; loc[K + k] += a * v; } }
+        }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        for (int i = 0; i < 2 * K; ++i) NU[i] += loc[i];
+      }
+      for (int k = 0; k < K; ++k) if (NU[K + k] > 0 && NU[k] > 0) fpar[k] *= std::sqrt(NU[k] / NU[K + k]);
+      fpar[0] = std::max(fpar[0], 1e-20);
+    }
+  }
+  // E_k and se_k at the free fit
+  void enrichment(const double* e) {
+    Eigen::MatrixXd I = Eigen::MatrixXd::Zero(K, K), G = Eigen::MatrixXd::Zero(nblk, K);
+    std::vector<double> a(K);
     for (int64_t j = 0; j < M; ++j) {
       if (sup[j]) continue;
-      const double a = row(j)[k - 1];
-      if (a == 0.) continue;
-      const double h = h2[j] - a * par[k] + a * v;
-      f += -.5 * (std::log(h) + e[j] / h);
+      const double* r = row(j);
+      a[0] = 1.;
+      double h = fpar[0];
+      for (int k = 1; k < K; ++k) { a[k] = r[k - 1]; h += a[k] * fpar[k]; }
+      const double gi = .5 * (e[j] - h) / (h * h), ii = .5 / (h * h);
+      for (int k = 0; k < K; ++k) {
+        if (a[k] == 0.) continue;
+        G(blk[j], k) += a[k] * gi;
+        for (int l = k; l < K; ++l) if (a[l] != 0.) I(k, l) += a[k] * a[l] * ii;
+      }
     }
-    return f;
+    for (int k = 0; k < K; ++k) for (int l = 0; l < k; ++l) I(k, l) = I(l, k);
+    // centre the block gradients (their sum is ~0 at the free fit; exactly 0 only at convergence)
+    const Eigen::RowVectorXd gm = G.colwise().mean();
+    G.rowwise() -= gm;
+    const Eigen::MatrixXd Ii = I.completeOrthogonalDecomposition().pseudoInverse();
+    const Eigen::MatrixXd V = Ii * (G.transpose() * G) * Ii;
+    enr.assign(K, 0.); enr_se.assign(K, INFINITY);
+    const double s0 = fpar[0];
+    for (int k = 1; k < K; ++k) {
+      enr[k] = fpar[k] / s0;
+      const double d0 = -fpar[k] / (s0 * s0), dk = 1. / s0;
+      const double v = dk * dk * V(k, k) + 2 * dk * d0 * V(0, k) + d0 * d0 * V(0, 0);
+      enr_se[k] = v > 0 ? std::sqrt(v) : INFINITY;
+    }
+  }
+  // q(a_k) from the enrichment; VI: cbar_k = E_q[a_k]; Gibbs (eng): a_k drawn from q. Returns the largest change of cbar.
+  double update_q(std::mt19937_64* eng) {
+    const size_t A_ = grid.size();
+    if (q.size() != (size_t)K * A_) q.assign((size_t)K * A_, 0.);
+    double dmax = 0;
+    std::vector<double> u(A_);
+    for (int k = 1; k < K; ++k) {
+      double um = -INFINITY;
+      const double se = enr_se[k];
+      for (size_t m = 0; m < A_; ++m) {
+        const double d = (enr[k] - grid[m]) / se;
+        u[m] = lw[m] + (std::isfinite(se) ? -.5 * d * d : 0.);
+        um = std::max(um, u[m]);
+      }
+      double z = 0;
+      for (size_t m = 0; m < A_; ++m) { u[m] = std::exp(u[m] - um); z += u[m]; }
+      double cb = 0;
+      for (size_t m = 0; m < A_; ++m) { q[(size_t)k * A_ + m] = u[m] / z; cb += u[m] / z * grid[m]; }
+      if (eng) {
+        double x = std::uniform_real_distribution<double>(0., z)(*eng);
+        size_t pick = 0;
+        for (; pick < A_ - 1 && (x -= u[pick]) > 0; ++pick) {}
+        cb = grid[pick];
+      }
+      dmax = std::max(dmax, std::fabs(cb - cbar[k]) / std::max(cbar[k], 1.));
+      cbar[k] = cb; par[k] = cb * par[0];
+    }
+    set_all();
+    return dmax;
   }
   // E_q[log w(a_k)] - E_q[log q(a_k)] summed over the annotations: the MASH part of the ELBO (0 when fixed)
   double mash_kl() const {
@@ -356,42 +443,6 @@ struct VarModel {
       set_all();
     }
   }
-  // q(a_k) of each annotation in turn, the others at their current mean: q(a_k = m) proportional to
-  // w_m exp(Fm(sigma2_k = grid[m] sigma2_0)); VI: cbar_k = E_q[a_k]; Gibbs (eng): a_k drawn from q, cbar_k = the draw.
-  // Returns the largest change of cbar_k.
-  double update_q(const double* e, std::mt19937_64* eng) {
-    const size_t A_ = grid.size();
-    if (q.size() != (size_t)K * A_) q.assign((size_t)K * A_, 0.);
-    double dmax = 0;
-    std::vector<double> u(A_);
-    for (int k = 1; k < K; ++k) {
-      double um = -INFINITY;
-      for (size_t m = 0; m < A_; ++m) { u[m] = fcol(k, grid[m] * par[0], e) + lw[m]; um = std::max(um, u[m]); }
-      double z = 0;
-      for (size_t m = 0; m < A_; ++m) { u[m] = std::exp(u[m] - um); z += u[m]; }
-      double cb = 0;
-      for (size_t m = 0; m < A_; ++m) { q[(size_t)k * A_ + m] = u[m] / z; cb += u[m] / z * grid[m]; }
-      if (eng) {
-        double x = std::uniform_real_distribution<double>(0., z)(*eng);
-        size_t pick = 0;
-        for (; pick < A_ - 1 && (x -= u[pick]) > 0; ++pick) {}
-        cb = grid[pick];
-      }
-      dmax = std::max(dmax, std::fabs(cb - cbar[k]) / std::max(cbar[k], 1.));
-      const double nv = cb * par[0];
-      if (nv != par[k]) {  // h2_j of the members
-#ifdef _OPENMP
-#pragma omp parallel for num_threads(threads)
-#endif
-        for (int64_t j = 0; j < M; ++j) { const double a = row(j)[k - 1]; if (a != 0.) h2[j] += a * (nv - par[k]); }
-        par[k] = nv;
-      }
-      cbar[k] = cb;
-    }
-    set_all();
-    return dmax;
-  }
-
   VarModel(int64_t M_, int K_, const std::vector<double>& A_, const std::vector<char>& sup_, int threads_)
       : M(M_), K(K_), A(A_), sup(sup_), par(K_, 0.), h2(M_, 1.), tau(M_, 1.f), ltau(M_, 0.f), threads(threads_) {}
 
@@ -425,17 +476,15 @@ struct VarModel {
     std::fill(par.begin(), par.end(), h2_0 / s);
     set_all();
   }
-  // M-step of the variance model on Fm (above) with the MASH prior: VI alternates `inner` MM steps on sigma2_0 with
-  // the update of q(a_k), until cbar changes by less than 1e-6 (at most 20 rounds). Gibbs (eng): `inner` MM steps on
-  // sigma2_0, then a_k drawn from q (e: the stochastic-approximation average of the RB second moments).
+  // M-step of the variance model with the MASH prior on the enrichment: `inner` MM steps of the free fit, E_k and se_k,
+  // q(a_k) (VI: the mean; Gibbs, eng: a draw), then `inner` MM steps on sigma2_0 with sigma2_k = cbar_k sigma2_0
+  // (e: VI second moments; Gibbs: the stochastic-approximation average of the RB second moments).
   void mstep(const double* e, int inner = 10, std::mt19937_64* eng = nullptr) {
     if (fixed) return;
     if ((int)cbar.size() != K) { cbar.assign(K, 0.); for (int k = 1; k < K; ++k) cbar[k] = par[k] / par[0]; }
-    if (eng) { mm_s0(e, inner); update_q(e, eng); return; }
-    for (int round = 0; round < 20; ++round) {
-      mm_s0(e, inner);
-      if (update_q(e, nullptr) < 1e-6) break;
-    }
+    free_fit(e, inner);
+    if (K > 1) { enrichment(e); update_q(eng); }
+    mm_s0(e, inner);
   }
   // start from given sigma2_k (e.g. stratified LDSC tau_k), h0 the LDSC h2: negative values set to 0; every sigma2_k
   // times scale (start_scale); a column at 0 (intercept included) set so that its h2 (sum_j A_jk sigma2_k) is zero_share
@@ -738,6 +787,9 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   std::unique_ptr<EigenPanel<T>> P0(
       new EigenPanel<T>(plink4r::load_eigen_panel<T>(files, in.blocks, in.keep, in.bstd, 0., threads)));
   const int nc = (int)c.cutoffs.size();
+  std::vector<int> blk0(P0->M);  // LD block of each SNP (the jackknife units of the enrichment se)
+  for (int b = 0; b < P0->nb; ++b) for (int64_t j = P0->snp_off[b]; j < P0->snp_off[b + 1]; ++j) blk0[j] = b;
+  const int nblk0 = P0->nb;
   std::vector<std::vector<int>> ks(nc, std::vector<int>(P0->nb));
   for (int i = 0; i < nc; ++i)
     for (int b = 0; b < P0->nb; ++b) {
@@ -762,15 +814,15 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   std::vector<double> gcut, gpi, gsig, gh2, gr, grb, gelbo, gsec;
   std::vector<int> gstage, git, gconv;
   std::vector<std::vector<double>> gpar;
-  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0; State st{0, 0, 0.}; std::vector<double> par, cbar, q; };
+  struct Best { bool have = false; double r = -INFINITY, pi = 0, sigma = 0; State st{0, 0, 0.}; std::vector<double> par, cbar, q, fpar; };
   double h2_0 = 0;
   // MASH settings of a variance model (fix_sigma2: sigma2_k kept at the start, no MASH)
   auto setsel = [&](VarModel& v) {
-    v.grid = c.mash_grid; v.lw.clear(); v.fixed = c.fix_sigma2;
+    v.grid = c.mash_grid; v.lw.clear(); v.fixed = c.fix_sigma2; v.blk = blk0; v.nblk = nblk0;
     for (double w : c.mash_w) v.lw.push_back(w > 0 ? std::log(w) : -INFINITY);
   };
   auto keep = [&](Best& o, const VarModel& v, double r, double pi, double sigma, const State& st) {
-    o.have = true; o.r = r; o.pi = pi; o.sigma = sigma; o.st = st; o.par = v.par; o.cbar = v.cbar; o.q = v.q;
+    o.have = true; o.r = r; o.pi = pi; o.sigma = sigma; o.st = st; o.par = v.par; o.cbar = v.cbar; o.q = v.q; o.fpar = v.fpar;
   };
   // pi path on panel P at cutoff ic (ascending, warm start), each point recorded in the grid table. Stage 1: fitted on
   // the PUMAS training half with max_iter iterations, scored converged or not (as the fixed chain of SBayesRC). Stage 2: fitted on all data, the converged
@@ -791,7 +843,7 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
     double sigma;
     if (init) {
       st = init->st; st.s.assign(P.S, 0.f);
-      vm.par = init->par; vm.cbar = init->cbar; vm.q = init->q; vm.pi = grid[0]; vm.set_all();
+      vm.par = init->par; vm.cbar = init->cbar; vm.q = init->q; vm.fpar = init->fpar; vm.pi = grid[0]; vm.set_all();
       sigma = init->sigma;
     } else {
       for (int64_t j = 0; j < P.M; ++j) if (sup[j]) st.gamma[j] = 0.f;
@@ -867,10 +919,10 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
   h2_0 = F.h2_ldsc();
   VarModel bvm(P.M, K, A, sup, threads);
   setsel(bvm);
-  bvm.par = best.par; bvm.cbar = best.cbar; bvm.q = best.q; bvm.pi = best.pi; bvm.set_all();
+  bvm.par = best.par; bvm.cbar = best.cbar; bvm.q = best.q; bvm.fpar = best.fpar; bvm.pi = best.pi; bvm.set_all();
   State bst = best.st;
   RunResult res = F.run(bst, in.n.data(), P.bt.data(), best.pi, bvm, best.sigma, c.max_iter, nullptr);
-  const std::vector<double> qvi = bvm.q, cbvi = bvm.cbar;
+  const std::vector<double> qvi = bvm.q, cbvi = bvm.cbar, envi = bvm.enr, sevi = bvm.enr_se;
   GibbsOut G;
   if (c.gibbs_draws > 0) G = gibbs_fit(P, in.n, c, bst, bvm, res.sigma, c.gibbs_burn, c.gibbs_draws, threads);
   // q(a_k) of the VI refit (rows: annotations, intercept row 0 unused; columns: the atoms)
@@ -889,6 +941,8 @@ Rcpp::List fit_path(const Inputs& in, const std::vector<double>& A, int K, const
                                  Rcpp::_["mash"] = Rcpp::List::create(
                                      Rcpp::_["sigma2_0"] = bvm.par[0],  // Gibbs: the mean over the draws
                                      Rcpp::_["q"] = qmat, Rcpp::_["mean_atom"] = Rcpp::NumericVector(cbvi.begin(), cbvi.end()),
+                                     Rcpp::_["enrichment"] = Rcpp::NumericVector(envi.begin(), envi.end()),
+                                     Rcpp::_["enrichment_se"] = Rcpp::NumericVector(sevi.begin(), sevi.end()),
                                      Rcpp::_["pzero_gibbs"] = Rcpp::NumericVector(G.pzero.begin(), G.pzero.end()),
                                      Rcpp::_["draws"] = G.draws),
                                  Rcpp::_["best_pseudo_r"] = bc[ich].r, Rcpp::_["best_pi_crit"] = best.r, Rcpp::_["n_bins"] = n_bins,

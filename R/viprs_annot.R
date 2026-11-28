@@ -11,8 +11,9 @@
 #' second moment, spike included), whose fixed point sum_j A_jk (E[beta_j^2] - h2_j) / h2_j^2 = 0 is the stationary point
 #' of Fm = -1/2 sum_j (log h2_j + E[beta_j^2] / h2_j) over the SNPs not suppressed. MASH prior on the annotation
 #' variances: sigma2_k = a_k sigma2_0, a_k in `mash_grid` (0, 1, 10, 100) with fixed weights `mash_w` (0.5, 0.3, 0.1,
-#' 0.1) common to every annotation; VI averages over a_k with q(a_k = m) proportional to w_m exp(Fm(a_k = m)) (the other
-#' columns at their mean) and uses E_q[a_k]; sigma2_0 by monotone MM steps on Fm; the Gibbs fit repeats the M-step on
+#' 0.1) common to every annotation, on the enrichment: E_k = sigma2_k / sigma2_0 of the free fit (every sigma2_k by
+#' MM on Fm) with its standard error se_k (sandwich over the LD blocks), one observation per annotation,
+#' q(a_k = m) proportional to w_m N(E_k; c_m, se_k^2); VI uses E_q[a_k]; sigma2_0 by monotone MM steps on Fm; the Gibbs fit repeats the M-step on
 #' stochastic-approximation averages of the Rao-Blackwell second moments (sigma2_0 by MM, a_k drawn from q).
 #' Output: the MMSE allocation of the posterior mean, BETA_k = w_jk BETA (k = intercept and each annotation); the
 #' columns sum to BETA for every SNP and the annotation-specific scores sum to the total PRS for every individual.
@@ -52,7 +53,7 @@
 #'   over the SNPs not suppressed; k = intercept: M sigma2_0) and `h2_share`; `h2_shapley` (heritability of each
 #'   column as its Shapley value in beta' R beta: the mean over the draws of beta^(k)' R beta, cross terms split evenly
 #'   between the two columns, so the values add up to the total; VI: b_k' R b), `mash` (sigma2_0, q: q(a_k) of the VI
-#'   refit, annotations x atoms; mean_atom: E_q[a_k]; pzero_gibbs: the mean over the draws of q(a_k = 0); draws),
+#'   refit, annotations x atoms; mean_atom: E_q[a_k]; enrichment, enrichment_se: E_k and se_k of the VI refit; pzero_gibbs: the mean over the draws of q(a_k = 0); draws),
 #'   `grid` (one row per fit: stage, cutoff, pi, its pseudo-validation r (NaN for ELBO fits on all data) and ELBO),
 #'   `grid_sigma2` (sigma2_k at each grid point), `cutoff`, `best_pseudo_r` (stage 1, the chosen cutoff) and
 #'   `best_pi_crit` (stage 2: ELBO plus the MASH part at the chosen pi), `n_bins`, `n_suppressed`, and those of [viprs()].
@@ -112,6 +113,7 @@ viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, ski
   dimnames(mash$q) <- list(nm, paste0("a", ctl$mash_grid))
   if (length(mash$mean_atom) == length(nm)) names(mash$mean_atom) <- nm
   if (length(mash$pzero_gibbs) == length(nm)) names(mash$pzero_gibbs) <- nm
+  if (length(mash$enrichment) == length(nm)) { names(mash$enrichment) <- nm; names(mash$enrichment_se) <- nm }
   attr(out, "mash") <- mash
   attr(out, "cutoff") <- res$extra$cutoff
   .prs_write(out, output)
