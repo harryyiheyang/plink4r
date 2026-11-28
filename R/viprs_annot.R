@@ -23,7 +23,7 @@
 #' at the chosen cutoff, warm-started from its stage-1 fit: the pi grid of [viprs()] ascending on all data, each point
 #' warm-started from the last; the converged point of the largest ELBO + E_q[log w(a)] - E_q[log q(a)] is refitted to
 #' full convergence. The output sigma2_k of the Gibbs fit is its mean over the draws.
-#' `sigma2_init` sets the sigma2_k of the first fit of each stage, e.g. the stratified LDSC estimates of [ldsc_strat()].
+#' `sigma2_init` sets the sigma2_k of the first fit (stage 1, lowest cutoff; later fits are warm-started), e.g. the stratified LDSC estimates of [ldsc_strat()].
 #' Final fit at the chosen pi, started from the VI refit: a short Gibbs sampler (`gibbs_burn` + `gibbs_draws` sweeps)
 #' with Rao-Blackwell means; the atoms a_k drawn from q on stochastic-approximation averages of E[beta_j^2], sigma by
 #' stochastic approximation. BETA is the mean of the conditional posterior means m_j over the draws and
@@ -55,7 +55,7 @@
 #'   refit, annotations x atoms; mean_atom: E_q[a_k]; pzero_gibbs: the mean over the draws of q(a_k = 0); draws),
 #'   `grid` (one row per fit: stage, cutoff, pi, its pseudo-validation r (NaN for ELBO fits on all data) and ELBO),
 #'   `grid_sigma2` (sigma2_k at each grid point), `cutoff`, `best_pseudo_r` (stage 1, the chosen cutoff) and
-#'   `best_pi_crit` (stage 2: ELBO or pseudo r of the chosen pi), `n_bins`, `n_suppressed`, and those of [viprs()].
+#'   `best_pi_crit` (stage 2: ELBO plus the MASH part at the chosen pi), `n_bins`, `n_suppressed`, and those of [viprs()].
 #' @export
 viprs_annot <- function(sumstat, ld_dir, annot, ref = NULL, bin_file = NULL, skip_annot = NULL, sigma2_init = NULL,
                         fp16 = TRUE, control = viprs_annot_control(), threads = 4L, output = NULL) {

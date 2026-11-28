@@ -105,14 +105,13 @@ GibbsOut gibbs_fit(const EigenPanel<T>& P, const std::vector<float>& n, const Vi
     }
     // the MASH atoms drawn from q(a_k) of the M-step objective on the stochastic-approximation average of the RB
     // second moments (sigma2_0 kept)
-    for (int64_t j = 0; j < M; ++j) ebar[j] = (1. - a) * ebar[j] + a * e[j];
+    const double ae = it == 1 ? 1. : a;  // the first sweep starts the average
+    for (int64_t j = 0; j < M; ++j) ebar[j] = (1. - ae) * ebar[j] + ae * e[j];
     if (!c.fix_sigma2) {
+      if (it > burn) for (int kk = 0; kk < K; ++kk) psum[kk] += vm.par[kk];  // sigma2_k of this sweep (as w_jk above)
       std::mt19937_64 meng(c.seed + 0x2545F4914F6CDD1Dull * (unsigned long long)it);
       vm.mstep(ebar.data(), 10, &meng);
-      if (it > burn) {
-        for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.q[(size_t)kk * vm.grid.size()];
-        for (int kk = 0; kk < K; ++kk) psum[kk] += vm.par[kk];
-      }
+      if (it > burn) for (int kk = 1; kk < K; ++kk) o.pzero[kk] += vm.q[(size_t)kk * vm.grid.size()];
     }
     vm.set_all();
     const double ns = 1. - 2. * eb + ss;

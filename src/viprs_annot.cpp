@@ -240,8 +240,8 @@ void vz(const EigenPanel<T>& P, const float* z, float* y, int threads) {
 // [0] sum gamma, [1] sum zeta, [2] sum d E[beta^2], [3] eta'bt, [4] sum d eta^2, [5] s's, [6] sum gamma log gamma,
 // [7] sum (1-gamma) log(1-gamma), [8] sum gamma sum_c psi_c (log vt_c + log kap_c - 2 log prop_c + 2 log psi_c),
 // [9] eta'bv (bv may be null). zeta_j = gamma sum_c psi_c (mu_c^2 + 1/vt_c) / kap_c (E[beta^2] on the scale of
-// h2_j, prior mean h2_j; the M-step statistic), also returned per SNP. One class: zeta = E[beta^2], [8] = sum gamma
-// log vt (VIPRS).
+// h2_j, for the ELBO) and e2v_j = E[beta_j^2 | data] (the M-step statistic) also returned per SNP. One class:
+// zeta = e2v, [8] = sum gamma log vt (VIPRS).
 void stats(int64_t M, const float* d, const float* n, const float* bt, const float* bv, const State& st, int64_t S,
            const float* tau, const float* ltau, const char* sup, const ViprsControl& c, float sigma, double* out,
            double* zeta, double* e2v, int threads) {
@@ -412,11 +412,12 @@ struct VarModel {
       tau[j] = (float)t; ltau[j] = (float)std::log(t);
     }
   }
-  // start: all sigma2_k equal, sum_j h2_j = h2 (LDSC start)
+  // start: all sigma2_k equal, sum_j h2_j = h2 over the SNPs not suppressed (LDSC start)
   void start(double h2_0, double pi_) {
     pi = pi_;
     double s = 0;
     for (int64_t j = 0; j < M; ++j) {
+      if (sup[j]) continue;
       s += 1.;
       const double* r = row(j);
       for (int k = 1; k < K; ++k) s += r[k - 1];
@@ -632,9 +633,7 @@ Rcpp::NumericVector h2_annot(const VarModel& vm) {
 
 // Output from the final fit: Gibbs + RB (G.draws > 0) or the VI state (st, vm). Columns: the mean of w_jk m_j (Gibbs)
 // or w_jk eta_j (VI); per SNP they sum to BETA_STD. Heritability per column: the Shapley value in beta'R beta,
-// h2_shapley = mean over the draws of beta^(k)' R beta (sd over the draws; VI: b_k' R b), and the Shapley value of the
-// partitioned PRS themselves, var_shapley = b_k' R b with b the output means (sum_k = b' R b, the variance of the PRS
-// on the panel).
+// h2_shapley = mean over the draws of beta^(k)' R beta (VI: b_k' R b).
 template <typename T>
 Rcpp::List pack(const Fitter<T>& F, const State& st, const RunResult& res, const VarModel& vm, const GibbsOut& G,
                 const std::vector<double>& af, double h2_0, Rcpp::List extra) {

@@ -100,9 +100,9 @@ ratio = np.array([r for _, _, r in cats])
 # class; DIST = mix: the slab class kappa (MIX, MIXVAR) common to the components of the SNP, normal components
 # causal probability pi f_j, f_j = the largest factor of the categories of SNP j (1 outside): the effect variances of a
 # causal SNP are divided by f_j, so E[beta_j^2] (the variance model) does not change, only where it comes from
-fj = np.ones(M)
-for i, f_ in enumerate(pfac):
-    if f_ != 1.: fj = np.where(memb[:, i] > 0, np.maximum(fj, f_), fj)
+fj = np.full(M, np.nan)
+for i, f_ in enumerate(pfac): fj = np.where(memb[:, i] > 0, np.fmax(fj, f_), fj)
+fj = np.where(np.isnan(fj), 1., fj)
 pj = np.minimum(pi * fj, 1.)
 causal = (rng.random(M) < pj) & ~sup
 C = np.zeros((M, len(cats) + 1))
